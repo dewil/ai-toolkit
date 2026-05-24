@@ -42,6 +42,19 @@ wiki:
   - agents/note-writer.md
   - agents/librarian.md
 
-management: []
+management:
+  - rules/meetings.md
+  - rules/tasks-tracking.md
+  - rules/artifacts-structure.md
+  - rules/meeting-transcripts.md
+  - rules/name-cross-check.md
+  - rules/google-sheets-mcp.md
+  - rules/estimates-in-hours.md
+  - agents/tracker.md
 
-education: []
+education:
+  - rules/lecture-notes.md
+  - rules/homework.md
+  - rules/course-structure.md
+  - agents/note-taker.md
+  - agents/tutor.md
