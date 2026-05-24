@@ -42,9 +42,10 @@
 
 **B. Канонические правила в `.claude/rules/`** (источник - `<canon_base>/rules/`):
 
-- karpathy-guidelines.md, subagents-usage.md, docs-maintenance.md
-- typography-ru.md уже создан в start.md (ШАГ 7), здесь не трогаем
+- typography-ru.md, subagents-usage.md, docs-maintenance.md
 - project-structure.md - локально создаваемый шаблон с TODO (содержимое в ШАГ 4c)
+
+`karpathy-guidelines.md` намеренно не идет в общий scaffold - он специфичен для кодинга (упоминает тесты, рефакторинг, "LLM coding mistakes") и подключается в `bootstrap-03-coding`.
 
 **C. Канонические скиллы в `.claude/skills/`** (источник - `<canon_base>/skills/`):
 
@@ -63,7 +64,7 @@
 Сравни целевое с фактическим. Для каждого пункта - статус и действие:
 
 - "отсутствует, создам" - перечисли с буквальным путем.
-- "есть, не трону" - перечисли (например, `.claude/rules/karpathy-guidelines.md` уже есть, не перезаписываем).
+- "есть, не трону" - перечисли (например, `.claude/rules/subagents-usage.md` уже есть, не перезаписываем).
 - "есть, могу дополнить" - для CLAUDE.md перечисли отсутствующие @-ссылки; для settings.json перечисли отсутствующие базовые deny-правила; для .gitignore перечисли отсутствующие записи. Дополнения предлагаешь, но НЕ применяешь без отдельного "ок".
 
 Покажи план таблицей: `файл | статус | действие | источник`. Жди "ок". Без подтверждения - не действуй.
@@ -91,7 +92,6 @@ canon:
   bootstrapped_at: <ISO-дата сегодня>
 files:
   - rules/typography-ru.md
-  - rules/karpathy-guidelines.md
   - rules/subagents-usage.md
   - rules/docs-maintenance.md
   - agents/architect.md
@@ -162,7 +162,6 @@ TODO: заполни дерево папок проекта с пояснени�
 ```markdown
 Общие поведенческие правила (применяются всегда):
 
-@.claude/rules/karpathy-guidelines.md
 @.claude/rules/subagents-usage.md
 @.claude/rules/docs-maintenance.md
 @.claude/rules/project-structure.md

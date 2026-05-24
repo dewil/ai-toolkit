@@ -375,7 +375,6 @@ description: Оценки трудоемкости в часах, не в чел
 ## Подключенные правила
 
 @.claude/rules/typography-ru.md
-@.claude/rules/karpathy-guidelines.md
 @.claude/rules/subagents-usage.md
 @.claude/rules/docs-maintenance.md
 @.claude/rules/meetings.md

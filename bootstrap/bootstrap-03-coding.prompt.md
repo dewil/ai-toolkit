@@ -7,9 +7,9 @@
 Добавляет к общему scaffold:
 
 - агентов: `debugger`, `implementer`, `code-reviewer`
-- правила: `tests-coverage.md`, `error-exposure.md`
+- правила: `karpathy-guidelines.md`, `tests-coverage.md`, `error-exposure.md`
 - стек-специфичные allow в `.claude/settings.json` (по подтверждению, по списку)
-- `@-`ссылки на `tests-coverage.md` и `error-exposure.md` в `CLAUDE.md`
+- `@-`ссылки на `karpathy-guidelines.md`, `tests-coverage.md` и `error-exposure.md` в `CLAUDE.md`
 - PostToolUse-хуки для авто-проверок (синтаксический lint после Edit/Write) - по подтверждению, на основе стека.
 
 ---
@@ -29,7 +29,7 @@
 - pwd - корень проекта.
 - Перечисли существующие:
   - .claude/agents/debugger.md, implementer.md, code-reviewer.md
-  - .claude/rules/tests-coverage.md, error-exposure.md
+  - .claude/rules/karpathy-guidelines.md, tests-coverage.md, error-exposure.md
   - .claude/canon.yaml - есть ли (должен быть после bootstrap-02), что в `files`
   - CLAUDE.md - какие @-ссылки уже есть
   - .claude/settings.json - какие allow уже есть (для сопоставления со стеком)
@@ -50,12 +50,13 @@ A. .claude/agents/ (источник - `<canon_base>/agents/`):
    - code-reviewer.md
 
 B. .claude/rules/ (источник - `<canon_base>/rules/`):
+   - karpathy-guidelines.md
    - tests-coverage.md
    - error-exposure.md
 
-C. CLAUDE.md содержит ссылки `@.claude/rules/tests-coverage.md` и `@.claude/rules/error-exposure.md`.
+C. CLAUDE.md содержит ссылки `@.claude/rules/karpathy-guidelines.md`, `@.claude/rules/tests-coverage.md` и `@.claude/rules/error-exposure.md`.
 
-D. .claude/canon.yaml -> `files` содержит 5 файлов специализации (agents/debugger.md, agents/implementer.md, agents/code-reviewer.md, rules/tests-coverage.md, rules/error-exposure.md).
+D. .claude/canon.yaml -> `files` содержит 6 файлов специализации (agents/debugger.md, agents/implementer.md, agents/code-reviewer.md, rules/karpathy-guidelines.md, rules/tests-coverage.md, rules/error-exposure.md).
 
 E. .claude/settings.json дополнен стек-специфичными allow по результату аудита (предложение, по подтверждению).
 
@@ -67,9 +68,9 @@ F. .claude/settings.json содержит секцию `hooks` с PostToolUse-п
 
 Отдельно покажи список стек-специфичных allow, которые предлагаешь добавить в settings.json, исходя из аудита (см. ниже шаблоны). НЕ применяй без отдельного "ок".
 
-Для CLAUDE.md - если файла нет или нет ссылок `@.claude/rules/tests-coverage.md` / `@.claude/rules/error-exposure.md` - покажи, что добавишь.
+Для CLAUDE.md - если файла нет или нет ссылок `@.claude/rules/karpathy-guidelines.md` / `@.claude/rules/tests-coverage.md` / `@.claude/rules/error-exposure.md` - покажи, что добавишь.
 
-Для canon.yaml - покажи, какие 5 записей допишешь в `files`.
+Для canon.yaml - покажи, какие 6 записей допишешь в `files`.
 
 Жди "ок". Без подтверждения - не действуй.
 
@@ -92,6 +93,7 @@ F. .claude/settings.json содержит секцию `hooks` с PostToolUse-п
   - agents/debugger.md
   - agents/implementer.md
   - agents/code-reviewer.md
+  - rules/karpathy-guidelines.md
   - rules/tests-coverage.md
   - rules/error-exposure.md
 ```
@@ -100,7 +102,7 @@ F. .claude/settings.json содержит секцию `hooks` с PostToolUse-п
 
 ### 4c. Дополни существующие файлы
 
-Дополнения CLAUDE.md (ссылки `@.claude/rules/tests-coverage.md`, `@.claude/rules/error-exposure.md`) и settings.json (allow, hooks) - по отдельному "ок" на каждый пункт.
+Дополнения CLAUDE.md (ссылки `@.claude/rules/karpathy-guidelines.md`, `@.claude/rules/tests-coverage.md`, `@.claude/rules/error-exposure.md`) и settings.json (allow, hooks) - по отдельному "ок" на каждый пункт.
 
 ШАГ 5. Отчет.
 
