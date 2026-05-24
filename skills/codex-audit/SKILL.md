@@ -160,6 +160,11 @@ pr = last['rate_limits'].get('primary') or {}
 used = pr.get('used_percent', 0)
 left = max(0.0, 100.0 - used)
 rt = pr.get('resets_at')
+if isinstance(rt, str):
+    try:
+        rt = datetime.datetime.fromisoformat(rt.replace('Z','+00:00')).timestamp()
+    except Exception:
+        rt = None
 now = datetime.datetime.now(datetime.timezone.utc).timestamp()
 reset = fmt_until(max(0, rt - now)) if rt else "unknown"
 if left < 10:
@@ -199,13 +204,23 @@ Codex CLI пишет лог сессии в `~/.codex/sessions/<YYYY>/<MM>/<DD>/
 
 ```bash
 SESSION_ID=$(awk -F': ' '/^session id:/ {print $2; exit}' docs/dev/audit-report-<topic>.md)
-ROLLOUT=$(ls -1t ~/.codex/sessions/*/*/*/rollout-*-${SESSION_ID}.jsonl 2>/dev/null | head -1)
-[ -z "$ROLLOUT" ] && ROLLOUT=$(ls -1t ~/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -1)
+if [ -z "$SESSION_ID" ]; then
+  ROLLOUT=""
+else
+  ROLLOUT=$(ls -1t ~/.codex/sessions/*/*/*/rollout-*-${SESSION_ID}.jsonl 2>/dev/null | head -1)
+fi
 
 {
   echo
   echo "## Rate limits"
   echo
+  if [ -z "$ROLLOUT" ]; then
+    if [ -z "$SESSION_ID" ]; then
+      echo "no session id in report header - rate limits not collected"
+    else
+      echo "no rollout file for session $SESSION_ID - rate limits not collected"
+    fi
+  else
   python3 - "$ROLLOUT" <<'PY'
 import json, sys, datetime
 
@@ -247,12 +262,18 @@ for key in ('primary', 'secondary'):
     used  = w.get('used_percent', 0)
     left  = max(0.0, 100.0 - used)
     rt    = w.get('resets_at')
+    if isinstance(rt, str):
+        try:
+            rt = datetime.datetime.fromisoformat(rt.replace('Z','+00:00')).timestamp()
+        except Exception:
+            rt = None
     if rt:
         secs = max(0, rt - now)
         print(f"{label:>4}: left {left:.0f}% (used {used:.0f}%), reset {fmt_until(secs)}")
     else:
         print(f"{label:>4}: left {left:.0f}% (used {used:.0f}%)")
 PY
+  fi
 } >> docs/dev/audit-report-<topic>.md
 ```
 
@@ -273,8 +294,9 @@ PY
 
 ### Если статистика не нашлась
 
-- Файл rollout может не появиться, если codex упал на старте (например, проблемы с авторизацией) или сессия запущена с `--ephemeral`. В этом случае команда напечатает `no rate_limits event found` или fallback на другой свежий rollout - проверять `SESSION_ID` совпадение с шапкой отчета перед тем, как доверять цифрам.
+- Файл rollout может не появиться, если codex упал на старте (например, проблемы с авторизацией) или сессия запущена с `--ephemeral`. В этом случае команда напечатает `no rollout file for session <id>` либо (если в шапке отчета нет `session id:`) `no session id in report header`. Это безопаснее, чем подцеплять чужой rollout - статистики просто не будет, и пользователь увидит причину.
 - Не использовать `--ephemeral` в этом скилле - теряется возможность собрать статистику.
+- Если в шапке отчета нет строки `session id:` - проверь сам план аудита: в "Формат ответа" должно быть прямое указание codex'у первой строкой отчета писать `session id: <id>`. Без этой строки пост-сборка статистики не работает.
 
 ## Ограничения
 
