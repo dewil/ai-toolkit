@@ -46,6 +46,7 @@
 После bootstrap в проекте появляется `.claude/canon.yaml`:
 
 ```yaml
+project_type: coding  # coding | management | education | documentation | claude-tooling | wiki
 canon:
   repo: https://github.com/dewil/claude-toolkit
   raw_base: https://raw.githubusercontent.com/dewil/claude-toolkit/main
@@ -60,7 +61,7 @@ skip_sync: []         # есть в каноне, проект сознател�
 upstream_pending: []  # помечены к выносу в канон
 ```
 
-`canon.yaml` коммитится в репозиторий проекта. Источник истины для sync'а.
+`canon.yaml` коммитится в репозиторий проекта. Источник истины для sync'а. Поле `project_type` проставляется на шаге `bootstrap-03-<тип>` и используется sync'ом для определения, какие новые канон-файлы предлагать (autodiscovery).
 
 ### Sync
 
@@ -95,28 +96,41 @@ claude-toolkit/
 │   ├── bootstrap-03-claude-tooling.prompt.md
 │   └── bootstrap-03-wiki.prompt.md
 ├── rules/                                       # КАНОН: правила поведения Claude
-│   ├── typography-ru.md
-│   ├── karpathy-guidelines.md
-│   ├── subagents-usage.md
-│   ├── docs-maintenance.md
+│   ├── typography-ru.md                         # universal
+│   ├── subagents-usage.md                       # universal
+│   ├── docs-maintenance.md                      # universal
+│   ├── karpathy-guidelines.md                   # coding-специализация
 │   ├── tests-coverage.md                        # coding-специализация
 │   ├── error-exposure.md                        # coding-специализация
 │   ├── prompt-conventions.md                    # claude-tooling-специализация
 │   ├── wiki-notes-style.md                      # wiki-специализация
-│   └── wiki-linking-obsidian.md                 # wiki-специализация
+│   ├── wiki-linking-obsidian.md                 # wiki-специализация
+│   ├── meetings.md                              # management-специализация
+│   ├── tasks-tracking.md                        # management-специализация
+│   ├── artifacts-structure.md                   # management-специализация
+│   ├── meeting-transcripts.md                   # management-специализация
+│   ├── name-cross-check.md                      # management-специализация
+│   ├── google-sheets-mcp.md                     # management-специализация
+│   ├── estimates-in-hours.md                    # management-специализация
+│   ├── lecture-notes.md                         # education-специализация
+│   ├── homework.md                              # education-специализация
+│   └── course-structure.md                      # education-специализация
 ├── agents/                                      # КАНОН: описания субагентов
-│   ├── architect.md
-│   ├── explorer.md
-│   ├── searcher.md
-│   ├── planner.md
-│   ├── summarizer.md
+│   ├── architect.md                             # universal
+│   ├── explorer.md                              # universal
+│   ├── searcher.md                              # universal
+│   ├── planner.md                               # universal
+│   ├── summarizer.md                            # universal
 │   ├── debugger.md                              # coding-специализация
 │   ├── implementer.md                           # coding-специализация
 │   ├── code-reviewer.md                         # coding-специализация
 │   ├── copy-editor.md                           # documentation-специализация
 │   ├── prompt-reviewer.md                       # claude-tooling-специализация
 │   ├── note-writer.md                           # wiki-специализация
-│   └── librarian.md                             # wiki-специализация
+│   ├── librarian.md                             # wiki-специализация
+│   ├── tracker.md                               # management-специализация
+│   ├── note-taker.md                            # education-специализация
+│   └── tutor.md                                 # education-специализация
 ├── skills/                                      # КАНОН: скиллы (папка на скилл)
 │   └── codex-audit/
 │       └── SKILL.md
@@ -133,13 +147,15 @@ claude-toolkit/
 - **Sibling-paths без user-asking.** Каждый промт выводит путь к следующему/соседу из своего собственного источника (URL или filesystem path), не спрашивает у пользователя. Спрашивает только если по выведенному адресу файла физически нет.
 - **Русская типографика.** Кавычки `"..."`, тире и дефис - один и тот же символ `-` (U+002D), "е" вместо "ё". См. `rules/typography-ru.md`.
 
-## TODO
+## Регистрация нового канон-файла
 
-- [ ] При добавлении нового правила/агента/скилла в `rules/`, `agents/` или `skills/`:
-  - Зарегистрировать в `manifest.yaml` в нужной секции (`universal` / `coding` / `documentation` / `claude-tooling` / `wiki` / `management` / `education`).
-  - Зарегистрировать в соответствующем bootstrap-промте:
-    - Универсальный файл -> `bootstrap-02-scaffold.prompt.md` (ШАГ 2 списки + шаблон `canon.yaml -> files`).
-    - Файл под тип проекта -> соответствующий `bootstrap-03-<тип>.prompt.md` (ШАГ 2 списки + дописывание в `canon.yaml -> files` на ШАГ 4). bootstrap-03-* тянет свой набор сам через WebFetch из `<canon_base>`, без heredoc.
+При добавлении нового правила/агента/скилла в `rules/`, `agents/` или `skills/`:
+
+- Зарегистрировать в `manifest.yaml` в нужной секции (`universal` / `coding` / `documentation` / `claude-tooling` / `wiki` / `management` / `education`).
+- Зарегистрировать в соответствующем bootstrap-промте:
+  - Универсальный файл -> `bootstrap-02-scaffold.prompt.md` (ШАГ 2 списки + шаблон `canon.yaml -> files`).
+  - Файл под тип проекта -> соответствующий `bootstrap-03-<тип>.prompt.md` (ШАГ 2 списки + дописывание в `canon.yaml -> files` на ШАГ 4). bootstrap-03-* тянет свой набор сам через WebFetch из `<canon_base>`, без heredoc.
+- Обновить дерево репо в разделе "Структура репо" выше - дописать файл с пометкой типа.
 
 ## Правила работы с этим репо
 
