@@ -45,7 +45,9 @@ B. .claude/rules/ (источник - `<canon_base>/rules/`):
 
 C. CLAUDE.md содержит ссылку `@.claude/rules/prompt-conventions.md`.
 
-D. .claude/canon.yaml -> `files` содержит 2 файла специализации (agents/prompt-reviewer.md, rules/prompt-conventions.md).
+D. `.claude/canon.yaml`:
+   - `files` содержит 2 файла специализации (agents/prompt-reviewer.md, rules/prompt-conventions.md).
+   - `project_type` равен `claude-tooling` (если пусто/отсутствует - проставляется на ШАГ 4).
 
 E. .claude/settings.json дополнен allow для тестового фетча своих промтов (предложение, по подтверждению).
 
@@ -82,6 +84,8 @@ E. .claude/settings.json дополнен allow для тестового фет
 ```
 
 Если `canon.yaml` нет - значит bootstrap-02 не выполнялся; сообщи об этом и не создавай `canon.yaml` сам (это работа шага 02).
+
+Отдельно: если в `canon.yaml` поле `project_type` пустое (`""`) или отсутствует - проставь `project_type: claude-tooling` на верхнем уровне. Если стоит другой тип - сообщи и спроси, оставить или переписать (это может быть миграция типа проекта).
 
 ### 4c. Дополни существующие файлы
 

@@ -85,6 +85,7 @@
 ### 4b. Создай `.claude/canon.yaml`
 
 ```yaml
+project_type: ""      # будет проставлен bootstrap-03-* (coding | management | education | documentation | claude-tooling | wiki)
 canon:
   repo: https://github.com/dewil/claude-toolkit
   raw_base: https://raw.githubusercontent.com/dewil/claude-toolkit/main
@@ -104,6 +105,8 @@ local_only: []        # файлы в проекте, которых нет в �
 skip_sync: []         # есть в каноне, но проект сознательно не накатывает обновления
 upstream_pending: []  # файлы, помеченные к выносу в канон (см. sync-from-canon.prompt.md)
 ```
+
+Поле `project_type` пока пустое - его проставит специализированный `bootstrap-03-*` на ШАГ 6. Это поле читает `sync-from-canon.prompt.md` для autodiscovery новых канон-файлов своего типа.
 
 Если в проекте уже был `canon.yaml` - НЕ перезаписывай, оставь как есть. Если bootstrap-цепочка запускается повторно на уже-настроенном проекте, актуализация канона делается через `sync-from-canon.prompt.md`.
 

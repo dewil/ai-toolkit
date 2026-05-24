@@ -56,7 +56,9 @@ B. .claude/rules/ (источник - `<canon_base>/rules/`):
 
 C. CLAUDE.md содержит ссылки `@.claude/rules/karpathy-guidelines.md`, `@.claude/rules/tests-coverage.md` и `@.claude/rules/error-exposure.md`.
 
-D. .claude/canon.yaml -> `files` содержит 6 файлов специализации (agents/debugger.md, agents/implementer.md, agents/code-reviewer.md, rules/karpathy-guidelines.md, rules/tests-coverage.md, rules/error-exposure.md).
+D. `.claude/canon.yaml`:
+   - `files` содержит 6 файлов специализации (agents/debugger.md, agents/implementer.md, agents/code-reviewer.md, rules/karpathy-guidelines.md, rules/tests-coverage.md, rules/error-exposure.md).
+   - `project_type` равен `coding` (если пусто/отсутствует - проставляется на ШАГ 4).
 
 E. .claude/settings.json дополнен стек-специфичными allow по результату аудита (предложение, по подтверждению).
 
@@ -99,6 +101,8 @@ F. .claude/settings.json содержит секцию `hooks` с PostToolUse-п
 ```
 
 Если `canon.yaml` нет - значит bootstrap-02 не выполнялся; сообщи об этом и не создавай `canon.yaml` сам (это работа шага 02).
+
+Отдельно: если в `canon.yaml` поле `project_type` пустое (`""`) или отсутствует - проставь `project_type: coding` на верхнем уровне. Если стоит другой тип - сообщи и спроси, оставить или переписать (это может быть миграция типа проекта).
 
 ### 4c. Дополни существующие файлы
 

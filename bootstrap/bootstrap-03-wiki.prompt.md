@@ -54,7 +54,9 @@ C. .claude/rules/:
 
 D. CLAUDE.md содержит ссылки `@.claude/rules/wiki-notes-style.md`, `@.claude/rules/wiki-linking-obsidian.md`, `@.claude/rules/wiki-structure.md`.
 
-E. .claude/canon.yaml -> `files` содержит файлы wiki-специализации (A + B).
+E. `.claude/canon.yaml`:
+   - `files` содержит файлы wiki-специализации (A + B).
+   - `project_type` равен `wiki` (если пусто/отсутствует - проставляется на ШАГ 4).
 
 ШАГ 3. План.
 
@@ -131,6 +133,8 @@ TODO: латиница или кириллица; что делать с про�
 
 Если `canon.yaml` нет - значит bootstrap-02 не выполнялся; сообщи об этом и не создавай `canon.yaml` сам (это работа шага 02).
 
+Отдельно: если в `canon.yaml` поле `project_type` пустое (`""`) или отсутствует - проставь `project_type: wiki` на верхнем уровне. Если стоит другой тип (это случай **миграции** в wiki, см. раздел МИГРАЦИЯ ниже) - сообщи и спроси: переписать на `wiki` сейчас или оставить старый тип и переписать вручную после миграционных шагов.
+
 ### 4d. Дополни существующие файлы
 
 Дополнения CLAUDE.md (ссылки `@.claude/rules/wiki-notes-style.md`, `@.claude/rules/wiki-linking-obsidian.md`, `@.claude/rules/wiki-structure.md`) - по отдельному "ок".
@@ -148,14 +152,15 @@ TODO: латиница или кириллица; что делать с про�
 Этот промт сам по себе только **добавляет** wiki-специализацию. Если проект раньше был другого типа и от старой специализации нужно избавиться - сделай это вручную **после** ШАГ 4:
 
 1. Из `.claude/canon.yaml -> files` удали записи старого типа. Маппинг типа -> файлы:
-   - **management** -> пусто (специализации нет, удалять нечего).
-   - **education** -> пусто (специализации нет).
+   - **management** -> `rules/meetings.md`, `rules/tasks-tracking.md`, `rules/artifacts-structure.md`, `rules/meeting-transcripts.md`, `rules/name-cross-check.md`, `rules/google-sheets-mcp.md`, `rules/estimates-in-hours.md`, `agents/tracker.md`.
+   - **education** -> `rules/lecture-notes.md`, `rules/homework.md`, `rules/course-structure.md`, `agents/note-taker.md`, `agents/tutor.md`.
    - **documentation** -> `agents/copy-editor.md`, и локально - `rules/style-guide.md`.
    - **coding** -> `rules/karpathy-guidelines.md`, `rules/tests-coverage.md`, `rules/error-exposure.md`, `agents/debugger.md`, `agents/implementer.md`, `agents/code-reviewer.md`.
    - **claude-tooling** -> `rules/prompt-conventions.md`, `agents/prompt-reviewer.md`.
 2. Удали соответствующие файлы из `.claude/rules/` и `.claude/agents/` (если они не используются по другим причинам).
 3. Из `CLAUDE.md` убери `@-`ссылки на удаленные правила.
 4. Из `.claude/settings.json` убери allow-блоки старого типа (если bootstrap-03 старого типа их добавлял - например, генераторы статсайтов в documentation).
+5. В `.claude/canon.yaml` смени `project_type` на `wiki` (если на ШАГ 4 ты оставил старое значение, см. вопрос в "Отдельно:" выше).
 
 Актуальный список файлов по типам - в `<canon_base>/manifest.yaml`.
 
