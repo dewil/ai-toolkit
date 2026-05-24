@@ -37,6 +37,7 @@
 - `education` - учебные.
 - `documentation` - документация (скелет, требует наполнения).
 - `claude-tooling` - проекты-конструкторы для Claude, как этот репо (скелет).
+- `wiki` - Obsidian-vault'ы, персональные базы знаний (заметки, перелинковка `[[...]]`).
 
 Каждый шаг - сиблинг в той же папке `bootstrap/`. Сосед адресуется как `<dirname(этого файла)>/<имя соседа>`. Пользователя не спрашиваем - выводим путь сами.
 
@@ -91,7 +92,8 @@ claude-toolkit/
 │   ├── bootstrap-03-management.prompt.md
 │   ├── bootstrap-03-education.prompt.md
 │   ├── bootstrap-03-documentation.prompt.md
-│   └── bootstrap-03-claude-tooling.prompt.md
+│   ├── bootstrap-03-claude-tooling.prompt.md
+│   └── bootstrap-03-wiki.prompt.md
 ├── rules/                                       # КАНОН: правила поведения Claude
 │   ├── typography-ru.md
 │   ├── karpathy-guidelines.md
@@ -99,7 +101,9 @@ claude-toolkit/
 │   ├── docs-maintenance.md
 │   ├── tests-coverage.md                        # coding-специализация
 │   ├── error-exposure.md                        # coding-специализация
-│   └── prompt-conventions.md                    # claude-tooling-специализация
+│   ├── prompt-conventions.md                    # claude-tooling-специализация
+│   ├── wiki-notes-style.md                      # wiki-специализация
+│   └── wiki-linking-obsidian.md                 # wiki-специализация
 ├── agents/                                      # КАНОН: описания субагентов
 │   ├── architect.md
 │   ├── explorer.md
@@ -110,7 +114,9 @@ claude-toolkit/
 │   ├── implementer.md                           # coding-специализация
 │   ├── code-reviewer.md                         # coding-специализация
 │   ├── copy-editor.md                           # documentation-специализация
-│   └── prompt-reviewer.md                       # claude-tooling-специализация
+│   ├── prompt-reviewer.md                       # claude-tooling-специализация
+│   ├── note-writer.md                           # wiki-специализация
+│   └── librarian.md                             # wiki-специализация
 ├── skills/                                      # КАНОН: скиллы (папка на скилл)
 │   └── codex-audit/
 │       └── SKILL.md
@@ -130,7 +136,7 @@ claude-toolkit/
 ## TODO
 
 - [ ] При добавлении нового правила/агента/скилла в `rules/`, `agents/` или `skills/`:
-  - Зарегистрировать в `manifest.yaml` в нужной секции (`universal` / `coding` / `documentation` / `claude-tooling` / `management` / `education`).
+  - Зарегистрировать в `manifest.yaml` в нужной секции (`universal` / `coding` / `documentation` / `claude-tooling` / `wiki` / `management` / `education`).
   - Зарегистрировать в соответствующем bootstrap-промте:
     - Универсальный файл -> `bootstrap-02-scaffold.prompt.md` (ШАГ 2 списки + шаблон `canon.yaml -> files`).
     - Файл под тип проекта -> соответствующий `bootstrap-03-<тип>.prompt.md` (ШАГ 2 списки + дописывание в `canon.yaml -> files` на ШАГ 4). bootstrap-03-* тянет свой набор сам через WebFetch из `<canon_base>`, без heredoc.

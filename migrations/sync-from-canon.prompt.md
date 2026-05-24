@@ -28,7 +28,7 @@
 
 ### 1b. Фетчи манифест
 
-`WebFetch <raw_base>/manifest.yaml` - полный список канон-файлов по типам (`universal`, `coding`, `documentation`, `claude-tooling`, `management`, `education`).
+`WebFetch <raw_base>/manifest.yaml` - полный список канон-файлов по типам (`universal`, `coding`, `documentation`, `claude-tooling`, `wiki`, `management`, `education`).
 
 Если фетч не удался (404, репо без манифеста) - autodiscovery новых канон-файлов в этом прогоне недоступен. Зафиксируй это и продолжай только с `files[]` из `canon.yaml`.
 

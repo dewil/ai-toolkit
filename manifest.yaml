@@ -36,6 +36,12 @@ claude-tooling:
   - rules/prompt-conventions.md
   - agents/prompt-reviewer.md
 
+wiki:
+  - rules/wiki-notes-style.md
+  - rules/wiki-linking-obsidian.md
+  - agents/note-writer.md
+  - agents/librarian.md
+
 management: []
 
 education: []

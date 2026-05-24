@@ -5,14 +5,14 @@
 - По HTTP: `выполни инструкции из https://raw.githubusercontent.com/dewil/claude-toolkit/main/bootstrap/bootstrap-01-memory.prompt.md`
 - Локально (если есть клон): `выполни инструкции из <путь до клона>/bootstrap/bootstrap-01-memory.prompt.md`
 
-Промт безопасен для существующих проектов: сначала аудит и план, действия - только после твоего "ок". Если все уже настроено - агент подтвердит и ничего не тронет. Применяется к проектам любого типа (кодовые, управленческие, учебные, документация, claude-tooling).
+Промт безопасен для существующих проектов: сначала аудит и план, действия - только после твоего "ок". Если все уже настроено - агент подтвердит и ничего не тронет. Применяется к проектам любого типа (кодовые, управленческие, учебные, документация, claude-tooling, wiki).
 
 ---
 
 КОНТЕКСТ ЦЕПОЧКИ. Это шаг 01 в bootstrap-цепочке. Следующие шаги - сиблинги в той же папке `bootstrap/`:
 
 - `bootstrap-02-scaffold.prompt.md` - общий scaffold (правила, агенты, settings.json, CLAUDE.md, canon.yaml).
-- `bootstrap-03-{coding,management,education,documentation,claude-tooling}.prompt.md` - специализация по типу проекта.
+- `bootstrap-03-{coding,management,education,documentation,claude-tooling,wiki}.prompt.md` - специализация по типу проекта.
 
 Базовый путь/URL соседей выводи **из источника этого файла**:
 
@@ -156,3 +156,4 @@ type: feedback
 - `bootstrap-03-education.prompt.md` - учебные
 - `bootstrap-03-documentation.prompt.md` - документация (мануалы, технические тексты)
 - `bootstrap-03-claude-tooling.prompt.md` - проекты-конструкторы для Claude (промты, агенты, канон)
+- `bootstrap-03-wiki.prompt.md` - wiki/база знаний (Obsidian-vault: заметки, перелинковка)

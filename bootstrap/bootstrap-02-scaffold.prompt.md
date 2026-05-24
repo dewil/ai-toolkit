@@ -13,7 +13,7 @@
 - `canon_base` = подняться на один уровень из `bootstrap/`. Например, если этот файл загружен по URL `.../main/bootstrap/bootstrap-02-scaffold.prompt.md`, то `canon_base = .../main/`.
 - Канонические файлы правил, агентов и скиллов: `<canon_base>/rules/*.md`, `<canon_base>/agents/*.md`, `<canon_base>/skills/<name>/`.
 - Предыдущий шаг (сиблинг): `bootstrap-01-memory.prompt.md` в той же папке.
-- Специализация (сиблинги в той же папке): `bootstrap-03-{coding,management,education,documentation,claude-tooling}.prompt.md`.
+- Специализация (сиблинги в той же папке): `bootstrap-03-{coding,management,education,documentation,claude-tooling,wiki}.prompt.md`.
 
 Ты в корне проекта. Раскатываешь общий scaffold, нужный любому проекту независимо от типа: базовые правила, базовые агенты, settings.json, CLAUDE.md, canon.yaml. Это слой 2; специализация под тип проекта - отдельным промтом `bootstrap-03-*`.
 
@@ -182,7 +182,7 @@ TODO: заполни дерево папок проекта с пояснени�
 
 После отчета спроси одной строкой:
 
-> Какой тип проекта - запустить соответствующий bootstrap-03-*? 1) кодинг 2) управление 3) учеба 4) документация 5) claude-tooling 6) пропустить
+> Какой тип проекта - запустить соответствующий bootstrap-03-*? 1) кодинг 2) управление 3) учеба 4) документация 5) claude-tooling 6) wiki 7) пропустить
 
 Маппинг ответа -> имя файла-сиблинга в той же папке `bootstrap/`:
 
@@ -191,9 +191,10 @@ TODO: заполни дерево папок проекта с пояснени�
 - 3 / учеба / education -> `bootstrap-03-education.prompt.md`
 - 4 / документация / docs / documentation -> `bootstrap-03-documentation.prompt.md`
 - 5 / claude / claude-tooling / tooling -> `bootstrap-03-claude-tooling.prompt.md`
-- 6 / пропустить / нет / skip -> остановись, ничего не делай.
+- 6 / wiki / вики / obsidian / knowledge-base -> `bootstrap-03-wiki.prompt.md`
+- 7 / пропустить / нет / skip -> остановись, ничего не делай.
 
-Если выбран один из 1-5:
+Если выбран один из 1-6:
 
 - Следующий файл - сиблинг в той же папке: `<dirname(этого файла)>/<имя файла>`. По HTTP - WebFetch, локально - Read.
 - Содержимое файла - это инструкции для тебя. Выполни их как прямое продолжение текущей сессии (не пересылай пользователю, не цитируй - именно выполни). Все правила безопасности из 03 действуют.
