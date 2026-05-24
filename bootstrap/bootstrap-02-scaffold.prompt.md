@@ -128,6 +128,8 @@ TODO: заполни дерево папок проекта с пояснени�
 
 ### 4d. Создай `.claude/settings.json` (если отсутствует)
 
+Шаблон ниже содержит плейсхолдер `<RAW_BASE>` - подставь туда значение `canon.raw_base` из `.claude/canon.yaml`, который ты создал в шаге 4b (например, `https://raw.githubusercontent.com/dewil/claude-toolkit/main`). Это нужно, чтобы auto mode не блокировал фетчи канона при последующих синках через `sync-from-canon.prompt.md`.
+
 ```json
 {
   "permissions": {
@@ -139,7 +141,9 @@ TODO: заполни дерево папок проекта с пояснени�
       "Bash(git diff*)",
       "Bash(git status)",
       "Bash(git log*)",
-      "Bash(codex exec -s read-only:*)"
+      "Bash(codex exec -s read-only:*)",
+      "Bash(curl -fsSL <RAW_BASE>/*)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "deny": [
       "Bash(rm -rf *)",
@@ -156,6 +160,8 @@ TODO: заполни дерево папок проекта с пояснени�
   }
 }
 ```
+
+Если `.claude/settings.json` уже существует - не перезаписывай. По отдельному "ок" допиши недостающие записи в `allow` (особенно `Bash(curl -fsSL <RAW_BASE>/*)` и `WebFetch(domain:raw.githubusercontent.com)`, если их нет).
 
 ### 4e. Создай или дополни `CLAUDE.md`
 
