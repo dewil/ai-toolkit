@@ -9,7 +9,7 @@
   "autoMode": {
     "allow": [
       "$defaults",
-      "Pushing to origin/main is the deployment workflow for this canonical-source repo (claude-toolkit): downstream projects fetch canon by HTTP from main, so changes only take effect after a push to main."
+      "Allow `git push origin main` without further confirmation in this repo. claude-toolkit is a single-developer canonical-source repository: downstream projects fetch canon by HTTP from `main`, so changes only take effect after pushing to `main`. There is no PR review workflow here; direct push to `main` is the intended and only deployment path. The standard 'pushing to default branch bypasses PR review' caution does not apply."
     ]
   }
 }
