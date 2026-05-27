@@ -28,7 +28,7 @@
 
 ### Bootstrap-цепочка для нового проекта
 
-`start.md` -> `bootstrap/bootstrap-01-memory.prompt.md` -> `bootstrap/bootstrap-02-scaffold.prompt.md` -> `bootstrap/bootstrap-03-<тип>.prompt.md`
+`start.md` -> `bootstrap/bootstrap-01-memory.prompt.md` -> `bootstrap/bootstrap-02-scaffold.prompt.md` -> `bootstrap/bootstrap-03-<тип>.prompt.md` (по одному прогону на каждый выбранный тип)
 
 Типы проекта:
 
@@ -39,6 +39,8 @@
 - `claude-tooling` - проекты-конструкторы для Claude, как этот репо (скелет).
 - `wiki` - Obsidian-vault'ы, персональные базы знаний (заметки, перелинковка `[[...]]`).
 
+Проект может быть **мультиспециализированным** - например, vault Obsidian со встроенной кодовой частью и документацией будет иметь `project_type: [wiki, coding, documentation]`. В bootstrap-цепочке на шаге `bootstrap-02` пользователь выбирает несколько типов; bootstrap-03 запускается **последовательно по каждому** из них, накладывая специализации друг на друга. Каждый bootstrap-03 идемпотентен и только **добавляет** свой тип в список (если еще не там), не перезаписывая.
+
 Каждый шаг - сиблинг в той же папке `bootstrap/`. Сосед адресуется как `<dirname(этого файла)>/<имя соседа>`. Пользователя не спрашиваем - выводим путь сами.
 
 ### canon.yaml в проекте
@@ -46,7 +48,7 @@
 После bootstrap в проекте появляется `.claude/canon.yaml`:
 
 ```yaml
-project_type: coding  # coding | management | education | documentation | claude-tooling | wiki
+project_type: [coding]  # список типов из набора: coding | management | education | documentation | claude-tooling | wiki. Может содержать несколько (напр. [wiki, coding, documentation] для vault'а со встроенной кодовой частью и доками).
 canon:
   repo: https://github.com/dewil/claude-toolkit
   raw_base: https://raw.githubusercontent.com/dewil/claude-toolkit/main
@@ -61,7 +63,7 @@ skip_sync: []         # есть в каноне, проект сознател�
 upstream_pending: []  # помечены к выносу в канон
 ```
 
-`canon.yaml` коммитится в репозиторий проекта. Источник истины для sync'а. Поле `project_type` проставляется на шаге `bootstrap-03-<тип>` и используется sync'ом для определения, какие новые канон-файлы предлагать (autodiscovery).
+`canon.yaml` коммитится в репозиторий проекта. Источник истины для sync'а. Поле `project_type` - **всегда список**, наполняется на шаге `bootstrap-03-<тип>` (по одному типу за прогон). Используется sync'ом для определения, какие новые канон-файлы предлагать (autodiscovery идет по всем типам списка + `universal`).
 
 ### Sync
 
