@@ -2,7 +2,7 @@
 """
 Дельты по чатам Telegram между текущим и предыдущим snapshot.
 
-Сравнивает Встречи/Чаты/<label>/result.json и .prev.json, выводит markdown-блок
+Сравнивает Встречи/чаты/<label>/result.json и .prev.json, выводит markdown-блок
 "Новое в чатах со вчера" для вставки в план дейлика. По умолчанию учитывает
 все сообщения с id больше max(prev). Если .prev.json нет, берет окно за
 последние N часов (по умолчанию 24).
@@ -36,7 +36,7 @@ def load_project_config() -> dict:
     if not cfg.get("chats"):
         sys.stderr.write(f"В {PROJECT_CONFIG_PATH} не заполнено поле chats\n")
         sys.exit(2)
-    cfg.setdefault("chats_root", "Встречи/Чаты")
+    cfg.setdefault("chats_root", "Встречи/чаты")
     return cfg
 
 

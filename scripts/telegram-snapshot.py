@@ -100,7 +100,7 @@ def load_project_config() -> dict:
     if not cfg.get("chats"):
         sys.stderr.write(f"В {PROJECT_CONFIG_PATH} не заполнено поле chats\n")
         sys.exit(2)
-    cfg.setdefault("chats_root", "Встречи/Чаты")
+    cfg.setdefault("chats_root", "Встречи/чаты")
     return cfg
 
 

@@ -107,7 +107,7 @@ async for _ in client.iter_dialogs():
 В корне нового проекта создать `.telegram-snapshot.json`:
 ```json
 {
-  "chats_root": "Встречи/Чаты",
+  "chats_root": "Встречи/чаты",
   "chats": { "<label1>": <chat_id_1>, "<label2>": <chat_id_2> }
 }
 ```
