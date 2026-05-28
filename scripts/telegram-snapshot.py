@@ -3,9 +3,25 @@
 Инкрементальный pull новых сообщений из Telegram-чатов проекта.
 
 Тянет новые сообщения через Telethon (MTProto) с момента последнего id в
-существующих result.json, дописывает их в конец, сохраняя совместимость
-с форматом Telegram Desktop export. Перед записью копирует прежний JSON
-в `result.prev.json` для расчета дельт.
+существующих result.json, дописывает их в конец. Если result.json нет -
+делает bootstrap: создает шапку чата (name/type/id) через get_entity,
+тянет всю историю с min_id=0.
+
+Формат записи - расширенный Telegram Desktop export. В шапке добавлено
+поле `topics: [{id, title, date, ...}]` с метаданными форумных тем; у
+каждого сообщения внутри форум-темы - опциональное `topic_id` (корень
+темы) и отделенное от него `reply_to_message_id` (только настоящие
+реплаи, не "цепляние к шапке").
+
+Перед записью существующий JSON копируется в `result.prev.json` для
+расчета дельт (telegram-deltas.py).
+
+Если найден старый формат (сырой TG Desktop экспорт без `topics[]` в
+шапке) - делается миграция: топик-события извлекаются в `topics[]`,
+по reply-цепочкам проставляется `topic_id`, исходный файл сохраняется
+в `result.pre-migration.json` (один раз, перед первой миграцией -
+перезаписывается на каждой повторной попытке миграции). При ошибке
+миграции файл не трогается, чат пропускается.
 
 Конфиг разделен на две части:
   - Общие credentials (api_id, api_hash, session) - в ~/.config/telegram-snapshot/auth.json,
@@ -24,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -32,6 +49,8 @@ from pathlib import Path
 try:
     from telethon import TelegramClient
     from telethon.tl.types import (
+        Channel,
+        Chat,
         MessageActionTopicCreate,
         MessageActionTopicEdit,
         MessageEntityBold,
@@ -115,11 +134,36 @@ def load_existing(result_path: Path) -> dict:
         return json.load(f)
 
 
+def atomic_write_json(path: Path, data: dict) -> None:
+    """Записывает JSON атомарно через временный файл + os.replace.
+
+    Защита от битого файла при падении посреди json.dump (Ctrl+C, OOM, ...).
+    """
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+
 def last_message_id(data: dict) -> int:
-    msgs = data.get("messages", [])
-    if not msgs:
-        return 0
-    return max(m["id"] for m in msgs if isinstance(m.get("id"), int))
+    """High-water mark для инкрементального pull.
+
+    Учитываем id всех messages и id всех topic-корней из шапки: иначе
+    service-only хвост (свежий topic_create / topic_rename без сообщений
+    под ним) будет тянуться каждый запуск, потому что max(messages.id)
+    их не покрывает (topic-сообщения после миграции/обработки в messages
+    не лежат - они только в topics[]).
+    """
+    ids: list[int] = []
+    for m in data.get("messages", []):
+        if isinstance(m.get("id"), int):
+            ids.append(m["id"])
+    for t in data.get("topics", []):
+        if isinstance(t.get("id"), int):
+            ids.append(t["id"])
+    return max(ids) if ids else 0
 
 
 def entities_to_text_entities(text: str, entities) -> list[dict]:
@@ -198,51 +242,173 @@ def sender_id(msg) -> str:
     return f"user{uid}" if uid else ""
 
 
-async def fetch_new(client: TelegramClient, chat_id: int, min_id: int) -> list[dict]:
-    """Тянет новые сообщения с id > min_id, возвращает их в формате TG Desktop."""
+def extract_topic_meta(msg) -> dict | None:
+    """Если service-сообщение создает форумную тему - возвращает ее метаданные."""
+    if msg.action is None:
+        return None
+    if isinstance(msg.action, MessageActionTopicCreate):
+        return {
+            "id": msg.id,
+            "title": msg.action.title,
+            "date": msg.date.astimezone().strftime("%Y-%m-%dT%H:%M:%S"),
+            "date_unixtime": str(int(msg.date.timestamp())),
+            "icon_color": getattr(msg.action, "icon_color", None),
+        }
+    return None
+
+
+def topic_id_from_reply(reply_to) -> int | None:
+    """Корень темы из MessageReplyHeader. None если сообщение вне форумной темы."""
+    if reply_to is None:
+        return None
+    if not getattr(reply_to, "forum_topic", False):
+        return None
+    return getattr(reply_to, "reply_to_top_id", None) or getattr(reply_to, "reply_to_msg_id", None)
+
+
+def migrate_legacy(data: dict) -> tuple[dict, dict]:
+    """Конвертирует сырой Telegram Desktop экспорт в расширенный формат.
+
+    Что делает:
+    1. Собирает метаданные топиков из service-сообщений `topic_created`
+       в шапку `topics[]`.
+    2. Применяет `topic_edited` к названиям соответствующих топиков.
+    3. Проставляет каждому сообщению `topic_id`, поднимаясь по цепочке
+       `reply_to_message_id` до сообщения, чей id есть в topic-корнях.
+    4. Если `reply_to_message_id` указывал ровно на корень темы -
+       очищает поле (цепляние к шапке выражается через `topic_id`).
+    5. Удаляет `topic_created` / `topic_edited` service-сообщения из
+       `messages[]` - вся инфа теперь в `topics[]`.
+
+    Идемпотентна: если в data уже есть ключ "topics" - возвращает data
+    как есть с нулевой статистикой. Защита от повторного вызова на уже
+    мигрированном файле (затёр бы topics[] нулевым набором, если бы
+    service-сообщений в messages не осталось).
+
+    Возвращает (mutated_data, stats).
+    """
+    if "topics" in data:
+        return data, {
+            "topics_extracted": 0,
+            "topic_edits_applied": 0,
+            "messages_with_topic_id": 0,
+        }
+
+    msgs = data.get("messages", [])
+
+    topics_by_id: dict[int, dict] = {}
+    for m in msgs:
+        if m.get("type") == "service" and m.get("action") == "topic_created":
+            topic_entry: dict = {
+                "id": m["id"],
+                "title": m.get("title", ""),
+                "date": m.get("date", ""),
+                "date_unixtime": m.get("date_unixtime", ""),
+            }
+            # icon_color в TG Desktop экспорте бывает null или отсутствует;
+            # bootstrap-режим всегда кладёт ключ (через getattr с None default),
+            # держим тот же контракт - проставляем None если ключа нет.
+            topic_entry["icon_color"] = m.get("icon_color")
+            topics_by_id[m["id"]] = topic_entry
+
+    topic_edits_applied = 0
+    for m in msgs:
+        if m.get("type") == "service" and m.get("action") == "topic_edited":
+            new_title = m.get("new_title") or m.get("title")
+            rid = m.get("reply_to_message_id")
+            if rid and rid in topics_by_id and new_title:
+                topics_by_id[rid]["title"] = new_title
+                topic_edits_applied += 1
+
+    msg_by_id: dict[int, dict] = {
+        m["id"]: m for m in msgs if isinstance(m.get("id"), int)
+    }
+    topic_root_ids = set(topics_by_id.keys())
+
+    messages_with_topic_id = 0
+    for m in msgs:
+        if m.get("type") != "message":
+            continue
+        rid = m.get("reply_to_message_id")
+        if rid is None:
+            continue
+        visited: set[int] = set()
+        cur_rid = rid
+        topic_root: int | None = None
+        while cur_rid is not None and cur_rid not in visited:
+            visited.add(cur_rid)
+            if cur_rid in topic_root_ids:
+                topic_root = cur_rid
+                break
+            parent = msg_by_id.get(cur_rid)
+            if parent is None:
+                break
+            cur_rid = parent.get("reply_to_message_id")
+        if topic_root is not None:
+            m["topic_id"] = topic_root
+            messages_with_topic_id += 1
+            if rid == topic_root:
+                del m["reply_to_message_id"]
+
+    cleaned_msgs = [
+        m for m in msgs
+        if not (
+            m.get("type") == "service"
+            and m.get("action") in ("topic_created", "topic_edited")
+        )
+    ]
+    sorted_topics = sorted(topics_by_id.values(), key=lambda t: t["id"])
+
+    # Перестраиваем data так, чтобы topics шли ДО messages (как в bootstrap-формате).
+    new_data: dict = {}
+    for k in ("name", "type", "id"):
+        if k in data:
+            new_data[k] = data[k]
+    new_data["topics"] = sorted_topics
+    new_data["messages"] = cleaned_msgs
+    for k, v in data.items():
+        if k not in new_data:
+            new_data[k] = v
+    data.clear()
+    data.update(new_data)
+
+    return data, {
+        "topics_extracted": len(topics_by_id),
+        "topic_edits_applied": topic_edits_applied,
+        "messages_with_topic_id": messages_with_topic_id,
+    }
+
+
+async def fetch_new(client: TelegramClient, entity, min_id: int) -> tuple[list[dict], list[dict], dict]:
+    """Тянет новые сообщения с id > min_id.
+
+    Возвращает (messages, new_topics, topic_edits) - сообщения в формате TG Desktop,
+    свежесозданные темы и накопленные правки названий (root_id -> new_title).
+    """
     out: list[dict] = []
-    entity = await client.get_entity(chat_id)
+    new_topics: list[dict] = []
+    topic_edits: dict = {}
     async for msg in client.iter_messages(entity, min_id=min_id, reverse=True):
         if min_id and msg.id <= min_id:
+            continue
+        if msg.action is not None:
+            tmeta = extract_topic_meta(msg)
+            if tmeta:
+                new_topics.append(tmeta)
+            elif isinstance(msg.action, MessageActionTopicEdit) and getattr(msg.action, "title", None):
+                root_id = topic_id_from_reply(msg.reply_to)
+                if root_id is not None:
+                    topic_edits[root_id] = msg.action.title
             continue
         record = await message_to_record(client, msg)
         if record:
             out.append(record)
-    return out
-
-
-async def topic_action_to_record(msg, sender) -> dict | None:
-    """Service-сообщения про топики форума - нужны как маркер начала топика
-    в плоском result.json (внутренние сообщения цепляются к шапке через
-    reply_to_message_id). Остальные service-события игнорируем."""
-    action = msg.action
-    if isinstance(action, MessageActionTopicCreate):
-        extra = {"action": "topic_created", "title": action.title}
-    elif isinstance(action, MessageActionTopicEdit):
-        extra = {"action": "topic_edited"}
-        if getattr(action, "title", None) is not None:
-            extra["new_title"] = action.title
-    else:
-        return None
-
-    base = {
-        "id": msg.id,
-        "type": "service",
-        "date": msg.date.astimezone().strftime("%Y-%m-%dT%H:%M:%S"),
-        "date_unixtime": str(int(msg.date.timestamp())),
-        "actor": sender_name(sender),
-        "actor_id": sender_id(msg),
-    }
-    base.update(extra)
-    base["text"] = ""
-    base["text_entities"] = []
-    return base
+    return out, new_topics, topic_edits
 
 
 async def message_to_record(client: TelegramClient, msg) -> dict | None:
     if msg.action is not None:
-        sender = await msg.get_sender() if msg.sender_id else None
-        return await topic_action_to_record(msg, sender)
+        return None
 
     text = msg.message or ""
     text_entities = entities_to_text_entities(text, msg.entities)
@@ -267,8 +433,16 @@ async def message_to_record(client: TelegramClient, msg) -> dict | None:
         rec["edited"] = msg.edit_date.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
         rec["edited_unixtime"] = str(int(msg.edit_date.timestamp()))
 
-    if msg.reply_to_msg_id:
-        rec["reply_to_message_id"] = msg.reply_to_msg_id
+    # Привязка к форумной теме (если есть) и настоящий реплай разводятся:
+    # topic_id - корень темы; reply_to_message_id - реальный ответ.
+    topic_id = topic_id_from_reply(msg.reply_to)
+    if topic_id is not None:
+        rec["topic_id"] = topic_id
+
+    if msg.reply_to is not None:
+        rmsg = getattr(msg.reply_to, "reply_to_msg_id", None)
+        if rmsg and rmsg != topic_id:
+            rec["reply_to_message_id"] = rmsg
 
     if msg.file:
         rec["file_name"] = msg.file.name or "(no name)"
@@ -280,32 +454,102 @@ async def message_to_record(client: TelegramClient, msg) -> dict | None:
     return rec
 
 
+def chat_type_from_entity(entity) -> str:
+    """Маппит Telethon entity на тип чата в формате Telegram Desktop export."""
+    if isinstance(entity, Channel):
+        has_username = bool(getattr(entity, "username", None))
+        if getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False):
+            return "public_supergroup" if has_username else "private_supergroup"
+        if getattr(entity, "broadcast", False):
+            return "public_channel" if has_username else "private_channel"
+        return "public_supergroup" if has_username else "private_supergroup"
+    if isinstance(entity, Chat):
+        # basic group (не super-)
+        return "private_group"
+    # User / приватный 1-1 диалог
+    return "personal_chat"
+
+
 async def process_chat(client: TelegramClient, chats_root: Path, label: str, chat_id: int) -> tuple[int, str]:
     result_path = chats_root / label / "result.json"
-    if not result_path.exists():
-        sys.stderr.write(f"!! Нет {result_path}. Сделай первый экспорт через Telegram Desktop.\n")
-        return 0, ""
+    entity = await client.get_entity(chat_id)
 
-    data = load_existing(result_path)
-    min_id = last_message_id(data)
+    migrated = False
+    if result_path.exists():
+        data = load_existing(result_path)
+        is_bootstrap = False
 
-    new_msgs = await fetch_new(client, chat_id, min_id)
-    if not new_msgs:
+        if "topics" not in data:
+            pre_path = result_path.with_name("result.pre-migration.json")
+            shutil.copy2(result_path, pre_path)
+            try:
+                data, stats = migrate_legacy(data)
+            except Exception as exc:
+                sys.stderr.write(
+                    f"!! {label}: миграция legacy формата упала ({exc}). "
+                    f"Файл не изменен, бэкап в {pre_path.name}, чат пропущен.\n"
+                )
+                return 0, ""
+            migrated = True
+            print(
+                f"  {label}: миграция legacy -> new "
+                f"(топиков: {stats['topics_extracted']}, "
+                f"topic_id проставлено: {stats['messages_with_topic_id']}, "
+                f"переименований применено: {stats['topic_edits_applied']}). "
+                f"Бэкап: {pre_path.name}"
+            )
+
+        min_id = last_message_id(data)
+    else:
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "name": getattr(entity, "title", "") or label,
+            "type": chat_type_from_entity(entity),
+            "id": chat_id,
+            "topics": [],
+            "messages": [],
+        }
+        min_id = 0
+        is_bootstrap = True
+        print(f"  {label}: bootstrap (нет result.json, тянем всю историю)")
+
+    data.setdefault("topics", [])
+    topics_by_id = {t["id"]: t for t in data["topics"]}
+
+    new_msgs, new_topics, topic_edits = await fetch_new(client, entity, min_id)
+
+    for t in new_topics:
+        topics_by_id[t["id"]] = t
+    for root_id, new_title in topic_edits.items():
+        if root_id in topics_by_id:
+            topics_by_id[root_id]["title"] = new_title
+
+    data["topics"] = sorted(topics_by_id.values(), key=lambda t: t["id"])
+
+    has_changes = bool(new_msgs or new_topics or topic_edits)
+    needs_save = is_bootstrap or migrated or has_changes
+
+    if not needs_save:
         last_date = data["messages"][-1]["date"] if data.get("messages") else "?"
         print(f"  {label}: новых нет (последнее {last_date})")
         return 0, last_date
 
-    prev_path = result_path.with_name("result.prev.json")
-    shutil.copy2(result_path, prev_path)
+    # baseline для дельт обновляем ТОЛЬКО при реальных новых сообщениях.
+    # Без has_changes (например, при идемпотентной миграции без новых) prev.json
+    # оставляем как есть, чтобы не задвоить окно "новое" на следующих запусках.
+    # При bootstrap baseline не нужен - не с чем сравнивать.
+    if not is_bootstrap and has_changes:
+        prev_path = result_path.with_name("result.prev.json")
+        atomic_write_json(prev_path, data)
 
     data["messages"].extend(new_msgs)
     data["messages"].sort(key=lambda m: m["id"])
 
-    with result_path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(result_path, data)
 
-    last_date = new_msgs[-1]["date"]
-    print(f"  {label}: +{len(new_msgs)} (последнее {last_date})")
+    last_date = new_msgs[-1]["date"] if new_msgs else (data["messages"][-1]["date"] if data.get("messages") else "?")
+    prefix = "bootstrap " if is_bootstrap else ""
+    print(f"  {label}: {prefix}+{len(new_msgs)} (последнее {last_date}, тем: {len(data['topics'])})")
     return len(new_msgs), last_date
 
 
