@@ -9,10 +9,11 @@
 - Правил поведения Claude в проектах (`rules/`).
 - Описаний субагентов (`agents/`).
 - Канонических скиллов (`skills/`).
+- Канонических исполняемых скриптов проекта (`scripts/`).
 - Bootstrap-цепочки для настройки новых проектов (`bootstrap/`).
 - Одноразовых миграционных промтов для апгрейда существующих проектов (`migrations/`).
 
-Проекты подключают канон по **HTTP** через `raw.githubusercontent.com` - не клонят репо, не симлинкают папки. Снимки канонических файлов копируются в `.claude/rules/`, `.claude/agents/` и `.claude/skills/` проекта, проект помнит источник в `.claude/canon.yaml`. Sync сравнивает снимки с каноном и предлагает обновления.
+Проекты подключают канон по **HTTP** через `raw.githubusercontent.com` - не клонят репо, не симлинкают папки. Снимки канонических файлов копируются в `.claude/rules/`, `.claude/agents/`, `.claude/skills/` проекта (и в `scripts/` в корне проекта - для канон-категории `scripts/` маппинг без `.claude/`-префикса), проект помнит источник в `.claude/canon.yaml`. Sync сравнивает снимки с каноном и предлагает обновления.
 
 ## Архитектура
 
@@ -134,8 +135,13 @@ claude-toolkit/
 │   ├── note-taker.md                            # education-специализация
 │   └── tutor.md                                 # education-специализация
 ├── skills/                                      # КАНОН: скиллы (папка на скилл)
-│   └── codex-audit/
+│   ├── codex-audit/                             # universal
+│   │   └── SKILL.md
+│   └── telegram-snapshot-setup/                 # management-специализация
 │       └── SKILL.md
+├── scripts/                                     # КАНОН: проектные скрипты (путь в каноне = путь в проекте)
+│   ├── telegram-snapshot.py                     # management-специализация
+│   └── telegram-deltas.py                       # management-специализация
 ├── templates/                                   # ШАБЛОНЫ: копируются в проект один раз
 │   ├── project-structure.md                     # universal  -> .claude/rules/project-structure.md
 │   ├── style-guide.md                           # documentation -> .claude/rules/style-guide.md
@@ -145,9 +151,9 @@ claude-toolkit/
     └── sync-from-canon.prompt.md                # синхронизация проекта с каноном
 ```
 
-Семантика `templates/` отличается от `rules/`, `agents/`, `skills/`:
+Семантика `templates/` отличается от `rules/`, `agents/`, `skills/`, `scripts/`:
 
-- **Канон-файлы** (`rules/`, `agents/`, `skills/`) - источник истины, проект отслеживает их в `canon.yaml.files`, sync поддерживает в актуальном состоянии.
+- **Канон-файлы** (`rules/`, `agents/`, `skills/`, `scripts/`) - источник истины, проект отслеживает их в `canon.yaml.files`, sync поддерживает в актуальном состоянии. У `scripts/` маппинг тривиальный: путь в каноне = путь в проекте (`scripts/X.py` -> `scripts/X.py`).
 - **Шаблоны** (`templates/`) - скелеты с TODO-заглушками. Bootstrap копирует их один раз; дальше проект владеет файлом сам, заполняет под себя. В `canon.yaml.files` НЕ заносятся, sync их не контролирует, `manifest.yaml` про них не знает. Это намеренно: после копирования файл разойдется с шаблоном, и пытаться его "синкать" бессмысленно.
 
 ## Принципы (применяются в каждом промте этого репо)
@@ -161,12 +167,13 @@ claude-toolkit/
 
 ## Регистрация нового канон-файла
 
-При добавлении нового правила/агента/скилла в `rules/`, `agents/` или `skills/`:
+При добавлении нового правила/агента/скилла/скрипта в `rules/`, `agents/`, `skills/` или `scripts/`:
 
 - Зарегистрировать в `manifest.yaml` в нужной секции (`universal` / `coding` / `documentation` / `claude-tooling` / `wiki` / `management` / `education`).
 - Зарегистрировать в соответствующем bootstrap-промте:
   - Универсальный файл -> `bootstrap-02-scaffold.prompt.md` (ШАГ 2 списки + шаблон `canon.yaml -> files`).
   - Файл под тип проекта -> соответствующий `bootstrap-03-<тип>.prompt.md` (ШАГ 2 списки + дописывание в `canon.yaml -> files` на ШАГ 4). bootstrap-03-* тянет свой набор сам через WebFetch из `<canon_base>`, без heredoc.
+- Для скриптов в `scripts/<name>.py` - целевой путь в проекте совпадает с каноническим (`scripts/<name>.py`); bootstrap-промт также делает `chmod +x` на скопированный файл.
 - Обновить дерево репо в разделе "Структура репо" выше - дописать файл с пометкой типа.
 
 ## Регистрация нового шаблона

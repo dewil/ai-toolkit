@@ -5,10 +5,12 @@
 # sync фетчит этот файл и видит канон-файлы, добавленные в репо ПОСЛЕ
 # bootstrap проекта (их еще нет в .claude/canon.yaml проекта).
 #
-# При добавлении нового rule/agent/skill в канон - дописать его сюда,
+# При добавлении нового rule/agent/skill/script в канон - дописать его сюда,
 # в секцию по типу. universal тянется любым проектом (bootstrap-02);
 # остальные секции - только проектами своего типа (bootstrap-03-<тип>).
 # Скилл = подпапка skills/<name>/, в манифесте перечисляется по-файлово.
+# Скрипт = файл в scripts/<name>.py, копируется в scripts/ в корне проекта
+# (путь в каноне = путь в проекте).
 
 universal:
   - rules/typography-ru.md
@@ -51,6 +53,9 @@ management:
   - rules/google-sheets-mcp.md
   - rules/estimates-in-hours.md
   - agents/tracker.md
+  - skills/telegram-snapshot-setup/SKILL.md
+  - scripts/telegram-snapshot.py
+  - scripts/telegram-deltas.py
 
 education:
   - rules/lecture-notes.md
