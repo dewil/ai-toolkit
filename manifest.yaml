@@ -11,6 +11,9 @@
 # Скилл = подпапка skills/<name>/, в манифесте перечисляется по-файлово.
 # Скрипт = файл в scripts/<name>.py, копируется в scripts/ в корне проекта
 # (путь в каноне = путь в проекте).
+# Один и тот же файл может появляться в нескольких секциях - так фиксируется,
+# что он нужен проектам нескольких типов одновременно. sync дедуплицирует
+# при сборке type-set'а.
 
 universal:
   - rules/typography-ru.md
@@ -43,6 +46,9 @@ wiki:
   - rules/wiki-linking-obsidian.md
   - agents/note-writer.md
   - agents/librarian.md
+  - skills/telegram-snapshot-setup/SKILL.md
+  - scripts/telegram-snapshot.py
+  - scripts/telegram-deltas.py
 
 management:
   - rules/meetings.md
