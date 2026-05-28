@@ -320,8 +320,13 @@ def migrate_legacy(data: dict) -> tuple[dict, dict]:
                 topics_by_id[rid]["title"] = new_title
                 topic_edits_applied += 1
 
-    msg_by_id: dict[int, dict] = {
-        m["id"]: m for m in msgs if isinstance(m.get("id"), int)
+    # Снимок reply-цепочки до мутирующего цикла: ниже мы удаляем
+    # reply_to_message_id у прямых ответов на корень топика, и если читать
+    # это поле из живых объектов, последующие "reply на reply" теряют путь
+    # к корню и остаются без topic_id.
+    reply_chain: dict[int, int | None] = {
+        m["id"]: m.get("reply_to_message_id")
+        for m in msgs if isinstance(m.get("id"), int)
     }
     topic_root_ids = set(topics_by_id.keys())
 
@@ -340,10 +345,7 @@ def migrate_legacy(data: dict) -> tuple[dict, dict]:
             if cur_rid in topic_root_ids:
                 topic_root = cur_rid
                 break
-            parent = msg_by_id.get(cur_rid)
-            if parent is None:
-                break
-            cur_rid = parent.get("reply_to_message_id")
+            cur_rid = reply_chain.get(cur_rid)
         if topic_root is not None:
             m["topic_id"] = topic_root
             messages_with_topic_id += 1
@@ -377,6 +379,75 @@ def migrate_legacy(data: dict) -> tuple[dict, dict]:
         "topic_edits_applied": topic_edits_applied,
         "messages_with_topic_id": messages_with_topic_id,
     }
+
+
+def repair_legacy_migration(data: dict) -> tuple[dict, dict]:
+    """Чинит снапшоты, мигрированные старой багнутой версией migrate_legacy.
+
+    Баг: в старой реализации reply-цепочка читалась из живых объектов,
+    которые мутировались в том же цикле (del reply_to_message_id у direct
+    reply на корень). Из-за этого "reply на reply" внутри топика теряли
+    путь к корню и оставались без topic_id - ~60% сообщений в форумном чате.
+
+    Эта функция прогоняется на уже мигрированных снапшотах (где есть
+    topics[]) и достраивает topic_id для потеряшек, поднимаясь по
+    reply_to_message_id через СНИМОК цепочки. Признает корнем:
+    - id из topics[] (исходные корни),
+    - сообщение, у которого уже проставлен topic_id (шорткат через
+      уже починенных соседей).
+
+    Идемпотентна: на здоровом снапшоте возвращает messages_repaired=0.
+    """
+    msgs = data.get("messages") or []
+    topics = data.get("topics") or []
+    if not topics or not msgs:
+        return data, {"messages_repaired": 0}
+
+    topic_root_ids: set[int] = {
+        t["id"] for t in topics if isinstance(t.get("id"), int)
+    }
+    if not topic_root_ids:
+        return data, {"messages_repaired": 0}
+
+    reply_chain: dict[int, int | None] = {
+        m["id"]: m.get("reply_to_message_id")
+        for m in msgs if isinstance(m.get("id"), int)
+    }
+    known_topic: dict[int, int] = {
+        m["id"]: m["topic_id"]
+        for m in msgs
+        if isinstance(m.get("id"), int) and isinstance(m.get("topic_id"), int)
+    }
+
+    repaired = 0
+    for m in msgs:
+        if m.get("type") != "message":
+            continue
+        if "topic_id" in m:
+            continue
+        rid = m.get("reply_to_message_id")
+        if rid is None:
+            continue
+        visited: set[int] = set()
+        cur_rid: int | None = rid
+        topic_root: int | None = None
+        while cur_rid is not None and cur_rid not in visited:
+            visited.add(cur_rid)
+            if cur_rid in topic_root_ids:
+                topic_root = cur_rid
+                break
+            if cur_rid in known_topic:
+                topic_root = known_topic[cur_rid]
+                break
+            cur_rid = reply_chain.get(cur_rid)
+        if topic_root is not None:
+            m["topic_id"] = topic_root
+            known_topic[m["id"]] = topic_root
+            repaired += 1
+            if rid == topic_root:
+                del m["reply_to_message_id"]
+
+    return data, {"messages_repaired": repaired}
 
 
 async def fetch_new(client: TelegramClient, entity, min_id: int) -> tuple[list[dict], list[dict], dict]:
@@ -475,6 +546,7 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
     entity = await client.get_entity(chat_id)
 
     migrated = False
+    repaired = False
     if result_path.exists():
         data = load_existing(result_path)
         is_bootstrap = False
@@ -498,6 +570,22 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
                 f"переименований применено: {stats['topic_edits_applied']}). "
                 f"Бэкап: {pre_path.name}"
             )
+        else:
+            # Снапшот уже мигрирован. Проверяем не пострадал ли он от старого
+            # бага migrate_legacy (reply-on-reply внутри топика без topic_id).
+            # Чиним прямо на месте, чтобы не потерять инкременты, накопленные
+            # после первой миграции.
+            data, repair_stats = repair_legacy_migration(data)
+            if repair_stats["messages_repaired"] > 0:
+                pre_repair_path = result_path.with_name("result.pre-repair.json")
+                if not pre_repair_path.exists():
+                    shutil.copy2(result_path, pre_repair_path)
+                repaired = True
+                print(
+                    f"  {label}: починка topic_id после старого бага миграции "
+                    f"(восстановлено: {repair_stats['messages_repaired']}). "
+                    f"Бэкап: {pre_repair_path.name}"
+                )
 
         min_id = last_message_id(data)
     else:
@@ -527,7 +615,7 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
     data["topics"] = sorted(topics_by_id.values(), key=lambda t: t["id"])
 
     has_changes = bool(new_msgs or new_topics or topic_edits)
-    needs_save = is_bootstrap or migrated or has_changes
+    needs_save = is_bootstrap or migrated or repaired or has_changes
 
     if not needs_save:
         last_date = data["messages"][-1]["date"] if data.get("messages") else "?"
