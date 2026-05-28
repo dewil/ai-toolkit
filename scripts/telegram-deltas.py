@@ -97,6 +97,26 @@ def format_msg(m: dict) -> str:
     return f"- {when} **{who}**{reply}: {text}"
 
 
+PERSONAL_PREFIX = "1-1/"
+
+
+def emit_chat(label: str, display: str, chats_root, hours: int) -> int:
+    chat_dir = chats_root / label
+    cur = load_messages(chat_dir / "result.json")
+    prev = load_messages(chat_dir / "result.prev.json")
+
+    new = filter_new(cur, prev, hours)
+    suffix = "" if prev else f" (нет .prev, окно {hours}ч)"
+    print(f"**{display}: {len(new)}**{suffix}\n")
+    if not new:
+        print("_Без изменений._\n")
+        return 0
+    for m in new:
+        print(format_msg(m))
+    print()
+    return len(new)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--hours", type=int, default=24, help="Окно, если нет .prev.json")
@@ -105,26 +125,20 @@ def main() -> int:
     project_cfg = load_project_config()
     chats_root = PROJECT_ROOT / project_cfg["chats_root"]
     labels = list(project_cfg["chats"].keys())
+    group_labels = [l for l in labels if not l.startswith(PERSONAL_PREFIX)]
+    personal_labels = [l for l in labels if l.startswith(PERSONAL_PREFIX)]
 
     print(f"### Новое в чатах ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n")
 
     grand_total = 0
-    for label in labels:
-        chat_dir = chats_root / label
-        cur = load_messages(chat_dir / "result.json")
-        prev = load_messages(chat_dir / "result.prev.json")
+    for label in group_labels:
+        grand_total += emit_chat(label, label, chats_root, args.hours)
 
-        new = filter_new(cur, prev, args.hours)
-        grand_total += len(new)
-
-        suffix = "" if prev else f" (нет .prev, окно {args.hours}ч)"
-        print(f"**{label}: {len(new)}**{suffix}\n")
-        if not new:
-            print("_Без изменений._\n")
-            continue
-        for m in new:
-            print(format_msg(m))
-        print()
+    if personal_labels:
+        print("#### 1-1\n")
+        for label in personal_labels:
+            display = label[len(PERSONAL_PREFIX):]
+            grand_total += emit_chat(label, display, chats_root, args.hours)
 
     if grand_total == 0:
         print("_Изменений нет._")

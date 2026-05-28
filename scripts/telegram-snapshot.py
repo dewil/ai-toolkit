@@ -32,6 +32,8 @@ from pathlib import Path
 try:
     from telethon import TelegramClient
     from telethon.tl.types import (
+        MessageActionTopicCreate,
+        MessageActionTopicEdit,
         MessageEntityBold,
         MessageEntityCode,
         MessageEntityItalic,
@@ -209,9 +211,38 @@ async def fetch_new(client: TelegramClient, chat_id: int, min_id: int) -> list[d
     return out
 
 
+async def topic_action_to_record(msg, sender) -> dict | None:
+    """Service-сообщения про топики форума - нужны как маркер начала топика
+    в плоском result.json (внутренние сообщения цепляются к шапке через
+    reply_to_message_id). Остальные service-события игнорируем."""
+    action = msg.action
+    if isinstance(action, MessageActionTopicCreate):
+        extra = {"action": "topic_created", "title": action.title}
+    elif isinstance(action, MessageActionTopicEdit):
+        extra = {"action": "topic_edited"}
+        if getattr(action, "title", None) is not None:
+            extra["new_title"] = action.title
+    else:
+        return None
+
+    base = {
+        "id": msg.id,
+        "type": "service",
+        "date": msg.date.astimezone().strftime("%Y-%m-%dT%H:%M:%S"),
+        "date_unixtime": str(int(msg.date.timestamp())),
+        "actor": sender_name(sender),
+        "actor_id": sender_id(msg),
+    }
+    base.update(extra)
+    base["text"] = ""
+    base["text_entities"] = []
+    return base
+
+
 async def message_to_record(client: TelegramClient, msg) -> dict | None:
     if msg.action is not None:
-        return None
+        sender = await msg.get_sender() if msg.sender_id else None
+        return await topic_action_to_record(msg, sender)
 
     text = msg.message or ""
     text_entities = entities_to_text_entities(text, msg.entities)
@@ -231,6 +262,10 @@ async def message_to_record(client: TelegramClient, msg) -> dict | None:
         "text": text_field,
         "text_entities": text_entities,
     }
+
+    if msg.edit_date:
+        rec["edited"] = msg.edit_date.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+        rec["edited_unixtime"] = str(int(msg.edit_date.timestamp()))
 
     if msg.reply_to_msg_id:
         rec["reply_to_message_id"] = msg.reply_to_msg_id
