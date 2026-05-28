@@ -1,6 +1,7 @@
 .claude/settings.local.json
 .DS_Store
 *.tmp
+__pycache__/
 
 # Локальные рабочие заметки по разработке канона.
 # Не публикуются в репо (см. rules/docs-maintenance.md).
