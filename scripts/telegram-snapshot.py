@@ -109,6 +109,24 @@ def load_auth() -> dict:
     return auth
 
 
+def chat_entry(value) -> dict:
+    """Нормализует значение из chats к {"id": int, "topic_id": int|None}.
+
+    Поддерживаются две формы записи чата:
+      - короткая:  "label": 4715985727
+      - расширенная: "label": {"id": 4715985727, "topic_id": 123}
+
+    topic_id используется telegram-deltas.py для отбора сообщений только
+    нужной форумной темы (например, топика бота). На саму выкачку не
+    влияет - snapshot всегда тянет чат целиком.
+    """
+    if isinstance(value, dict):
+        if "id" not in value:
+            raise ValueError("в расширенной записи чата нет поля id")
+        return {"id": int(value["id"]), "topic_id": value.get("topic_id")}
+    return {"id": int(value), "topic_id": None}
+
+
 def load_project_config() -> dict:
     if not PROJECT_CONFIG_PATH.exists():
         sys.stderr.write(
@@ -120,6 +138,11 @@ def load_project_config() -> dict:
         cfg = json.load(f)
     if not cfg.get("chats"):
         sys.stderr.write(f"В {PROJECT_CONFIG_PATH} не заполнено поле chats\n")
+        sys.exit(2)
+    try:
+        cfg["chats"] = {label: chat_entry(v) for label, v in cfg["chats"].items()}
+    except (ValueError, TypeError) as exc:
+        sys.stderr.write(f"В {PROJECT_CONFIG_PATH} некорректная запись chats: {exc}\n")
         sys.exit(2)
     cfg.setdefault("chats_root", "Встречи/чаты")
     return cfg
@@ -541,9 +564,26 @@ def chat_type_from_entity(entity) -> str:
     return "personal_chat"
 
 
-async def process_chat(client: TelegramClient, chats_root: Path, label: str, chat_id: int) -> tuple[int, str]:
+async def resolve_entity(client: TelegramClient, chat_id: int, dialog_entities: dict):
+    """Возвращает entity чата по unmarked-id.
+
+    Резолвим строго через карту диалогов (dialog_entities), а НЕ через
+    client.get_entity(chat_id): в некоторых сессиях локальный entity-cache
+    оказывается битым и get_entity на голый int возвращает чужой чат с тем
+    же магическим id (наблюдалось: один и тот же id резолвился то одним
+    чатом, то другим). Карта строится из свежих серверных entity в iter_dialogs -
+    у них корректный access_hash. get_entity оставлен только как фолбэк для
+    чатов, которых нет в списке диалогов (архивные/скрытые).
+    """
+    entity = dialog_entities.get(chat_id)
+    if entity is not None:
+        return entity
+    return await client.get_entity(chat_id)
+
+
+async def process_chat(client: TelegramClient, chats_root: Path, label: str, chat_id: int, dialog_entities: dict) -> tuple[int, str]:
     result_path = chats_root / label / "result.json"
-    entity = await client.get_entity(chat_id)
+    entity = await resolve_entity(client, chat_id, dialog_entities)
 
     migrated = False
     repaired = False
@@ -652,15 +692,21 @@ async def amain() -> int:
 
     print(f"snapshot {datetime.now(timezone.utc).isoformat()}")
 
-    # Прогрев кеша диалогов: без этого get_entity(int_id) на свежей сессии
-    # интерпретирует id как PeerUser. Перебор диалогов кеширует entity в session.
-    async for _ in client.iter_dialogs():
-        pass
+    # Перебор диалогов: строим карту {unmarked_id -> свежий entity}. Нужна
+    # и для прогрева (get_entity на свежей сессии иначе трактует int как
+    # PeerUser), и - главное - как авторитетный источник entity вместо
+    # битого локального кеша (см. resolve_entity).
+    dialog_entities: dict = {}
+    async for d in client.iter_dialogs():
+        eid = getattr(d.entity, "id", None)
+        if eid is not None:
+            dialog_entities[eid] = d.entity
 
     total = 0
-    for label, chat_id in project_cfg["chats"].items():
+    for label, entry in project_cfg["chats"].items():
+        chat_id = entry["id"]
         try:
-            n, _ = await process_chat(client, chats_root, label, chat_id)
+            n, _ = await process_chat(client, chats_root, label, chat_id, dialog_entities)
             total += n
         except Exception as exc:
             sys.stderr.write(f"!! {label} ({chat_id}): {exc}\n")
