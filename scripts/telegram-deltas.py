@@ -24,6 +24,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_CONFIG_PATH = PROJECT_ROOT / ".telegram-snapshot.json"
 
 
+def chat_entry(value) -> dict:
+    """Нормализует значение из chats к {"id": int, "topic_id": int|None}.
+
+    Короткая форма "label": <id> и расширенная "label": {"id", "topic_id"}.
+    topic_id (если задан) - корень форумной темы; дельты по этому чату
+    отбирают только сообщения этой темы (топик бота и т.п.).
+    """
+    if isinstance(value, dict):
+        if "id" not in value:
+            raise ValueError("в расширенной записи чата нет поля id")
+        return {"id": int(value["id"]), "topic_id": value.get("topic_id")}
+    return {"id": int(value), "topic_id": None}
+
+
 def load_project_config() -> dict:
     if not PROJECT_CONFIG_PATH.exists():
         sys.stderr.write(
@@ -35,6 +49,11 @@ def load_project_config() -> dict:
         cfg = json.load(f)
     if not cfg.get("chats"):
         sys.stderr.write(f"В {PROJECT_CONFIG_PATH} не заполнено поле chats\n")
+        sys.exit(2)
+    try:
+        cfg["chats"] = {label: chat_entry(v) for label, v in cfg["chats"].items()}
+    except (ValueError, TypeError) as exc:
+        sys.stderr.write(f"В {PROJECT_CONFIG_PATH} некорректная запись chats: {exc}\n")
         sys.exit(2)
     cfg.setdefault("chats_root", "Встречи/чаты")
     return cfg
@@ -68,7 +87,11 @@ def parse_dt(s: str) -> datetime | None:
         return None
 
 
-def filter_new(cur: list[dict], prev: list[dict], hours_fallback: int) -> list[dict]:
+def filter_new(cur: list[dict], prev: list[dict], hours_fallback: int,
+               topic_id: int | None = None) -> list[dict]:
+    if topic_id is not None:
+        cur = [m for m in cur if m.get("topic_id") == topic_id]
+        prev = [m for m in prev if m.get("topic_id") == topic_id]
     prev_ids = {m["id"] for m in prev if isinstance(m.get("id"), int)}
     if prev_ids:
         return [m for m in cur if m["id"] not in prev_ids and m.get("type") == "message"]
@@ -100,13 +123,16 @@ def format_msg(m: dict) -> str:
 PERSONAL_PREFIX = "1-1/"
 
 
-def emit_chat(label: str, display: str, chats_root, hours: int) -> int:
+def emit_chat(label: str, display: str, chats_root, hours: int,
+              topic_id: int | None = None) -> int:
     chat_dir = chats_root / label
     cur = load_messages(chat_dir / "result.json")
     prev = load_messages(chat_dir / "result.prev.json")
 
-    new = filter_new(cur, prev, hours)
+    new = filter_new(cur, prev, hours, topic_id)
     suffix = "" if prev else f" (нет .prev, окно {hours}ч)"
+    if topic_id is not None:
+        suffix += f" (топик {topic_id})"
     print(f"**{display}: {len(new)}**{suffix}\n")
     if not new:
         print("_Без изменений._\n")
@@ -130,15 +156,19 @@ def main() -> int:
 
     print(f"### Новое в чатах ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n")
 
+    chats = project_cfg["chats"]
+
     grand_total = 0
     for label in group_labels:
-        grand_total += emit_chat(label, label, chats_root, args.hours)
+        grand_total += emit_chat(label, label, chats_root, args.hours,
+                                 chats[label].get("topic_id"))
 
     if personal_labels:
         print("#### 1-1\n")
         for label in personal_labels:
             display = label[len(PERSONAL_PREFIX):]
-            grand_total += emit_chat(label, display, chats_root, args.hours)
+            grand_total += emit_chat(label, display, chats_root, args.hours,
+                                     chats[label].get("topic_id"))
 
     if grand_total == 0:
         print("_Изменений нет._")
