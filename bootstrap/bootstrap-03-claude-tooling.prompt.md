@@ -28,28 +28,25 @@ claude-tooling проект - тот, чей артефакт это сами п
 ШАГ 1. Аудит (только чтение).
 
 - pwd - корень проекта.
+- Получи секцию `claude-tooling` манифеста (`curl -fsSL <canon_base>/manifest.yaml`, локально - `cat`) - это целевой набор файлов специализации (единственный источник списка).
 - Перечисли существующие:
-  - .claude/agents/prompt-reviewer.md
-  - .claude/rules/prompt-conventions.md
-  - .claude/canon.yaml - есть ли (должен быть после bootstrap-02), что в `files`
+  - какие файлы секции `claude-tooling` уже есть в проекте (по generic-маппингу: `rules/*` -> `.claude/rules/*`, `agents/*` -> `.claude/agents/*`)
+  - .claude/canon.yaml - есть ли (должен быть после bootstrap-02), что в `files` и `file_hashes`
   - CLAUDE.md - какие @-ссылки уже есть
   - .claude/settings.json - какие allow уже есть
 
 ШАГ 2. Целевое состояние.
 
-A. .claude/agents/ (источник - `<canon_base>/agents/`):
-   - prompt-reviewer.md
+A. Канонический набор claude-tooling = секция `claude-tooling` в `manifest.yaml` (правила + агенты специализации). Источник истины списка - **только манифест**; здесь файлы поименно не перечисляем. На ШАГ 4 фетчнешь манифест и раскатаешь секцию `claude-tooling` по generic-маппингу: `rules/<name>.md` -> `.claude/rules/<name>.md` (+ @-импорт); `agents/<name>.md` -> `.claude/agents/<name>.md`; `skills/<name>/...` -> `.claude/skills/<name>/...` (скилл - папка, копируются все ее файлы из секции); `scripts/<name>` -> `<name>` в корне + `chmod +x`.
 
-B. .claude/rules/ (источник - `<canon_base>/rules/`):
-   - prompt-conventions.md
+B. CLAUDE.md содержит `@`-ссылку на каждое правило `rules/*` из секции `claude-tooling`.
 
-C. CLAUDE.md содержит ссылку `@.claude/rules/prompt-conventions.md`.
-
-D. `.claude/canon.yaml`:
-   - `files` содержит 2 файла специализации (agents/prompt-reviewer.md, rules/prompt-conventions.md).
+C. `.claude/canon.yaml`:
+   - `files` дополнен всеми путями секции `claude-tooling`, которых там еще нет;
+   - `file_hashes` дополнен sha256 раскатанных файлов;
    - `project_type` - список, и `claude-tooling` в нем (если списка нет/пустой - инициализируется на ШАГ 4; если `claude-tooling` отсутствует среди других типов - добавляется на ШАГ 4).
 
-E. .claude/settings.json дополнен allow для тестового фетча своих промтов (предложение, по подтверждению).
+D. .claude/settings.json дополнен allow для тестового фетча своих промтов по результату аудита (предложение, по подтверждению).
 
 ШАГ 3. План.
 
@@ -57,44 +54,41 @@ E. .claude/settings.json дополнен allow для тестового фет
 
 Отдельно покажи список allow, которые предлагаешь добавить в settings.json (см. ниже шаблоны). НЕ применяй без отдельного "ок".
 
-Для CLAUDE.md - если файла нет или нет ссылки `@.claude/rules/prompt-conventions.md` - покажи, что добавишь.
+Для CLAUDE.md - если файла нет или нет @-ссылок на правила `rules/*` секции `claude-tooling` - покажи, какие добавишь.
 
-Для canon.yaml - покажи, какие 2 записи допишешь в `files`.
+Для canon.yaml - покажи, какие пути секции `claude-tooling` допишешь в `files` (и sha256 в `file_hashes`).
 
 Жди "ок". Без подтверждения - не действуй.
 
 ШАГ 4. Действуй (после "ок").
 
-### 4a. Скопируй канонического агента и правило из `<canon_base>`
+### 4a. Раскатай секцию `claude-tooling` манифеста
 
-Для каждого файла из ШАГ 2 (A + B), которого еще нет в проекте:
+1. Возьми секцию `claude-tooling` манифеста, полученного в ШАГ 1.
+2. Для каждого файла секции, которого еще нет в проекте (локальный путь - по generic-маппингу из ШАГ 2 A):
+   - получи канонические байты **точными байтами** (`curl -fsSL <canon_base>/<path>`, локально - `cp`/`cat`; не `WebFetch` - он лоссовый, ломает sha256 и корежит файлы);
+   - запиши в локальный путь; для `scripts/` поставь `chmod +x`;
+   - посчитай sha256 записанных байт (`shasum -a 256 <локальный путь> | awk '{print $1}'`, на Linux - `sha256sum`) - база снимка для `file_hashes` в 4b.
 
-- Если этот промт загружен по HTTP: `WebFetch <canon_base>/agents/prompt-reviewer.md` -> запиши в `.claude/agents/prompt-reviewer.md`. Аналогично `<canon_base>/rules/prompt-conventions.md` -> `.claude/rules/prompt-conventions.md`.
-- Локально (если читался с диска): `cp <canon_base>/agents/prompt-reviewer.md .claude/agents/prompt-reviewer.md`. Аналогично для rules.
-
-Существующие файлы НЕ перезаписываются. Для апгрейда к актуальной версии канона есть `migrations/sync-from-canon.prompt.md`.
+Существующие файлы НЕ перезаписываются (для них хеш не пишем - база определится на первом синке). Для апгрейда к актуальной версии канона есть `migrations/sync-from-canon.prompt.md`.
 
 ### 4b. Допиши `.claude/canon.yaml`
 
-В секцию `files` добавь записи, которых там еще нет:
+- В `files` добавь все пути секции `claude-tooling`, которых там еще нет (в каноническом виде, без `.claude/`-префикса).
+- В `file_hashes` добавь sha256 (из 4a) для файлов, которые реально записал; для уже существовавших файлов запись не добавляй. Если секции `file_hashes` в файле еще нет - заведи ее.
 
-```yaml
-  - agents/prompt-reviewer.md
-  - rules/prompt-conventions.md
-```
-
-Если `canon.yaml` нет - значит bootstrap-02 не выполнялся; сообщи об этом и не создавай `canon.yaml` сам (это работа шага 02).
+Правь точечно, не пересоздавая файл. Если `canon.yaml` нет - значит bootstrap-02 не выполнялся; сообщи об этом и не создавай `canon.yaml` сам (это работа шага 02).
 
 Отдельно про `project_type` (всегда **список**):
 
 - Если поля нет вообще или это пустой список `[]` - инициализируй `project_type: [claude-tooling]`.
 - Если поле уже содержит `claude-tooling` - не трогай (идемпотентность).
-- Если поле содержит другие типы, но без `claude-tooling` - **добавь** `claude-tooling` в конец списка. Это нормальный случай мультиспециализации; не "миграция типа", не спрашивай - добавляй.
-- Если поле - скаляр-строка (старый формат до перехода на список) - перепиши в список и добавь `claude-tooling`. Сообщи в отчете о миграции формата.
+- Если поле содержит другие типы (`[wiki]`, `[coding, documentation]` и т.п.), но без `claude-tooling` - **добавь** `claude-tooling` в конец списка (`[coding] -> [coding, claude-tooling]`). Это нормальный случай мультиспециализации; не "миграция типа", не спрашивай - добавляй.
+- Если поле - скаляр-строка (`project_type: coding`, старый формат до перехода на список) - перепиши в список и добавь `claude-tooling`: `[coding, claude-tooling]`. Сообщи в отчете о миграции формата.
 
 ### 4c. Дополни существующие файлы
 
-Дополнения CLAUDE.md (ссылка `@.claude/rules/prompt-conventions.md`) и settings.json (allow) - по отдельному "ок" на каждый пункт.
+Дополнения CLAUDE.md (по `@`-ссылке на каждое правило `rules/*` секции `claude-tooling`, которого еще нет в CLAUDE.md) и settings.json (allow) - по отдельному "ок" на каждый пункт.
 
 ШАГ 5. Отчет.
 

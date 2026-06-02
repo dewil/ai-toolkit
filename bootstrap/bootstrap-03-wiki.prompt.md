@@ -36,48 +36,34 @@
   - `.obsidian/` в корне - vault уже открывался в Obsidian.
   - Хотя бы одна заметка с `[[wiki-link]]`-синтаксисом (`grep -rE '\[\[[^]]+\]\]' --include='*.md' | head -5`).
   - Если ни одного маркера нет - сообщи и спроси: это точно Obsidian-проект или просто папка markdown'ов? Без подтверждения не действуй.
+- Получи секцию `wiki` манифеста (`curl -fsSL <canon_base>/manifest.yaml`, локально - `cat`) - это целевой набор файлов специализации (единственный источник списка).
 - Перечисли существующие:
-  - .claude/rules/wiki-notes-style.md, .claude/rules/wiki-linking-obsidian.md, .claude/rules/wiki-structure.md
-  - .claude/agents/note-writer.md, .claude/agents/librarian.md
-  - .claude/skills/telegram-snapshot-setup/SKILL.md
-  - scripts/telegram-snapshot.py, scripts/telegram-deltas.py
-  - .claude/canon.yaml - есть ли (должен быть после bootstrap-02), что в `files`
+  - какие файлы секции `wiki` уже есть в проекте (по generic-маппингу: `rules/*` -> `.claude/rules/*`, `agents/*` -> `.claude/agents/*`, `skills/<name>/...` -> `.claude/skills/<name>/...`, `scripts/<name>` -> `scripts/<name>` в корне)
+  - .claude/canon.yaml - есть ли (должен быть после bootstrap-02), что в `files` и `file_hashes`
   - CLAUDE.md - какие @-ссылки уже есть
 - Если в `.claude/canon.yaml -> project_type` уже есть другие типы (например, `[management]`, `[coding, documentation]`) или в `files` уже есть файлы другой специализации - это **мультиспециализированный проект**. Wiki-специализация будет ДОБАВЛЕНА поверх, существующее не удаляется. Сообщи в плане: "Проект уже имеет типы [<список>]. Wiki добавится в `project_type` и в `files`; старые файлы остаются". Если пользователь хотел не добавить wiki, а ЗАМЕНИТЬ старый тип целиком - см. раздел МИГРАЦИЯ в конце файла.
 
 ШАГ 2. Целевое состояние.
 
-A. .claude/rules/ (источник - `<canon_base>/rules/`):
-   - wiki-notes-style.md
-   - wiki-linking-obsidian.md
+A. Канонический набор wiki = секция `wiki` в `manifest.yaml` (правила + агенты + скилл + скрипты специализации). Источник истины списка - **только манифест**; здесь файлы поименно не перечисляем. На ШАГ 4 раскатаешь секцию `wiki` по generic-маппингу: `rules/<name>.md` -> `.claude/rules/<name>.md` (+ @-импорт); `agents/<name>.md` -> `.claude/agents/<name>.md`; `skills/<name>/...` -> `.claude/skills/<name>/...` (скилл - папка, копируются все ее файлы из секции); `scripts/<name>` -> `<name>` в корне + `chmod +x`.
 
-B. .claude/agents/ (источник - `<canon_base>/agents/`):
-   - note-writer.md
-   - librarian.md
+B. CLAUDE.md содержит `@`-ссылку на каждое правило `rules/*` из секции `wiki`.
 
-C. .claude/skills/ (источник - `<canon_base>/skills/`):
-   - telegram-snapshot-setup/SKILL.md - один файл в папке скилла.
+C. `.claude/rules/`:
+   - wiki-structure.md - копируется из `<canon_base>/templates/wiki-structure.md` (см. ШАГ 4b). Это шаблон, не каноническое правило: разделы и теги у каждого vault'а свои, sync его не контролирует. В `canon.yaml.files` не записывается.
 
-D. scripts/ в корне vault'а (источник - `<canon_base>/scripts/`):
-   - telegram-snapshot.py
-   - telegram-deltas.py
-
-E. .claude/rules/:
-   - wiki-structure.md - копируется из `<canon_base>/templates/wiki-structure.md` (см. ШАГ 4b). Это шаблон, не каноническое правило: разделы и теги у каждого vault'а свои, sync его не контролирует.
-
-F. CLAUDE.md содержит ссылки `@.claude/rules/wiki-notes-style.md`, `@.claude/rules/wiki-linking-obsidian.md`, `@.claude/rules/wiki-structure.md`.
-
-G. `.claude/canon.yaml`:
-   - `files` содержит файлы wiki-специализации (A + B + C + D).
+D. `.claude/canon.yaml`:
+   - `files` дополнен всеми путями секции `wiki`, которых там еще нет;
+   - `file_hashes` дополнен sha256 раскатанных файлов;
    - `project_type` - список, и `wiki` в нем (если списка нет/пустой - инициализируется на ШАГ 4; если `wiki` отсутствует среди других типов - добавляется на ШАГ 4).
 
 ШАГ 3. План.
 
 Таблица: файл / действие / статус. Для существующих - "не трону". Для отсутствующих - "создам".
 
-Для CLAUDE.md - если файла нет или нет нужных @-ссылок - покажи, что добавишь.
+Для CLAUDE.md - покажи, какие @-ссылки на правила `rules/*` секции `wiki` добавишь (если каких-то нет в CLAUDE.md).
 
-Для canon.yaml - покажи, какие записи допишешь в `files`.
+Для canon.yaml - покажи, какие пути секции `wiki` допишешь в `files` (и их sha256 в `file_hashes`).
 
 Если ШАГ 1 обнаружил признаки другого типа специализации - в плане отдельным абзацем перечисли эти типы/файлы и сообщи: "Проект становится мультиспециализированным; старые файлы не удаляются. Если хотел не добавить wiki, а ЗАМЕНИТЬ старый тип целиком - см. раздел МИГРАЦИЯ".
 
@@ -85,18 +71,15 @@ G. `.claude/canon.yaml`:
 
 ШАГ 4. Действуй (после "ок").
 
-### 4a. Скопируй канонические rules, agents, скилл и скрипты из `<canon_base>`
+### 4a. Раскатай секцию `wiki` манифеста
 
-Для каждого файла из ШАГ 2 (A + B + C + D), которого еще нет в проекте:
+1. Возьми секцию `wiki` манифеста, полученного в ШАГ 1.
+2. Для каждого файла секции, которого еще нет в проекте (локальный путь - по generic-маппингу из ШАГ 2 A):
+   - получи канонические байты **точными байтами** (`curl -fsSL <canon_base>/<path>`, локально - `cp`/`cat`; не `WebFetch` - он лоссовый, ломает sha256 и корежит `.py`);
+   - запиши в локальный путь; для `scripts/` поставь `chmod +x`;
+   - посчитай sha256 записанных байт (`shasum -a 256 <локальный путь> | awk '{print $1}'`, на Linux - `sha256sum`) - база снимка для `file_hashes` в 4c.
 
-- Если этот промт загружен по HTTP:
-  - `WebFetch <canon_base>/rules/<имя>.md` -> запиши в `.claude/rules/<имя>.md`.
-  - `WebFetch <canon_base>/agents/<имя>.md` -> `.claude/agents/<имя>.md`.
-  - `WebFetch <canon_base>/skills/telegram-snapshot-setup/SKILL.md` -> `.claude/skills/telegram-snapshot-setup/SKILL.md` (папку при необходимости создай).
-  - `WebFetch <canon_base>/scripts/<имя>.py` -> `scripts/<имя>.py` в корне vault'а (папку при необходимости создай). Сохрани executable-бит через `chmod +x scripts/<имя>.py`.
-- Локально (если читался с диска): `cp <canon_base>/<тот же относительный путь> <тот же таргет>`. Для скриптов отдельно `chmod +x scripts/<имя>.py`.
-
-Существующие файлы НЕ перезаписываются. Для апгрейда к актуальной версии канона (включая скрипты с прогревом и migration-логикой) есть `migrations/sync-from-canon.prompt.md`.
+Существующие файлы НЕ перезаписываются (для них хеш не пишем - база определится на первом синке). Для апгрейда к актуальной версии канона (включая скрипты с прогревом и migration-логикой) есть `migrations/sync-from-canon.prompt.md`.
 
 ### 4b. Создай `.claude/rules/wiki-structure.md` из шаблона
 
@@ -111,21 +94,10 @@ G. `.claude/canon.yaml`:
 
 ### 4c. Допиши `.claude/canon.yaml`
 
-В секцию `files` добавь записи, которых там еще нет:
+- В `files` добавь все пути секции `wiki`, которых там еще нет (в каноническом виде, без `.claude/`-префикса). В мультиспециализированных проектах (например, wiki+management) часть записей могла уже появиться от предыдущего bootstrap-03 - не дублируй, просто пропусти то, что уже есть в `files`.
+- В `file_hashes` добавь sha256 (из 4a) для файлов, которые реально записал; для уже существовавших файлов запись не добавляй. Если секции `file_hashes` в файле еще нет - заведи ее.
 
-```yaml
-  - rules/wiki-notes-style.md
-  - rules/wiki-linking-obsidian.md
-  - agents/note-writer.md
-  - agents/librarian.md
-  - skills/telegram-snapshot-setup/SKILL.md
-  - scripts/telegram-snapshot.py
-  - scripts/telegram-deltas.py
-```
-
-В мультиспециализированных проектах (например, wiki+management) часть этих записей могла уже появиться от предыдущего bootstrap-03 - не дублируй, просто пропусти то, что уже есть в `files`.
-
-Если `canon.yaml` нет - значит bootstrap-02 не выполнялся; сообщи об этом и не создавай `canon.yaml` сам (это работа шага 02).
+Правь точечно, не пересоздавая файл. Если `canon.yaml` нет - значит bootstrap-02 не выполнялся; сообщи об этом и не создавай `canon.yaml` сам (это работа шага 02).
 
 Отдельно про `project_type` (всегда **список**):
 
@@ -136,7 +108,7 @@ G. `.claude/canon.yaml`:
 
 ### 4d. Дополни существующие файлы
 
-Дополнения CLAUDE.md (ссылки `@.claude/rules/wiki-notes-style.md`, `@.claude/rules/wiki-linking-obsidian.md`, `@.claude/rules/wiki-structure.md`) - по отдельному "ок".
+Дополнения CLAUDE.md (по `@`-ссылке на каждое правило `rules/*` секции `wiki`, которого еще нет в CLAUDE.md, плюс `@.claude/rules/wiki-structure.md` из шаблона) - по отдельному "ок".
 
 ШАГ 5. Отчет.
 
@@ -150,12 +122,7 @@ G. `.claude/canon.yaml`:
 
 Этот промт сам по себе только **добавляет** wiki-специализацию - проект становится мультиспециализированным (`[<старый_тип>, wiki]`), что обычно и нужно. Этот раздел применяется только если пользователь хочет ЦЕЛИКОМ заменить старую специализацию на wiki (старая больше не нужна). Тогда **после** ШАГ 4:
 
-1. Из `.claude/canon.yaml -> files` удали записи старого типа. Маппинг типа -> файлы:
-   - **management** -> `rules/meetings.md`, `rules/tasks-tracking.md`, `rules/artifacts-structure.md`, `rules/meeting-transcripts.md`, `rules/name-cross-check.md`, `rules/google-sheets-mcp.md`, `rules/estimates-in-hours.md`, `agents/tracker.md`. **НЕ** удалять `skills/telegram-snapshot-setup/SKILL.md`, `scripts/telegram-snapshot.py`, `scripts/telegram-deltas.py` - они расшарены с wiki-секцией и продолжают использоваться.
-   - **education** -> `rules/lecture-notes.md`, `rules/homework.md`, `rules/course-structure.md`, `agents/note-taker.md`, и `skills/tutor/SKILL.md` (если подключался).
-   - **documentation** -> `agents/copy-editor.md`, и локально - `rules/style-guide.md`.
-   - **coding** -> `rules/karpathy-guidelines.md`, `rules/tests-coverage.md`, `rules/error-exposure.md`, `agents/debugger.md`, `agents/implementer.md`, `agents/code-reviewer.md`.
-   - **claude-tooling** -> `rules/prompt-conventions.md`, `agents/prompt-reviewer.md`.
+1. Из `.claude/canon.yaml -> files` удали записи старого типа. Список файлов типа = его секция в `manifest.yaml` (`curl -fsSL <canon_base>/manifest.yaml`, локально - `cat`; единственный источник). **Исключение:** не удаляй файлы, которые есть и в секции `wiki` - они расшарены и продолжают использоваться (на практике это `skills/telegram-snapshot-setup/SKILL.md`, `scripts/telegram-snapshot.py`, `scripts/telegram-deltas.py`, общие с management). Заодно убери из `file_hashes` записи реально удаленных путей.
 2. Удали соответствующие файлы из `.claude/rules/` и `.claude/agents/` (если они не используются по другим причинам).
 3. Из `CLAUDE.md` убери `@-`ссылки на удаленные правила.
 4. Из `.claude/settings.json` убери allow-блоки старого типа (если bootstrap-03 старого типа их добавлял - например, генераторы статсайтов в documentation).
