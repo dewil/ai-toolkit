@@ -132,12 +132,13 @@ claude-toolkit/
 │   ├── note-writer.md                           # wiki-специализация
 │   ├── librarian.md                             # wiki-специализация
 │   ├── tracker.md                               # management-специализация
-│   ├── note-taker.md                            # education-специализация
-│   └── tutor.md                                 # education-специализация
+│   └── note-taker.md                            # education-специализация
 ├── skills/                                      # КАНОН: скиллы (папка на скилл)
 │   ├── codex-audit/                             # universal
 │   │   └── SKILL.md
-│   └── telegram-snapshot-setup/                 # management + wiki
+│   ├── telegram-snapshot-setup/                 # management + wiki
+│   │   └── SKILL.md
+│   └── tutor/                                   # education-специализация
 │       └── SKILL.md
 ├── scripts/                                     # КАНОН: проектные скрипты (путь в каноне = путь в проекте)
 │   ├── telegram-snapshot.py                     # management + wiki

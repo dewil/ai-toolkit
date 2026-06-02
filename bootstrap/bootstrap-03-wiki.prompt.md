@@ -152,7 +152,7 @@ G. `.claude/canon.yaml`:
 
 1. Из `.claude/canon.yaml -> files` удали записи старого типа. Маппинг типа -> файлы:
    - **management** -> `rules/meetings.md`, `rules/tasks-tracking.md`, `rules/artifacts-structure.md`, `rules/meeting-transcripts.md`, `rules/name-cross-check.md`, `rules/google-sheets-mcp.md`, `rules/estimates-in-hours.md`, `agents/tracker.md`. **НЕ** удалять `skills/telegram-snapshot-setup/SKILL.md`, `scripts/telegram-snapshot.py`, `scripts/telegram-deltas.py` - они расшарены с wiki-секцией и продолжают использоваться.
-   - **education** -> `rules/lecture-notes.md`, `rules/homework.md`, `rules/course-structure.md`, `agents/note-taker.md`, `agents/tutor.md`.
+   - **education** -> `rules/lecture-notes.md`, `rules/homework.md`, `rules/course-structure.md`, `agents/note-taker.md`, и `skills/tutor/SKILL.md` (если подключался).
    - **documentation** -> `agents/copy-editor.md`, и локально - `rules/style-guide.md`.
    - **coding** -> `rules/karpathy-guidelines.md`, `rules/tests-coverage.md`, `rules/error-exposure.md`, `agents/debugger.md`, `agents/implementer.md`, `agents/code-reviewer.md`.
    - **claude-tooling** -> `rules/prompt-conventions.md`, `agents/prompt-reviewer.md`.
