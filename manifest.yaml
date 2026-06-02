@@ -68,4 +68,4 @@ education:
   - rules/homework.md
   - rules/course-structure.md
   - agents/note-taker.md
-  - agents/tutor.md
+  - skills/tutor/SKILL.md
