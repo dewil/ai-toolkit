@@ -13,7 +13,7 @@
 - `canon_base` = подняться на один уровень из `bootstrap/`. Например, если этот файл загружен по URL `.../main/bootstrap/bootstrap-02-scaffold.prompt.md`, то `canon_base = .../main/`.
 - Канонические файлы правил, агентов и скиллов: `<canon_base>/rules/*.md`, `<canon_base>/agents/*.md`, `<canon_base>/skills/<name>/`.
 - Предыдущий шаг (сиблинг): `bootstrap-01-memory.prompt.md` в той же папке.
-- Специализация (сиблинги в той же папке): `bootstrap-03-{coding,management,education,documentation,claude-tooling,wiki}.prompt.md`.
+- Специализация (сиблинги в той же папке): `bootstrap-03-{coding,management,education,documentation,wiki}.prompt.md`.
 
 Ты в корне проекта. Раскатываешь общий scaffold, нужный любому проекту независимо от типа: базовые правила, базовые агенты, settings.json, CLAUDE.md, canon.yaml. Это слой 2; специализация под тип проекта - отдельным промтом `bootstrap-03-*`.
 
@@ -80,7 +80,7 @@
 ### 4b. Создай `.claude/canon.yaml`
 
 ```yaml
-project_type: []      # список типов из набора: coding | management | education | documentation | claude-tooling | wiki. Наполняется на bootstrap-03-* (по одному типу за прогон). Может содержать несколько (напр. [wiki, coding, documentation]).
+project_type: []      # список типов из набора: coding | management | education | documentation | wiki. Наполняется на bootstrap-03-* (по одному типу за прогон). Может содержать несколько (напр. [wiki, coding, documentation]).
 canon:
   repo: https://github.com/dewil/claude-toolkit
   raw_base: https://raw.githubusercontent.com/dewil/claude-toolkit/main
@@ -177,7 +177,7 @@ file_hashes:          # sha256 канонических байт каждого 
 
 После отчета спроси одной строкой:
 
-> Какие типы у проекта? Можно несколько через запятую/пробел (например, "1 4 6" или "coding wiki" для vault'а с встроенной кодовой частью). Варианты: 1) кодинг 2) управление 3) учеба 4) документация 5) claude-tooling 6) wiki 7) пропустить
+> Какие типы у проекта? Можно несколько через запятую/пробел (например, "1 4 5" или "coding wiki" для vault'а с встроенной кодовой частью). Варианты: 1) кодинг 2) управление 3) учеба 4) документация 5) wiki 6) пропустить
 
 Маппинг каждого элемента ответа -> имя файла-сиблинга в той же папке `bootstrap/`:
 
@@ -185,11 +185,10 @@ file_hashes:          # sha256 канонических байт каждого 
 - 2 / управление / management -> `bootstrap-03-management.prompt.md`
 - 3 / учеба / education -> `bootstrap-03-education.prompt.md`
 - 4 / документация / docs / documentation -> `bootstrap-03-documentation.prompt.md`
-- 5 / claude / claude-tooling / tooling -> `bootstrap-03-claude-tooling.prompt.md`
-- 6 / wiki / вики / obsidian / knowledge-base -> `bootstrap-03-wiki.prompt.md`
-- 7 / пропустить / нет / skip -> остановись, ничего не делай.
+- 5 / wiki / вики / obsidian / knowledge-base -> `bootstrap-03-wiki.prompt.md`
+- 6 / пропустить / нет / skip -> остановись, ничего не делай.
 
-Если в ответе только `7` (или эквивалент) - останавливаемся.
+Если в ответе только `6` (или эквивалент) - останавливаемся.
 
 Иначе - **последовательно** запускай bootstrap-03 по каждому выбранному типу:
 
