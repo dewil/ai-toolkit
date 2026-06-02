@@ -40,10 +40,6 @@ coding:
 documentation:
   - agents/copy-editor.md
 
-claude-tooling:
-  - rules/prompt-conventions.md
-  - agents/prompt-reviewer.md
-
 wiki:
   - rules/wiki-notes-style.md
   - rules/wiki-linking-obsidian.md

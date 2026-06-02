@@ -36,9 +36,7 @@
 - `coding` - кодовые проекты.
 - `management` - управленческие.
 - `education` - учебные.
-- `documentation` - документация (скелет, требует наполнения).
-- `claude-tooling` - проекты-конструкторы для Claude, как этот репо (скелет).
-- `wiki` - Obsidian-vault'ы, персональные базы знаний (заметки, перелинковка `[[...]]`).
+- `documentation` - документация (скелет, требует наполнения).- `wiki` - Obsidian-vault'ы, персональные базы знаний (заметки, перелинковка `[[...]]`).
 
 Проект может быть **мультиспециализированным** - например, vault Obsidian со встроенной кодовой частью и документацией будет иметь `project_type: [wiki, coding, documentation]`. В bootstrap-цепочке на шаге `bootstrap-02` пользователь выбирает несколько типов; bootstrap-03 запускается **последовательно по каждому** из них, накладывая специализации друг на друга. Каждый bootstrap-03 идемпотентен и только **добавляет** свой тип в список (если еще не там), не перезаписывая.
 
@@ -49,7 +47,7 @@
 После bootstrap в проекте появляется `.claude/canon.yaml`:
 
 ```yaml
-project_type: [coding]  # список типов из набора: coding | management | education | documentation | claude-tooling | wiki. Может содержать несколько (напр. [wiki, coding, documentation] для vault'а со встроенной кодовой частью и доками).
+project_type: [coding]  # список типов из набора: coding | management | education | documentation | wiki. Может содержать несколько (напр. [wiki, coding, documentation] для vault'а со встроенной кодовой частью и доками).
 canon:
   repo: https://github.com/dewil/claude-toolkit
   raw_base: https://raw.githubusercontent.com/dewil/claude-toolkit/main
@@ -100,18 +98,14 @@ claude-toolkit/
 │   ├── bootstrap-03-coding.prompt.md
 │   ├── bootstrap-03-management.prompt.md
 │   ├── bootstrap-03-education.prompt.md
-│   ├── bootstrap-03-documentation.prompt.md
-│   ├── bootstrap-03-claude-tooling.prompt.md
-│   └── bootstrap-03-wiki.prompt.md
+│   ├── bootstrap-03-documentation.prompt.md│   └── bootstrap-03-wiki.prompt.md
 ├── rules/                                       # КАНОН: правила поведения Claude
 │   ├── typography-ru.md                         # universal
 │   ├── subagents-usage.md                       # universal
 │   ├── docs-maintenance.md                      # universal
 │   ├── karpathy-guidelines.md                   # coding-специализация
 │   ├── tests-coverage.md                        # coding-специализация
-│   ├── error-exposure.md                        # coding-специализация
-│   ├── prompt-conventions.md                    # claude-tooling-специализация
-│   ├── wiki-notes-style.md                      # wiki-специализация
+│   ├── error-exposure.md                        # coding-специализация│   ├── wiki-notes-style.md                      # wiki-специализация
 │   ├── wiki-linking-obsidian.md                 # wiki-специализация
 │   ├── meetings.md                              # management-специализация
 │   ├── tasks-tracking.md                        # management-специализация
@@ -132,9 +126,7 @@ claude-toolkit/
 │   ├── debugger.md                              # coding-специализация
 │   ├── implementer.md                           # coding-специализация
 │   ├── code-reviewer.md                         # coding-специализация
-│   ├── copy-editor.md                           # documentation-специализация
-│   ├── prompt-reviewer.md                       # claude-tooling-специализация
-│   ├── note-writer.md                           # wiki-специализация
+│   ├── copy-editor.md                           # documentation-специализация│   ├── note-writer.md                           # wiki-специализация
 │   ├── librarian.md                             # wiki-специализация
 │   ├── tracker.md                               # management-специализация
 │   └── note-taker.md                            # education-специализация
@@ -176,7 +168,7 @@ claude-toolkit/
 
 При добавлении нового правила/агента/скилла/скрипта в `rules/`, `agents/`, `skills/` или `scripts/`:
 
-- **Зарегистрировать в `manifest.yaml`** в нужной секции (`universal` / `coding` / `documentation` / `claude-tooling` / `wiki` / `management` / `education`). Это **единственный реестр списков**: bootstrap-02 (секция `universal`) и bootstrap-03-* (своя секция) тянут список из манифеста и раскатывают его - перечислять файл в bootstrap-промтах руками больше не нужно. Sync видит новый файл через autodiscovery по тому же манифесту.
+- **Зарегистрировать в `manifest.yaml`** в нужной секции (`universal` / `coding` / `documentation` / `wiki` / `management` / `education`). Это **единственный реестр списков**: bootstrap-02 (секция `universal`) и bootstrap-03-* (своя секция) тянут список из манифеста и раскатывают его - перечислять файл в bootstrap-промтах руками больше не нужно. Sync видит новый файл через autodiscovery по тому же манифесту.
 - Если файл - **правило** (`rules/<name>.md`), bootstrap добавит на него `@`-импорт в `CLAUDE.md` проекта автоматически (по одному импорту на каждое правило секции) - дописывать в промт ничего не надо.
 - Для скриптов в `scripts/<name>.py` - целевой путь в проекте совпадает с каноническим (`scripts/<name>.py`); bootstrap делает `chmod +x` на скопированный файл (generic-маппинг по префиксу `scripts/`).
 - Обновить дерево репо в разделе "Структура репо" выше - дописать файл с пометкой типа.
