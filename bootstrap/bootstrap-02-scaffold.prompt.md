@@ -43,7 +43,8 @@
 **B. Канонические правила в `.claude/rules/`** (источник - `<canon_base>/rules/`):
 
 - typography-ru.md, subagents-usage.md, docs-maintenance.md
-- project-structure.md - локально создаваемый шаблон с TODO (содержимое в ШАГ 4c)
+
+`project-structure.md` сюда НЕ входит: это не правило, а справочная карта структуры. Создается отдельным файлом в **корне проекта** (не в `.claude/rules/`) из шаблона с TODO - см. ШАГ 4c.
 
 `karpathy-guidelines.md` намеренно не идет в общий scaffold - он специфичен для кодинга (упоминает тесты, рефакторинг, "LLM coding mistakes") и подключается в `bootstrap-03-coding`.
 
@@ -55,7 +56,7 @@
 
 **E. `.claude/settings.json`** с базовыми allow и расширенным deny (шаблон в ШАГ 4d).
 
-**F. `CLAUDE.md`** со ссылками `@.claude/rules/*.md` на каноничные правила + `project-structure.md` (шаблон в ШАГ 4e).
+**F. `CLAUDE.md`** со ссылками `@.claude/rules/*.md` на каноничные правила + `@project-structure.md` из корня (справочная карта; шаблон в ШАГ 4e).
 
 **G.** В `.gitignore` уже должен быть `.claude/settings.local.json` (добавлен в start.md). Если нет - зафиксируй и добавь по отдельному "ок".
 
@@ -110,12 +111,12 @@ upstream_pending: []  # файлы, помеченные к выносу в ка
 
 Если в проекте уже был `canon.yaml` - НЕ перезаписывай, оставь как есть. Если bootstrap-цепочка запускается повторно на уже-настроенном проекте, актуализация канона делается через `sync-from-canon.prompt.md`.
 
-### 4c. Создай `.claude/rules/project-structure.md` из шаблона
+### 4c. Создай `project-structure.md` в корне проекта из шаблона
 
 Если файла еще нет в проекте:
 
-- Если этот промт загружен по HTTP: `WebFetch <canon_base>/templates/project-structure.md` -> запиши в `.claude/rules/project-structure.md`.
-- Локально (если читался с диска): `cp <canon_base>/templates/project-structure.md .claude/rules/project-structure.md`.
+- Если этот промт загружен по HTTP: `WebFetch <canon_base>/templates/project-structure.md` -> запиши в `project-structure.md` (в корне проекта).
+- Локально (если читался с диска): `cp <canon_base>/templates/project-structure.md project-structure.md`.
 
 Существующий файл НЕ перезаписывай.
 
@@ -165,8 +166,11 @@ upstream_pending: []  # файлы, помеченные к выносу в ка
 
 @.claude/rules/subagents-usage.md
 @.claude/rules/docs-maintenance.md
-@.claude/rules/project-structure.md
 @.claude/rules/typography-ru.md
+
+Карта структуры проекта (справка, держи актуальной):
+
+@project-structure.md
 ```
 
 Если CLAUDE.md уже есть - дополни недостающими @-ссылками (по отдельному "ок"), не перезаписывай весь файл.
@@ -216,7 +220,7 @@ upstream_pending: []  # файлы, помеченные к выносу в ка
 
 После завершения:
 
-- Заполни `.claude/rules/project-structure.md` деревом папок проекта.
+- Заполни `project-structure.md` (в корне) деревом папок проекта.
 - Запусти специализированный промт под тип проекта.
 - Стек/тип-специфичные allow в `.claude/settings.json` (например, `Bash(php artisan *)`, `Bash(npm run *)`) добавятся специализированным промтом или вручную.
 - Для обновления канонических правил/агентов в будущем используй `migrations/sync-from-canon.prompt.md`.
