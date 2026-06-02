@@ -28,7 +28,8 @@ Claude Code из коробки - чистый помощник без памя�
 - **coding** - кодовые проекты любого стека. Дополнительно тянет правила тестов и обработки ошибок, агентов `debugger`, `implementer`, `code-reviewer`. Пример: серверный сервис, библиотека, CLI-утилита.
 - **documentation** - тексты, инструкции, базы знаний. Дополнительно тянет агента `copy-editor`. Пример: документация продукта, книга, технический блог.
 - **management** - управленческие проекты, продуктовые задачи, планирование. Пока только универсальный набор (типографика, базовые агенты, правила работы с документами). Пример: roadmap-репо, продуктовые заметки, чек-листы релизов.
-- **education** - учебные материалы, конспекты, разборы. Пока только универсальный набор. Пример: репо с заметками по предмету, конспекты лекций, разбор статей.- **wiki** - Obsidian-vault'ы и персональные базы знаний. Дополнительно тянет правила формата заметки и перелинковки (`wiki-notes-style`, `wiki-linking-obsidian`), агентов `note-writer` (пишет заметки по конвенциям) и `librarian` (read-only ревизия vault'а: битые ссылки, дубли, сироты). Пример: заметки по велосипеду/здоровью/рецептам, личная wiki по теме, домашняя база знаний.
+- **education** - учебные материалы, конспекты, разборы. Пока только универсальный набор. Пример: репо с заметками по предмету, конспекты лекций, разбор статей.
+- **wiki** - Obsidian-vault'ы и персональные базы знаний. Дополнительно тянет правила формата заметки и перелинковки (`wiki-notes-style`, `wiki-linking-obsidian`), агентов `note-writer` (пишет заметки по конвенциям) и `librarian` (read-only ревизия vault'а: битые ссылки, дубли, сироты). Пример: заметки по велосипеду/здоровью/рецептам, личная wiki по теме, домашняя база знаний.
 
 ## Быстрый старт - новый проект
 
@@ -50,7 +51,7 @@ Claude Code из коробки - чистый помощник без памя�
 
 (или короче: `sync canon`)
 
-Агент прочитает `.claude/canon.yaml`, скачает актуальные правила и агентов из этого репо, опишет расхождения по каждому файлу и спросит, что накатить. Заодно через [`manifest.yaml`](./manifest.yaml) проверит, появились ли в каноне новые файлы под тип проекта, и предложит их добавить. Логика - в [`migrations/sync-from-canon.prompt.md`](./migrations/sync-from-canon.prompt.md).
+Агент прочитает `.claude/canon.yaml`, скачает актуальные правила и агентов из этого репо, опишет расхождения по каждому файлу и спросит, что накатить. Заодно через `[manifest.yaml](./manifest.yaml)` проверит, появились ли в каноне новые файлы под тип проекта, и предложит их добавить. Логика - в `[migrations/sync-from-canon.prompt.md](./migrations/sync-from-canon.prompt.md)`.
 
 ## Принципы
 
@@ -59,7 +60,7 @@ Claude Code из коробки - чистый помощник без памя�
 - **Изоляция** - проект ничего не знает о filesystem-расположении локального клона `claude-toolkit` на твоей машине.
 - **Канон в одном экземпляре** - правила и агенты живут только в этом репо, не дублируются heredoc'ом.
 
-Архитектурное описание - в [`CLAUDE.md`](./CLAUDE.md).
+Архитектурное описание - в `[CLAUDE.md](./CLAUDE.md)`.
 
 ## Структура
 
@@ -79,21 +80,21 @@ Claude Code из коробки - чистый помощник без памя�
 
 1. Форкни этот репо на GitHub под свой аккаунт - например `<твой-username>/claude-toolkit` (или назови как хочешь).
 2. Замени `dewil/claude-toolkit` на свой `<username>/<repo>` в этих файлах:
-   - [`start.md`](./start.md) - пример с `<canon_base>`.
-   - [`bootstrap/bootstrap-01-memory.prompt.md`](./bootstrap/bootstrap-01-memory.prompt.md) - команда запуска.
-   - [`bootstrap/bootstrap-02-scaffold.prompt.md`](./bootstrap/bootstrap-02-scaffold.prompt.md) - шаблон `canon.yaml` (поля `repo` и `raw_base`).
-   - [`README.md`](./README.md) - команды в "Быстрый старт".
+  - `[start.md](./start.md)` - пример с `<canon_base>`.
+  - `[bootstrap/bootstrap-01-memory.prompt.md](./bootstrap/bootstrap-01-memory.prompt.md)` - команда запуска.
+  - `[bootstrap/bootstrap-02-scaffold.prompt.md](./bootstrap/bootstrap-02-scaffold.prompt.md)` - шаблон `canon.yaml` (поля `repo` и `raw_base`).
+  - `[README.md](./README.md)` - команды в "Быстрый старт".
 3. Закоммить и запушь в свой репо.
 4. В новых проектах используй ссылку на свой `start.md`:
-   ```
+  ```
    выполни инструкции из https://raw.githubusercontent.com/<username>/<repo>/main/start.md
-   ```
+  ```
 
 **Как наполнять своим:**
 
-- Свои правила - в [`rules/`](./rules/), своих агентов - в [`agents/`](./agents/), свои скиллы - в [`skills/<имя>/SKILL.md`](./skills/).
-- Любой новый файл регистрируй в [`manifest.yaml`](./manifest.yaml) в нужной секции (`universal` / `coding` / `documentation` / `wiki` / `management` / `education`).
-- Универсальные файлы дополнительно регистрируй в [`bootstrap/bootstrap-02-scaffold.prompt.md`](./bootstrap/bootstrap-02-scaffold.prompt.md); файлы под конкретный тип - в соответствующем `bootstrap-03-<тип>.prompt.md`. Подробности - в TODO-секции [`CLAUDE.md`](./CLAUDE.md).
+- Свои правила - в `[rules/](./rules/)`, своих агентов - в `[agents/](./agents/)`, свои скиллы - в `[skills/<имя>/SKILL.md](./skills/)`.
+- Любой новый файл регистрируй в `[manifest.yaml](./manifest.yaml)` в нужной секции (`universal` / `coding` / `documentation` / `wiki` / `management` / `education`).
+- Универсальные файлы дополнительно регистрируй в `[bootstrap/bootstrap-02-scaffold.prompt.md](./bootstrap/bootstrap-02-scaffold.prompt.md)`; файлы под конкретный тип - в соответствующем `bootstrap-03-<тип>.prompt.md`. Подробности - в TODO-секции `[CLAUDE.md](./CLAUDE.md)`.
 - Лишнее из текущего канона можно удалить (например, если не работаешь с управленческими проектами - выкинь `bootstrap-03-management.prompt.md` и связанные строки из `manifest.yaml`).
 
 После этого твои проекты будут синкаться с твоим каноном, а не с моим - и обновления будут приезжать те, которые ты сам туда положил.
