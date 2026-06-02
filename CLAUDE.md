@@ -144,11 +144,12 @@ claude-toolkit/
 │   ├── telegram-snapshot.py                     # management + wiki
 │   └── telegram-deltas.py                       # management + wiki
 ├── templates/                                   # ШАБЛОНЫ: копируются в проект один раз
-│   ├── project-structure.md                     # universal  -> .claude/rules/project-structure.md
+│   ├── project-structure.md                     # universal  -> project-structure.md (в корне проекта)
 │   ├── style-guide.md                           # documentation -> .claude/rules/style-guide.md
 │   ├── wiki-structure.md                        # wiki -> .claude/rules/wiki-structure.md
 │   └── management-CLAUDE.md                     # management -> CLAUDE.md в корне
 └── migrations/                                  # одноразовые промты
+    ├── move-project-structure.prompt.md         # перенос project-structure.md в корень (.claude/rules -> корень)
     └── sync-from-canon.prompt.md                # синхронизация проекта с каноном
 ```
 
