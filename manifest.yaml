@@ -1,9 +1,12 @@
 # claude-toolkit - манифест канона
 #
 # Полный список канонических файлов репо с привязкой к типу проекта.
-# Используется migrations/sync-from-canon.prompt.md для autodiscovery:
-# sync фетчит этот файл и видит канон-файлы, добавленные в репо ПОСЛЕ
-# bootstrap проекта (их еще нет в .claude/canon.yaml проекта).
+# ЕДИНСТВЕННЫЙ реестр списков - и для bootstrap, и для sync:
+# - bootstrap-02/03 фетчат свою секцию (universal / <тип>) и раскатывают ее
+#   (поименных списков в bootstrap-промтах нет - они тянут отсюда);
+# - sync (migrations/sync-from-canon.prompt.md) через autodiscovery видит
+#   канон-файлы, добавленные в репо ПОСЛЕ bootstrap проекта (их еще нет в
+#   .claude/canon.yaml проекта).
 #
 # При добавлении нового rule/agent/skill/script в канон - дописать его сюда,
 # в секцию по типу. universal тянется любым проектом (bootstrap-02);

@@ -36,33 +36,26 @@
 
 После общего scaffold должно быть:
 
-**A. Канонические агенты в `.claude/agents/`** (источник - `<canon_base>/agents/`):
+**A. Канонический набор для любого проекта = секция `universal` в `manifest.yaml`.** Источник истины списка - **только манифест** (`<canon_base>/manifest.yaml`); здесь файлы поименно не перечисляем, чтобы не плодить второй реестр. На ШАГ 4 ты фетчнешь манифест и раскатаешь его секцию `universal` по **generic-маппингу канон-путь -> локальный путь**:
 
-- architect.md, explorer.md, searcher.md, planner.md, summarizer.md
+- `rules/<name>.md` -> `.claude/rules/<name>.md` (+ `@`-импорт в `CLAUDE.md`, см. 4e);
+- `agents/<name>.md` -> `.claude/agents/<name>.md`;
+- `skills/<name>/...` -> `.claude/skills/<name>/...` (скилл - это папка; копируются все ее файлы, перечисленные в секции);
+- `scripts/<name>` -> `<name>` в корне проекта, затем `chmod +x` (в `universal` скриптов сейчас нет, но маппинг общий для bootstrap-03).
 
-**B. Канонические правила в `.claude/rules/`** (источник - `<canon_base>/rules/`):
+`project-structure.md` в набор НЕ входит: это не правило, а справочная карта структуры. Создается отдельным файлом в **корне проекта** (не в `.claude/rules/`) из шаблона с TODO - см. ШАГ 4c. `karpathy-guidelines.md` тоже не в `universal` - он специфичен для кодинга (тесты, рефакторинг, "LLM coding mistakes") и лежит в секции `coding` манифеста (накатывается `bootstrap-03-coding`).
 
-- typography-ru.md, subagents-usage.md, docs-maintenance.md
+**B. `.claude/canon.yaml`** - метаданные канона, список `files` (= секция `universal`) и `file_hashes` (база-хеши снимков), см. шаблон в ШАГ 4b.
 
-`project-structure.md` сюда НЕ входит: это не правило, а справочная карта структуры. Создается отдельным файлом в **корне проекта** (не в `.claude/rules/`) из шаблона с TODO - см. ШАГ 4c.
+**C. `.claude/settings.json`** с базовыми allow и расширенным deny (шаблон в ШАГ 4d).
 
-`karpathy-guidelines.md` намеренно не идет в общий scaffold - он специфичен для кодинга (упоминает тесты, рефакторинг, "LLM coding mistakes") и подключается в `bootstrap-03-coding`.
+**D. `CLAUDE.md`** со ссылками `@.claude/rules/*.md` на каноничные правила + `@project-structure.md` из корня (справочная карта; шаблон в ШАГ 4e).
 
-**C. Канонические скиллы в `.claude/skills/`** (источник - `<canon_base>/skills/`):
-
-- codex-audit/ - скилл делегирования аудита в Codex CLI (read-only). Скилл - это папка; список ее файлов берется из `canon.yaml`. У `codex-audit` это один файл `skills/codex-audit/SKILL.md`.
-
-**D. `.claude/canon.yaml`** - метаданные канона, см. шаблон в ШАГ 4b.
-
-**E. `.claude/settings.json`** с базовыми allow и расширенным deny (шаблон в ШАГ 4d).
-
-**F. `CLAUDE.md`** со ссылками `@.claude/rules/*.md` на каноничные правила + `@project-structure.md` из корня (справочная карта; шаблон в ШАГ 4e).
-
-**G.** В `.gitignore` уже должен быть `.claude/settings.local.json` (добавлен в start.md). Если нет - зафиксируй и добавь по отдельному "ок".
+**E.** В `.gitignore` уже должен быть `.claude/settings.local.json` (добавлен в start.md). Если нет - зафиксируй и добавь по отдельному "ок".
 
 ## ШАГ 3. План
 
-Сравни целевое с фактическим. Для каждого пункта - статус и действие:
+Чтобы знать целевой набор, получи секцию `universal` манифеста (`curl -fsSL <canon_base>/manifest.yaml`, локально - `cat`; как в 4a). Сравни целевое с фактическим. Для каждого пункта - статус и действие:
 
 - "отсутствует, создам" - перечисли с буквальным путем.
 - "есть, не трону" - перечисли (например, `.claude/rules/subagents-usage.md` уже есть, не перезаписываем).
@@ -72,16 +65,17 @@
 
 ## ШАГ 4. Действуй (только после "ок")
 
-### 4a. Скопируй канонические rules, agents и skills из `<canon_base>`
+### 4a. Раскатай секцию `universal` манифеста
 
-Для каждого файла из ШАГ 2 (A + B), которого еще нет в проекте:
+1. Получи манифест точными байтами: HTTP - `curl -fsSL <canon_base>/manifest.yaml`; локально - `cat <canon_base>/manifest.yaml`. Возьми секцию `universal` - это полный канонический список набора (единственный источник, не дублируется в этом промте).
+2. Для каждого файла секции, которого еще нет в проекте (локальный путь - по generic-маппингу из ШАГ 2 A):
+   - получи канонические байты **точными байтами** (`curl -fsSL <canon_base>/<path>`, локально - `cp`/`cat`; не `WebFetch` - он лоссовый, ломает sha256 и корежит `.py`);
+   - запиши в локальный путь; промежуточные папки (`.claude/skills/<name>/`, `scripts/`) создай; для `scripts/` поставь `chmod +x`;
+   - посчитай sha256 записанных байт (`shasum -a 256 <локальный путь> | awk '{print $1}'`, на Linux - `sha256sum`) - это база снимка для `file_hashes` в 4b.
 
-- Если этот промт загружен по HTTP: `WebFetch <canon_base>/rules/<name>.md` -> запиши в `.claude/rules/<name>.md`. Аналогично для agents.
-- Локально (если читался с диска): `cp <canon_base>/rules/<name>.md .claude/rules/<name>.md`. Аналогично для agents.
+Скиллы - это папки: копируй все их файлы, перечисленные в секции (у `codex-audit` это один `skills/codex-audit/SKILL.md`).
 
-Скиллы (ШАГ 2 C) - это папки. Каждый файл скилла копируется тем же способом (WebFetch/cp) в `.claude/skills/<name>/`, папку при необходимости создай. Список файлов скилла бери из шаблона `canon.yaml` ниже - для `codex-audit` это один `skills/codex-audit/SKILL.md`.
-
-Существующие файлы НЕ перезаписываются (это случай "уже было"). Для апгрейда к актуальной версии канона есть отдельный промт `migrations/sync-from-canon.prompt.md`.
+Существующие файлы НЕ перезаписываются (случай "уже было") и для них хеш не пишем - их база останется неизвестной до первого синка, где определится трехсторонне (см. `sync-from-canon`). Для апгрейда к актуальной версии канона есть `migrations/sync-from-canon.prompt.md`.
 
 ### 4b. Создай `.claude/canon.yaml`
 
@@ -92,19 +86,13 @@ canon:
   raw_base: https://raw.githubusercontent.com/dewil/claude-toolkit/main
   branch: main
   bootstrapped_at: <ISO-дата сегодня>
-files:
-  - rules/typography-ru.md
-  - rules/subagents-usage.md
-  - rules/docs-maintenance.md
-  - agents/architect.md
-  - agents/explorer.md
-  - agents/searcher.md
-  - agents/planner.md
-  - agents/summarizer.md
-  - skills/codex-audit/SKILL.md
+files:                # = пути секции `universal` манифеста (раскатанные в 4a), по одному на строку. Список не хардкодим здесь - подставь фактический из манифеста. Напр.: rules/typography-ru.md, agents/architect.md, skills/codex-audit/SKILL.md.
+  - <канон-путь>
 local_only: []        # файлы в проекте, которых нет в каноне (свои правила)
 skip_sync: []         # есть в каноне, но проект сознательно не накатывает обновления
 upstream_pending: []  # файлы, помеченные к выносу в канон (см. sync-from-canon.prompt.md)
+file_hashes:          # sha256 канонических байт каждого files[i] на момент bootstrap - база снимка для трехстороннего сравнения в sync. Запиши хеши из 4a только для файлов, которые реально записал; для уже существовавших файлов запись не добавляй (база неизвестна, определится на первом синке).
+  <канон-путь>: "<sha256>"
 ```
 
 Поле `project_type` пока пустой список - его наполнят специализированные `bootstrap-03-*` на ШАГ 6 (каждый прогон добавляет свой тип). Это поле читает `sync-from-canon.prompt.md` для autodiscovery новых канон-файлов: тип-набор = `[universal] + project_type`, sync предлагает файлы из секций каждого типа.
@@ -161,6 +149,8 @@ upstream_pending: []  # файлы, помеченные к выносу в ка
 
 ### 4e. Создай или дополни `CLAUDE.md`
 
+Добавь по `@`-ссылке на каждое правило `rules/*` из секции `universal`, которое раскатал в 4a (агенты и скиллы не импортируются - только правила). На текущий набор это:
+
 ```markdown
 Общие поведенческие правила (применяются всегда):
 
@@ -173,7 +163,7 @@ upstream_pending: []  # файлы, помеченные к выносу в ка
 @project-structure.md
 ```
 
-Если CLAUDE.md уже есть - дополни недостающими @-ссылками (по отдельному "ок"), не перезаписывай весь файл.
+Список @-ссылок - производное от набора `universal` (источник - манифест); если в каноне появится новое universal-правило, оно добавится автоматически при раскатке. Если CLAUDE.md уже есть - дополни недостающими @-ссылками (по отдельному "ок"), не перезаписывай весь файл.
 
 ## ШАГ 5. Отчет
 

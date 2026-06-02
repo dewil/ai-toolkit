@@ -40,54 +40,37 @@
 ШАГ 1. Аудит (только чтение).
 
 - pwd - корень проекта.
+- Получи секцию `management` манифеста (`curl -fsSL <canon_base>/manifest.yaml`, локально - `cat`) - это целевой набор файлов специализации (единственный источник списка).
 - Перечисли существующие:
-  - .claude/agents/tracker.md
-  - .claude/rules/meetings.md, tasks-tracking.md, artifacts-structure.md, meeting-transcripts.md, name-cross-check.md, google-sheets-mcp.md, estimates-in-hours.md
-  - .claude/skills/telegram-snapshot-setup/SKILL.md
+  - какие файлы секции `management` уже есть в проекте (по generic-маппингу: `rules/*` -> `.claude/rules/*`, `agents/*` -> `.claude/agents/*`, `skills/<name>/...` -> `.claude/skills/<name>/...`, `scripts/<name>` -> `scripts/<name>` в корне)
   - scripts/telegram-snapshot.py, scripts/telegram-deltas.py - если есть, проверь, содержит ли `telegram-snapshot.py` блок `async for _ in client.iter_dialogs(): pass` (без него на свежей сессии будет PeerUser-ошибка - канон содержит его)
-  - .claude/canon.yaml - есть ли (должен быть после bootstrap-02), что в `files`
+  - .claude/canon.yaml - есть ли (должен быть после bootstrap-02), что в `files` и `file_hashes`
   - CLAUDE.md - какие @-ссылки уже есть, и какие из 11 шаблонных разделов уже заполнены (О проекте, Действующие лица, Глоссарий, Структура каталогов, Ключевые файлы, Встречи, Предпочтения по стилю, Рабочие процессы, Открытые задачи, Решения и договоренности, Ссылки и ресурсы, Полезные команды)
   - Папки Встречи/, Планы/, Решения/, Команда/ - что есть, что нет
   - Если есть Встречи/ или Планы/ - посмотри top-3 файла в каждой, чтобы понять формат, и сообщи. Не правь.
 
 ШАГ 2. Целевое состояние.
 
-A. .claude/agents/ (источник - `<canon_base>/agents/`):
-   - tracker.md
+A. Канонический набор management = секция `management` в `manifest.yaml` (правила + агенты + скилл + скрипты специализации). Источник истины списка - **только манифест**; здесь файлы поименно не перечисляем. На ШАГ 4 раскатаешь секцию по generic-маппингу: `rules/<name>.md` -> `.claude/rules/<name>.md` (+ @-импорт); `agents/<name>.md` -> `.claude/agents/<name>.md`; `skills/<name>/...` -> `.claude/skills/<name>/...` (скилл - папка, копируются все ее файлы из секции); `scripts/<name>` -> `scripts/<name>` в корне + `chmod +x`.
 
-B. .claude/rules/ (источник - `<canon_base>/rules/`):
-   - meetings.md
-   - tasks-tracking.md
-   - artifacts-structure.md
-   - meeting-transcripts.md
-   - name-cross-check.md
-   - google-sheets-mcp.md
-   - estimates-in-hours.md
+B. CLAUDE.md содержит `@`-ссылку на каждое правило `rules/*` из секции `management`.
 
-C. .claude/skills/ (источник - `<canon_base>/skills/`):
-   - telegram-snapshot-setup/SKILL.md - один файл в папке скилла.
+C. Папки в корне: Встречи/, Планы/, Решения/, Команда/.
 
-D. scripts/ в корне проекта (источник - `<canon_base>/scripts/`):
-   - telegram-snapshot.py
-   - telegram-deltas.py
-
-E. CLAUDE.md содержит ссылки на все 7 правил выше в формате `@.claude/rules/<имя>.md`.
-
-F. Папки в корне: Встречи/, Планы/, Решения/, Команда/.
-
-G. `.claude/canon.yaml`:
-   - `files` содержит 11 файлов специализации (7 rules + 1 agent + 1 skill-файл + 2 скрипта).
+D. `.claude/canon.yaml`:
+   - `files` дополнен всеми путями секции `management`, которых там еще нет;
+   - `file_hashes` дополнен sha256 раскатанных файлов;
    - `project_type` - список, и `management` в нем (если списка нет/пустой - инициализируется на ШАГ 4; если `management` отсутствует среди других типов - добавляется на ШАГ 4).
 
-H. (опционально, по подтверждению) CLAUDE.md заполнен по шаблону из 11 разделов (см. блок "ШАБЛОН CLAUDE.md" ниже - инструкция, как взять шаблон из канона). Если CLAUDE.md уже существует и заполнен - не перезаписываешь, предлагаешь сравнить и при необходимости дополнить недостающими разделами.
+E. (опционально, по подтверждению) CLAUDE.md заполнен по шаблону из 11 разделов (см. блок "ШАБЛОН CLAUDE.md" ниже - инструкция, как взять шаблон из канона). Если CLAUDE.md уже существует и заполнен - не перезаписываешь, предлагаешь сравнить и при необходимости дополнить недостающими разделами.
 
 ШАГ 3. План.
 
 Таблица: файл / папка / действие / статус. Для существующих - "не трону". Для отсутствующих - "создам".
 
-Для CLAUDE.md - если файла нет или нет @-ссылок - покажи, что добавишь.
+Для CLAUDE.md - если файла нет или нет @-ссылок на правила `rules/*` секции `management` - покажи, какие @-ссылки на правила секции `management` добавишь.
 
-Для canon.yaml - покажи, какие 11 записей допишешь в `files`.
+Для canon.yaml - покажи, какие пути секции `management` допишешь в `files` (и их sha256 в `file_hashes`).
 
 Для `scripts/telegram-snapshot.py`, если файл уже есть в проекте, но без `iter_dialogs()` прогрева - сообщи об этом отдельно: "версия в проекте отстает от канона (нет `iter_dialogs()` прогрева - на свежей сессии будет PeerUser-ошибка). Бутстрап скрипт не трогает; для апгрейда запусти `migrations/sync-from-canon.prompt.md`". Аналогично для `telegram-deltas.py` - если есть, сообщи факт, не правь.
 
@@ -97,18 +80,15 @@ H. (опционально, по подтверждению) CLAUDE.md запо�
 
 ШАГ 4. Действуй (после "ок").
 
-### 4a. Скопируй канонического агента, правила, скилл и скрипты из `<canon_base>`
+### 4a. Раскатай секцию `management` манифеста
 
-Для каждого файла из ШАГ 2 (A + B + C + D), которого еще нет в проекте:
+1. Возьми секцию `management` манифеста, полученного в ШАГ 1.
+2. Для каждого файла секции, которого еще нет в проекте (локальный путь - по generic-маппингу из ШАГ 2 A):
+   - получи канонические байты **точными байтами** (`curl -fsSL <canon_base>/<path>`, локально - `cp`/`cat`; не `WebFetch` - он лоссовый, ломает sha256 и корежит `.py`);
+   - запиши в локальный путь; для `scripts/` поставь `chmod +x`;
+   - посчитай sha256 записанных байт (`shasum -a 256 <локальный путь> | awk '{print $1}'`, на Linux - `sha256sum`) - база снимка для `file_hashes` в 4b.
 
-- Если этот промт загружен по HTTP:
-  - `WebFetch <canon_base>/agents/<имя>.md` -> запиши в `.claude/agents/<имя>.md`.
-  - `WebFetch <canon_base>/rules/<имя>.md` -> `.claude/rules/<имя>.md`.
-  - `WebFetch <canon_base>/skills/telegram-snapshot-setup/SKILL.md` -> `.claude/skills/telegram-snapshot-setup/SKILL.md` (папку при необходимости создай).
-  - `WebFetch <canon_base>/scripts/<имя>.py` -> `scripts/<имя>.py` в корне проекта (папку при необходимости создай). Сохрани executable-бит через `chmod +x scripts/<имя>.py`.
-- Локально (если читался с диска): `cp <canon_base>/<тот же относительный путь> <тот же таргет>`. Для скриптов отдельно `chmod +x scripts/<имя>.py`.
-
-Существующие файлы НЕ перезаписываются. Для апгрейда к актуальной версии канона (включая скрипты с прогревом) есть `migrations/sync-from-canon.prompt.md`.
+Существующие файлы НЕ перезаписываются (для них хеш не пишем - база определится на первом синке). Для апгрейда к актуальной версии канона (включая скрипты с прогревом `iter_dialogs`) есть `migrations/sync-from-canon.prompt.md`.
 
 ### 4b. Создай папки (если отсутствуют)
 
@@ -116,23 +96,10 @@ H. (опционально, по подтверждению) CLAUDE.md запо�
 
 ### 4c. Допиши `.claude/canon.yaml`
 
-В секцию `files` добавь записи, которых там еще нет:
+- В `files` добавь все пути секции `management`, которых там еще нет (в каноническом виде, без `.claude/`-префикса).
+- В `file_hashes` добавь sha256 (из 4a) для файлов, которые реально записал; для уже существовавших файлов запись не добавляй. Если секции `file_hashes` в файле еще нет - заведи ее.
 
-```yaml
-  - rules/meetings.md
-  - rules/tasks-tracking.md
-  - rules/artifacts-structure.md
-  - rules/meeting-transcripts.md
-  - rules/name-cross-check.md
-  - rules/google-sheets-mcp.md
-  - rules/estimates-in-hours.md
-  - agents/tracker.md
-  - skills/telegram-snapshot-setup/SKILL.md
-  - scripts/telegram-snapshot.py
-  - scripts/telegram-deltas.py
-```
-
-Если `canon.yaml` нет - значит bootstrap-02 не выполнялся; сообщи об этом и не создавай `canon.yaml` сам (это работа шага 02).
+Правь точечно, не пересоздавая файл. Если `canon.yaml` нет - значит bootstrap-02 не выполнялся; сообщи об этом и не создавай `canon.yaml` сам (это работа шага 02).
 
 Отдельно про `project_type` (всегда **список**):
 
