@@ -186,7 +186,7 @@ async for _ in client.iter_dialogs():
 Скрипты эволюционируют (новые поля, новые режимы, фиксы). Для апгрейда в существующем management-проекте используется `migrations/sync-from-canon.prompt.md`:
 
 1. Открой Claude Code в корне проекта.
-2. Скажи "сделай синк с canon".
+2. Скажи "сделай синк с canon" (или "sync canon").
 3. Sync найдет, что `scripts/telegram-snapshot.py` / `scripts/telegram-deltas.py` разошлись с каноном. По каждому файлу отдельно спросит "обновить?".
 4. Согласишься - локальная копия перезаписывается каноном, executable-бит сохраняется. Проектные правки скрипта (если были) затрутся.
 5. Запусти `python3 scripts/telegram-snapshot.py` - на чатах в старом формате при первом запуске сработает migration-режим.
