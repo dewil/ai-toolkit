@@ -41,6 +41,7 @@
 - `rules/<name>.md` -> `.claude/rules/<name>.md` (+ `@`-импорт в `CLAUDE.md`, см. 4e);
 - `agents/<name>.md` -> `.claude/agents/<name>.md`;
 - `skills/<name>/...` -> `.claude/skills/<name>/...` (скилл - это папка; копируются все ее файлы, перечисленные в секции);
+- `commands/<name>.md` -> `.claude/commands/<name>.md` (слэш-команда - живет в `.claude/`, как правила/агенты, без `chmod`; вызывается как `/<name>`);
 - `scripts/<name>` -> `<name>` в корне проекта, затем `chmod +x` (в `universal` скриптов сейчас нет, но маппинг общий для bootstrap-03).
 
 `project-structure.md` в набор НЕ входит: это не правило, а справочная карта структуры. Создается отдельным файлом в **корне проекта** (не в `.claude/rules/`) из шаблона с TODO - см. ШАГ 4c. `karpathy-guidelines.md` тоже не в `universal` - он специфичен для кодинга (тесты, рефакторинг, "LLM coding mistakes") и лежит в секции `coding` манифеста (накатывается `bootstrap-03-coding`).
@@ -70,7 +71,7 @@
 1. Получи манифест точными байтами: HTTP - `curl -fsSL <canon_base>/manifest.yaml`; локально - `cat <canon_base>/manifest.yaml`. Возьми секцию `universal` - это полный канонический список набора (единственный источник, не дублируется в этом промте).
 2. Для каждого файла секции, которого еще нет в проекте (локальный путь - по generic-маппингу из ШАГ 2 A):
    - получи канонические байты **точными байтами** (`curl -fsSL <canon_base>/<path>`, локально - `cp`/`cat`; не `WebFetch` - он лоссовый, ломает sha256 и корежит `.py`);
-   - запиши в локальный путь; промежуточные папки (`.claude/skills/<name>/`, `scripts/`) создай; для `scripts/` поставь `chmod +x`;
+   - запиши в локальный путь; промежуточные папки (`.claude/skills/<name>/`, `.claude/commands/`, `scripts/`) создай; для `scripts/` поставь `chmod +x`;
    - посчитай sha256 записанных байт (`shasum -a 256 <локальный путь> | awk '{print $1}'`, на Linux - `sha256sum`) - это база снимка для `file_hashes` в 4b.
 
 Скиллы - это папки: копируй все их файлы, перечисленные в секции (у `codex-audit` это один `skills/codex-audit/SKILL.md`).

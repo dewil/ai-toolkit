@@ -14,6 +14,8 @@
 # Скилл = подпапка skills/<name>/, в манифесте перечисляется по-файлово.
 # Скрипт = файл в scripts/<name>.py, копируется в scripts/ в корне проекта
 # (путь в каноне = путь в проекте).
+# Команда = файл commands/<name>.md, копируется в .claude/commands/<name>.md
+# (как rules/agents/skills - живет в .claude/, без chmod), вызывается как /<name>.
 # Один и тот же файл может появляться в нескольких секциях - так фиксируется,
 # что он нужен проектам нескольких типов одновременно. sync дедуплицирует
 # при сборке type-set'а.
@@ -28,6 +30,7 @@ universal:
   - agents/planner.md
   - agents/summarizer.md
   - skills/codex-audit/SKILL.md
+  - commands/canon.md
 
 coding:
   - rules/karpathy-guidelines.md
