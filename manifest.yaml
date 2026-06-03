@@ -45,9 +45,11 @@ wiki:
   - rules/wiki-linking-obsidian.md
   - agents/note-writer.md
   - agents/librarian.md
-  - skills/telegram-snapshot-setup/SKILL.md
+  - skills/telegram-snapshot/SKILL.md
+  - skills/telegram-send/SKILL.md
   - scripts/telegram-snapshot.py
   - scripts/telegram-deltas.py
+  - scripts/telegram-send.py
 
 management:
   - rules/meetings.md
@@ -58,9 +60,11 @@ management:
   - rules/google-sheets-mcp.md
   - rules/estimates-in-hours.md
   - agents/tracker.md
-  - skills/telegram-snapshot-setup/SKILL.md
+  - skills/telegram-snapshot/SKILL.md
+  - skills/telegram-send/SKILL.md
   - scripts/telegram-snapshot.py
   - scripts/telegram-deltas.py
+  - scripts/telegram-send.py
 
 education:
   - rules/lecture-notes.md

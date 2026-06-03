@@ -133,13 +133,16 @@ claude-toolkit/
 ├── skills/                                      # КАНОН: скиллы (папка на скилл)
 │   ├── codex-audit/                             # universal
 │   │   └── SKILL.md
-│   ├── telegram-snapshot-setup/                 # management + wiki
+│   ├── telegram-snapshot/                       # management + wiki
+│   │   └── SKILL.md
+│   ├── telegram-send/                           # management + wiki
 │   │   └── SKILL.md
 │   └── tutor/                                   # education-специализация
 │       └── SKILL.md
 ├── scripts/                                     # КАНОН: проектные скрипты (путь в каноне = путь в проекте)
 │   ├── telegram-snapshot.py                     # management + wiki
-│   └── telegram-deltas.py                       # management + wiki
+│   ├── telegram-deltas.py                       # management + wiki
+│   └── telegram-send.py                         # management + wiki
 ├── templates/                                   # ШАБЛОНЫ: копируются в проект один раз
 │   ├── project-structure.md                     # universal  -> project-structure.md (в корне проекта)
 │   ├── style-guide.md                           # documentation -> .claude/rules/style-guide.md

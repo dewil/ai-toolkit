@@ -96,7 +96,7 @@ def load_auth() -> dict:
     if not AUTH_PATH.exists():
         sys.stderr.write(
             f"Нет общего конфига {AUTH_PATH}.\n"
-            f"См. инструкцию: {AUTH_DIR}/README.md\n"
+            "Настрой авторизацию - см. скилл telegram-snapshot.\n"
         )
         sys.exit(2)
     with AUTH_PATH.open(encoding="utf-8") as f:
@@ -131,7 +131,7 @@ def load_project_config() -> dict:
     if not PROJECT_CONFIG_PATH.exists():
         sys.stderr.write(
             f"Нет проектного конфига {PROJECT_CONFIG_PATH}.\n"
-            f"Формат - см. ~/.config/telegram-snapshot/README.md (раздел \"Подключение нового проекта\").\n"
+            "Формат - см. скилл telegram-snapshot, шаг \"Подключение нового проекта\".\n"
         )
         sys.exit(2)
     with PROJECT_CONFIG_PATH.open(encoding="utf-8") as f:

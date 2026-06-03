@@ -10,7 +10,7 @@
 
 - правила: `wiki-notes-style.md` (формат заметки), `wiki-linking-obsidian.md` (правила `[[ссылок]]`)
 - агентов: `note-writer` (создает/правит заметки), `librarian` (read-only ревизия vault'а)
-- скилл `telegram-snapshot-setup` - первая настройка автоматического pull чатов Telegram (грабли my.telegram.org, PeerUser, fallback на публичные ключи tdesktop); тот же скилл подключен у management, в мультиспециализированных проектах копируется один раз.
+- скилл `telegram-snapshot` - первая настройка автоматического pull чатов Telegram (грабли my.telegram.org, PeerUser, fallback на публичные ключи tdesktop); тот же скилл подключен у management, в мультиспециализированных проектах копируется один раз.
 - скрипты в корне vault'а:
   - `scripts/telegram-snapshot.py` - инкрементальный pull новых сообщений с тремя режимами (bootstrap / migration / incremental).
   - `scripts/telegram-deltas.py` - расчет дельт между текущим и предыдущим snapshot, удобно для дневных сводок.
@@ -122,7 +122,7 @@ D. `.claude/canon.yaml`:
 
 Этот промт сам по себе только **добавляет** wiki-специализацию - проект становится мультиспециализированным (`[<старый_тип>, wiki]`), что обычно и нужно. Этот раздел применяется только если пользователь хочет ЦЕЛИКОМ заменить старую специализацию на wiki (старая больше не нужна). Тогда **после** ШАГ 4:
 
-1. Из `.claude/canon.yaml -> files` удали записи старого типа. Список файлов типа = его секция в `manifest.yaml` (`curl -fsSL <canon_base>/manifest.yaml`, локально - `cat`; единственный источник). **Исключение:** не удаляй файлы, которые есть и в секции `wiki` - они расшарены и продолжают использоваться (на практике это `skills/telegram-snapshot-setup/SKILL.md`, `scripts/telegram-snapshot.py`, `scripts/telegram-deltas.py`, общие с management). Заодно убери из `file_hashes` записи реально удаленных путей.
+1. Из `.claude/canon.yaml -> files` удали записи старого типа. Список файлов типа = его секция в `manifest.yaml` (`curl -fsSL <canon_base>/manifest.yaml`, локально - `cat`; единственный источник). **Исключение:** не удаляй файлы, которые есть и в секции `wiki` - они расшарены и продолжают использоваться (на практике это `skills/telegram-snapshot/SKILL.md`, `scripts/telegram-snapshot.py`, `scripts/telegram-deltas.py`, общие с management). Заодно убери из `file_hashes` записи реально удаленных путей.
 2. Удали соответствующие файлы из `.claude/rules/` и `.claude/agents/` (если они не используются по другим причинам).
 3. Из `CLAUDE.md` убери `@-`ссылки на удаленные правила.
 4. Из `.claude/settings.json` убери allow-блоки старого типа (если bootstrap-03 старого типа их добавлял - например, генераторы статсайтов в documentation).
