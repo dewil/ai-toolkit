@@ -17,7 +17,7 @@
   - `name-cross-check.md` - сверка имен из транскрипций по справочнику команды/стейкхолдеров
   - `google-sheets-mcp.md` - работа с Google Sheets через MCP `google-workspace`
   - `estimates-in-hours.md` - оценки в часах, не в человеко-днях
-- скилл `telegram-snapshot-setup` - первая настройка/починка автоматического pull Telegram-чатов проекта (грабли my.telegram.org, PeerUser-ошибки, fallback на публичные ключи tdesktop).
+- скилл `telegram-snapshot` - первая настройка/починка автоматического pull Telegram-чатов проекта (грабли my.telegram.org, PeerUser-ошибки, fallback на публичные ключи tdesktop).
 - скрипты в корне проекта:
   - `scripts/telegram-snapshot.py` - инкрементальный pull новых сообщений (формат, совместимый с Telegram Desktop export).
   - `scripts/telegram-deltas.py` - расчет дельт для блока "Новое в чатах" в дейликах.
@@ -43,7 +43,7 @@
 - Получи секцию `management` манифеста (`curl -fsSL <canon_base>/manifest.yaml`, локально - `cat`) - это целевой набор файлов специализации (единственный источник списка).
 - Перечисли существующие:
   - какие файлы секции `management` уже есть в проекте (по generic-маппингу: `rules/*` -> `.claude/rules/*`, `agents/*` -> `.claude/agents/*`, `skills/<name>/...` -> `.claude/skills/<name>/...`, `scripts/<name>` -> `scripts/<name>` в корне)
-  - scripts/telegram-snapshot.py, scripts/telegram-deltas.py - если есть, проверь, содержит ли `telegram-snapshot.py` блок `async for _ in client.iter_dialogs(): pass` (без него на свежей сессии будет PeerUser-ошибка - канон содержит его)
+  - scripts/telegram-snapshot.py, scripts/telegram-deltas.py - если есть, проверь, содержит ли `telegram-snapshot.py` прогрев через `client.iter_dialogs()` (без него на свежей сессии будет PeerUser-ошибка - канон содержит его)
   - .claude/canon.yaml - есть ли (должен быть после bootstrap-02), что в `files` и `file_hashes`
   - CLAUDE.md - какие @-ссылки уже есть, и какие из 11 шаблонных разделов уже заполнены (О проекте, Действующие лица, Глоссарий, Структура каталогов, Ключевые файлы, Встречи, Предпочтения по стилю, Рабочие процессы, Открытые задачи, Решения и договоренности, Ссылки и ресурсы, Полезные команды)
   - Папки Встречи/, Планы/, Решения/, Команда/ - что есть, что нет
@@ -148,5 +148,5 @@ E. (опционально, по подтверждению) CLAUDE.md запо�
 - Если у проекта свои секции в заметках встреч - дополни `.claude/rules/meetings.md` локально либо апстримь через upstream-candidate-механику sync.
 - В `Планы/current.md` зафиксируй то, что в работе сейчас.
 - Заполни значения в `7а. Работа с Google Sheets` (spreadsheet_id, имена листов с gid) и в `7б. Сверка имен` (gid таблиц команды/стейкхолдеров) - из реальных таблиц проекта.
-- Если проект собирается тянуть чаты Telegram - запусти скилл `telegram-snapshot-setup` (см. `.claude/skills/telegram-snapshot-setup/SKILL.md`): настрой `~/.config/telegram-snapshot/auth.json`, сделай первый интерактивный логин, создай `.telegram-snapshot.json` в корне проекта с `{label: chat_id}`. Скрипты `scripts/telegram-snapshot.py` и `scripts/telegram-deltas.py` уже на месте из канона.
+- Если проект собирается тянуть чаты Telegram - запусти скилл `telegram-snapshot` (см. `.claude/skills/telegram-snapshot/SKILL.md`): настрой `~/.config/telegram-snapshot/auth.json`, сделай первый интерактивный логин, создай `.telegram-snapshot.json` в корне проекта с `{label: chat_id}`. Скрипты `scripts/telegram-snapshot.py` и `scripts/telegram-deltas.py` уже на месте из канона.
 - Для обновления канонических агентов/правил/скриптов в будущем используй `migrations/sync-from-canon.prompt.md`.
