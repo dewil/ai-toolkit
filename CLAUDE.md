@@ -94,7 +94,7 @@ claude-toolkit/
 ├── start.md                                     # точка входа (тонкий роутер)
 ├── manifest.yaml                                # полный список канон-файлов по типам (для sync autodiscovery)
 ├── bootstrap/
-│   ├── bootstrap-01-memory.prompt.md            # симлинк памяти + feedback_local_paths
+│   ├── bootstrap-01-memory.prompt.md            # симлинк памяти + feedback-сиды (локальные пути, изменения канона)
 │   ├── bootstrap-02-scaffold.prompt.md          # base scaffold + canon.yaml
 │   ├── bootstrap-03-coding.prompt.md
 │   ├── bootstrap-03-management.prompt.md
