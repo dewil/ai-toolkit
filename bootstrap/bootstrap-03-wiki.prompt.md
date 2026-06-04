@@ -14,7 +14,7 @@
 - скрипты в корне vault'а:
   - `scripts/telegram-snapshot.py` - инкрементальный pull новых сообщений с тремя режимами (bootstrap / migration / incremental).
   - `scripts/telegram-deltas.py` - расчет дельт между текущим и предыдущим snapshot, удобно для дневных сводок.
-- шаблон `rules/wiki-structure.md` (структура разделов, теги конкретного vault'а - копируется один раз, дальше заполняется проектом)
+- шаблон `wiki-structure.md` в корне vault'а (структура разделов, теги конкретного vault'а - копируется один раз, дальше заполняется проектом)
 - `@-`ссылки на эти правила в `CLAUDE.md`
 
 ---
@@ -49,8 +49,7 @@ A. Канонический набор wiki = секция `wiki` в `manifest.y
 
 B. CLAUDE.md содержит `@`-ссылку на каждое правило `rules/*` из секции `wiki`.
 
-C. `.claude/rules/`:
-   - wiki-structure.md - копируется из `<canon_base>/templates/wiki-structure.md` (см. ШАГ 4b). Это шаблон, не каноническое правило: разделы и теги у каждого vault'а свои, sync его не контролирует. В `canon.yaml.files` не записывается.
+C. `wiki-structure.md` в корне vault'а - копируется из `<canon_base>/templates/wiki-structure.md` (см. ШАГ 4b). Это шаблон, не каноническое правило: разделы и теги у каждого vault'а свои, sync его не контролирует. В `canon.yaml.files` не записывается. Лежит в корне (не в `.claude/rules/`) симметрично `project-structure.md`: оба - пользовательские шаблоны, которые проект заполняет сам.
 
 D. `.claude/canon.yaml`:
    - `files` дополнен всеми путями секции `wiki`, которых там еще нет;
@@ -81,12 +80,12 @@ D. `.claude/canon.yaml`:
 
 Существующие файлы НЕ перезаписываются (для них хеш не пишем - база определится на первом синке). Для апгрейда к актуальной версии канона (включая скрипты с прогревом и migration-логикой) есть `migrations/sync-from-canon.prompt.md`.
 
-### 4b. Создай `.claude/rules/wiki-structure.md` из шаблона
+### 4b. Создай `wiki-structure.md` в корне vault'а из шаблона
 
 Если файла еще нет в проекте:
 
-- Если этот промт загружен по HTTP: `WebFetch <canon_base>/templates/wiki-structure.md` -> запиши в `.claude/rules/wiki-structure.md`.
-- Локально (если читался с диска): `cp <canon_base>/templates/wiki-structure.md .claude/rules/wiki-structure.md`.
+- Если этот промт загружен по HTTP: `WebFetch <canon_base>/templates/wiki-structure.md` -> запиши в `wiki-structure.md` (в корне проекта).
+- Локально (если читался с диска): `cp <canon_base>/templates/wiki-structure.md wiki-structure.md`.
 
 Существующий файл НЕ перезаписывай.
 
@@ -108,7 +107,7 @@ D. `.claude/canon.yaml`:
 
 ### 4d. Дополни существующие файлы
 
-Дополнения CLAUDE.md (по `@`-ссылке на каждое правило `rules/*` секции `wiki`, которого еще нет в CLAUDE.md, плюс `@.claude/rules/wiki-structure.md` из шаблона) - по отдельному "ок".
+Дополнения CLAUDE.md (по `@`-ссылке на каждое правило `rules/*` секции `wiki`, которого еще нет в CLAUDE.md, плюс `@wiki-structure.md` из шаблона - в корне проекта) - по отдельному "ок".
 
 ШАГ 5. Отчет.
 
@@ -143,5 +142,5 @@ D. `.claude/canon.yaml`:
 
 После завершения:
 
-- Заполни `.claude/rules/wiki-structure.md` - разделы и теги конкретного vault'а.
+- Заполни `wiki-structure.md` (в корне vault'а) - разделы и теги конкретного vault'а.
 - Для обновления канонических правил/агентов в будущем используй `migrations/sync-from-canon.prompt.md`.
