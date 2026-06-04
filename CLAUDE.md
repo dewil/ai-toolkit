@@ -138,6 +138,8 @@ claude-toolkit/
 │   │   └── SKILL.md
 │   ├── telegram-send/                           # management + wiki
 │   │   └── SKILL.md
+│   ├── redmine-snapshot/                        # management
+│   │   └── SKILL.md
 │   └── tutor/                                   # education-специализация
 │       └── SKILL.md
 ├── commands/                                    # КАНОН: слэш-команды (файл на команду)
@@ -145,7 +147,9 @@ claude-toolkit/
 ├── scripts/                                     # КАНОН: проектные скрипты (путь в каноне = путь в проекте)
 │   ├── telegram-snapshot.py                     # management + wiki
 │   ├── telegram-deltas.py                       # management + wiki
-│   └── telegram-send.py                         # management + wiki
+│   ├── telegram-send.py                         # management + wiki
+│   ├── redmine-snapshot.py                      # management
+│   └── redmine-deltas.py                        # management
 ├── templates/                                   # ШАБЛОНЫ: копируются в проект один раз
 │   ├── project-structure.md                     # universal  -> project-structure.md (в корне проекта)
 │   ├── style-guide.md                           # documentation -> .claude/rules/style-guide.md
