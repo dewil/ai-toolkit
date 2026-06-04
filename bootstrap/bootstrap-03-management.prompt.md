@@ -18,9 +18,12 @@
   - `google-sheets-mcp.md` - работа с Google Sheets через MCP `google-workspace`
   - `estimates-in-hours.md` - оценки в часах, не в человеко-днях
 - скилл `telegram-snapshot` - первая настройка/починка автоматического pull Telegram-чатов проекта (грабли my.telegram.org, PeerUser-ошибки, fallback на публичные ключи tdesktop).
+- скилл `redmine-snapshot` - первая настройка/починка зеркала открытых задач Redmine (API-ключ, secret/pointer-конфиг, корпоративный CA через curl).
 - скрипты в корне проекта:
   - `scripts/telegram-snapshot.py` - инкрементальный pull новых сообщений (формат, совместимый с Telegram Desktop export).
   - `scripts/telegram-deltas.py` - расчет дельт для блока "Новое в чатах" в дейликах.
+  - `scripts/redmine-snapshot.py` - snapshot открытых задач команды из Redmine.
+  - `scripts/redmine-deltas.py` - расчет дельт по задачам для блока "Дельты со вчера" в дейликах.
 - папки: `Встречи/`, `Планы/`, `Решения/`, `Команда/`
 - `@-`ссылки на новые правила в `CLAUDE.md`
 - (опционально) шаблон CLAUDE.md - структура из 11 разделов под управленческий проект (журнал решений, глоссарий, действующие лица, расписание синков и т.д.). Копируется один раз из `templates/management-CLAUDE.md`, дальше проект заполняет TODO-заглушки сам.
@@ -149,4 +152,5 @@ E. (опционально, по подтверждению) CLAUDE.md запо�
 - В `Планы/current.md` зафиксируй то, что в работе сейчас.
 - Заполни значения в `7а. Работа с Google Sheets` (spreadsheet_id, имена листов с gid) и в `7б. Сверка имен` (gid таблиц команды/стейкхолдеров) - из реальных таблиц проекта.
 - Если проект собирается тянуть чаты Telegram - запусти скилл `telegram-snapshot` (см. `.claude/skills/telegram-snapshot/SKILL.md`): настрой `~/.config/telegram-snapshot/auth.json`, сделай первый интерактивный логин, создай `.telegram-snapshot.json` в корне проекта с `{label: chat_id}`. Скрипты `scripts/telegram-snapshot.py` и `scripts/telegram-deltas.py` уже на месте из канона.
+- Если проект ведет задачи в Redmine - запусти скилл `redmine-snapshot` (см. `.claude/skills/redmine-snapshot/SKILL.md`): настрой `~/.config/redmine-snapshot/auth.json` (redmine_url + api_key), создай `.redmine-snapshot.json` в корне проекта с `{tasks_root, project_id, users}`. Скрипты `scripts/redmine-snapshot.py` и `scripts/redmine-deltas.py` уже на месте из канона.
 - Для обновления канонических агентов/правил/скриптов в будущем используй `migrations/sync-from-canon.prompt.md`.
