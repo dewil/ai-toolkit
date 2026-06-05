@@ -3,7 +3,8 @@
     "allow": [
       "Skill(update-config)",
       "Skill(update-config:*)",
-      "Bash(git push origin main)"
+      "Bash(git push origin main)",
+      "Bash(git pull *)"
     ]
   },
   "autoMode": {
