@@ -104,6 +104,7 @@ claude-toolkit/
 │   ├── typography-ru.md                         # universal
 │   ├── subagents-usage.md                       # universal
 │   ├── docs-maintenance.md                      # universal
+│   ├── compact-results.md                       # universal
 │   ├── karpathy-guidelines.md                   # coding-специализация
 │   ├── tests-coverage.md                        # coding-специализация
 │   ├── error-exposure.md                        # coding-специализация│   ├── wiki-notes-style.md                      # wiki-специализация
