@@ -24,6 +24,7 @@ universal:
   - rules/typography-ru.md
   - rules/subagents-usage.md
   - rules/docs-maintenance.md
+  - rules/compact-results.md
   - agents/architect.md
   - agents/explorer.md
   - agents/searcher.md
