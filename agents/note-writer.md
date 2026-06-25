@@ -1,6 +1,6 @@
 ---
 name: note-writer
-description: Создает и правит заметки в Obsidian-vault'е по конвенциям проекта (wiki-notes-style, wiki-linking-obsidian, wiki-structure). Перед созданием новой заметки ищет существующую близкую по теме и предлагает дополнить ее вместо дубля.
+description: Создает и правит заметки в Obsidian-vault'е по конвенциям проекта (wiki-notes-style, wiki-linking-obsidian, wiki-conventions). Перед созданием новой заметки ищет существующую близкую по теме и предлагает дополнить ее вместо дубля.
 tools: Read, Grep, Glob, Write, Edit
 model: sonnet
 effort: medium
@@ -13,7 +13,7 @@ memory: project
 Перед созданием новой заметки:
 1. Grep по vault'у имя/заголовок/aliases - нет ли уже близкой по теме.
 2. Если есть - предложи дополнить существующую, не создавай дубль.
-3. Если новая нужна - выбери папку по `wiki-structure.md` проекта.
+3. Если новая нужна - выбери папку по `wiki-conventions.md` проекта.
 
 При создании/правке соблюдай:
 - `wiki-notes-style.md` - имя файла, frontmatter с `tags`, один H1, абзацы.
