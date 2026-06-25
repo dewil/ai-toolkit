@@ -68,11 +68,13 @@ management:
   - skills/telegram-snapshot/SKILL.md
   - skills/telegram-send/SKILL.md
   - skills/redmine-snapshot/SKILL.md
+  - skills/mymeet-snapshot/SKILL.md
   - scripts/telegram-snapshot.py
   - scripts/telegram-deltas.py
   - scripts/telegram-send.py
   - scripts/redmine-snapshot.py
   - scripts/redmine-deltas.py
+  - scripts/mymeet-snapshot.py
 
 education:
   - rules/lecture-notes.md
