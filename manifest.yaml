@@ -25,6 +25,7 @@ universal:
   - rules/subagents-usage.md
   - rules/docs-maintenance.md
   - rules/compact-results.md
+  - rules/addressing.md
   - agents/architect.md
   - agents/explorer.md
   - agents/searcher.md

@@ -105,6 +105,7 @@ claude-toolkit/
 │   ├── subagents-usage.md                       # universal
 │   ├── docs-maintenance.md                      # universal
 │   ├── compact-results.md                       # universal
+│   ├── addressing.md                            # universal
 │   ├── karpathy-guidelines.md                   # coding-специализация
 │   ├── tests-coverage.md                        # coding-специализация
 │   ├── error-exposure.md                        # coding-специализация│   ├── wiki-notes-style.md                      # wiki-специализация
@@ -154,7 +155,7 @@ claude-toolkit/
 ├── templates/                                   # ШАБЛОНЫ: копируются в проект один раз
 │   ├── project-structure.md                     # universal  -> project-structure.md (в корне проекта)
 │   ├── style-guide.md                           # documentation -> .claude/rules/style-guide.md
-│   ├── wiki-structure.md                        # wiki -> .claude/rules/wiki-structure.md
+│   ├── wiki-conventions.md                      # wiki -> .claude/rules/wiki-conventions.md
 │   └── management-CLAUDE.md                     # management -> CLAUDE.md в корне
 └── migrations/                                  # одноразовые промты
     ├── move-project-structure.prompt.md         # перенос project-structure.md в корень (.claude/rules -> корень)

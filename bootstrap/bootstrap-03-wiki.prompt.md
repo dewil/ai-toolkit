@@ -14,7 +14,7 @@
 - скрипты в корне vault'а:
   - `scripts/telegram-snapshot.py` - инкрементальный pull новых сообщений с тремя режимами (bootstrap / migration / incremental).
   - `scripts/telegram-deltas.py` - расчет дельт между текущим и предыдущим snapshot, удобно для дневных сводок.
-- шаблон `rules/wiki-structure.md` (структура разделов, теги конкретного vault'а - копируется один раз, дальше заполняется проектом)
+- шаблон `rules/wiki-conventions.md` (структура разделов, теги конкретного vault'а - копируется один раз, дальше заполняется проектом)
 - `@-`ссылки на эти правила в `CLAUDE.md`
 
 ---
@@ -52,7 +52,7 @@ A. Канонический набор wiki = секция `wiki` в `manifest.y
 B. CLAUDE.md содержит `@`-ссылку на каждое правило `rules/*` из секции `wiki`.
 
 C. `.claude/rules/`:
-   - wiki-structure.md - копируется из `<canon_base>/templates/wiki-structure.md` (см. ШАГ 4b). Это шаблон, не каноническое правило: разделы и теги у каждого vault'а свои, sync его не контролирует. В `canon.yaml.files` не записывается.
+   - wiki-conventions.md - копируется из `<canon_base>/templates/wiki-conventions.md` (см. ШАГ 4b). Это шаблон, не каноническое правило: разделы и теги у каждого vault'а свои, sync его не контролирует. В `canon.yaml.files` не записывается.
 
 D. `.claude/canon.yaml`:
    - `files` дополнен всеми путями секции `wiki`, которых там еще нет;
@@ -83,11 +83,11 @@ D. `.claude/canon.yaml`:
 
 Существующие файлы НЕ перезаписываются (для них хеш не пишем - база определится на первом синке). Для апгрейда к актуальной версии канона (включая скрипты с прогревом и migration-логикой) есть `migrations/sync-from-canon.prompt.md`.
 
-### 4b. Создай `.claude/rules/wiki-structure.md` из шаблона
+### 4b. Создай `.claude/rules/wiki-conventions.md` из шаблона
 
 Если файла еще нет в проекте:
 
-- Получи шаблон точными байтами: `curl -fsSL <canon_base>/templates/wiki-structure.md` -> запиши в `.claude/rules/wiki-structure.md`.
+- Получи шаблон точными байтами: `curl -fsSL <canon_base>/templates/wiki-conventions.md` -> запиши в `.claude/rules/wiki-conventions.md`.
 
 Существующий файл НЕ перезаписывай.
 
@@ -109,11 +109,11 @@ D. `.claude/canon.yaml`:
 
 ### 4d. Дополни существующие файлы
 
-Дополнения CLAUDE.md (по `@`-ссылке на каждое правило `rules/*` секции `wiki`, которого еще нет в CLAUDE.md, плюс `@.claude/rules/wiki-structure.md` из шаблона) - по отдельному "ок".
+Дополнения CLAUDE.md (по `@`-ссылке на каждое правило `rules/*` секции `wiki`, которого еще нет в CLAUDE.md, плюс `@.claude/rules/wiki-conventions.md` из шаблона) - по отдельному "ок".
 
 ШАГ 5. Отчет.
 
-Таблица: файл / действие. Что осталось вручную (заполнить `wiki-structure.md`).
+Таблица: файл / действие. Что осталось вручную (заполнить `wiki-conventions.md`).
 
 Если был миграционный кейс - напомни о разделе МИГРАЦИЯ ниже.
 
@@ -144,5 +144,5 @@ D. `.claude/canon.yaml`:
 
 После завершения:
 
-- Заполни `.claude/rules/wiki-structure.md` - разделы и теги конкретного vault'а.
+- Заполни `.claude/rules/wiki-conventions.md` - разделы и теги конкретного vault'а.
 - Для обновления канонических правил/агентов в будущем используй `migrations/sync-from-canon.prompt.md`.
