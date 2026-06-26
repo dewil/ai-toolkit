@@ -106,6 +106,7 @@ claude-toolkit/
 │   ├── docs-maintenance.md                      # universal
 │   ├── compact-results.md                       # universal
 │   ├── addressing.md                            # universal
+│   ├── secrets-handling.md                      # universal
 │   ├── karpathy-guidelines.md                   # coding-специализация
 │   ├── tests-coverage.md                        # coding-специализация
 │   ├── error-exposure.md                        # coding-специализация│   ├── wiki-notes-style.md                      # wiki-специализация
@@ -135,6 +136,8 @@ claude-toolkit/
 │   └── note-taker.md                            # education-специализация
 ├── skills/                                      # КАНОН: скиллы (папка на скилл)
 │   ├── codex-audit/                             # universal
+│   │   └── SKILL.md
+│   ├── web-research/                            # universal
 │   │   └── SKILL.md
 │   ├── telegram-snapshot/                       # management + wiki
 │   │   └── SKILL.md
