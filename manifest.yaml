@@ -26,12 +26,14 @@ universal:
   - rules/docs-maintenance.md
   - rules/compact-results.md
   - rules/addressing.md
+  - rules/secrets-handling.md
   - agents/architect.md
   - agents/explorer.md
   - agents/searcher.md
   - agents/planner.md
   - agents/summarizer.md
   - skills/codex-audit/SKILL.md
+  - skills/web-research/SKILL.md
   - commands/canon.md
 
 coding:
