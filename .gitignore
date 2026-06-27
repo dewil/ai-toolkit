@@ -6,3 +6,5 @@ __pycache__/
 # Локальные рабочие заметки по разработке канона.
 # Не публикуются в репо (см. rules/docs-maintenance.md).
 docs/dev/
+.obsidian/
+
