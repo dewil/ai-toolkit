@@ -2,6 +2,7 @@
 .DS_Store
 *.tmp
 __pycache__/
+.claude/worktrees/
 
 # Локальные рабочие заметки по разработке канона.
 # Не публикуются в репо (см. rules/docs-maintenance.md).
