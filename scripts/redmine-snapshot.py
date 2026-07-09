@@ -165,11 +165,13 @@ def main() -> int:
         "users": {},
     }
 
+    errors = 0
     for uid, name in cfg["users"].items():
         try:
             issues = fetch_user_issues(auth, project_id, uid)
         except Exception as exc:
             print(f"!! {name} ({uid}): {exc}", file=sys.stderr)
+            errors += 1
             continue
         snapshot["users"][str(uid)] = {
             "name": name,
@@ -177,6 +179,18 @@ def main() -> int:
             "issues": [slim(i) for i in issues],
         }
         print(f"   {name} ({uid}): {len(issues)} задач")
+
+    # Fail-closed: снепшот без части сотрудников выдал бы их задачи за
+    # "закрытые" в redmine-deltas (closed = prev_ids - cur_ids). Лучше
+    # сохранить последнюю валидную пару, чем записать неполный снепшот.
+    if errors:
+        print(
+            f"\nПРЕРВАНО: {errors} сотрудник(ов) не загрузились - снепшот не "
+            f"записан (иначе их задачи попадут в дельты как закрытые). "
+            f"Устрани ошибку и повтори.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     tasks_root.mkdir(parents=True, exist_ok=True)
     if snapshot_path.exists():
