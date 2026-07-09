@@ -15,7 +15,8 @@ Chrome сам /Author не пишет - при --author поле дописыв�
 
 Поддерживаемый markdown: YAML-frontmatter (пропускается), заголовки H1-H4,
 абзацы, плоские списки (- и 1.), **bold**, *italic*, `code`, fenced-блоки
-```...```, цитаты "> ", ссылки [текст](url) и голые URL, разделитель ---.
+```...```, цитаты "> ", ссылки [текст](url) и голые URL, картинки ![alt](путь)
+(локальные встраиваются base64 data-URI), разделитель ---.
 Вложенные списки и таблицы не поддерживаются - при необходимости дорабатывать
 конвертер, не менять формат исходника.
 """
@@ -64,6 +65,7 @@ def inline(text: str) -> str:
     s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
     s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", s)
+    s = re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", r'<img src="\2" alt="\1">', s)
     s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', s)
     s = re.sub(r"(?<![\"'>=\w])(https?://[^\s<)]+)", r'<a href="\1">\1</a>', s)
     return s
@@ -91,6 +93,8 @@ def md_to_html(md: str) -> tuple[str, str]:
             out.append("</ol>")
         elif mode == "quote":
             out.append("</blockquote>")
+        elif mode == "pre":
+            out.append("</code></pre>")
         mode = ""
 
     for raw in lines:
@@ -184,8 +188,10 @@ def add_author(pdf: bytes, author: str) -> bytes:
     if not (obj and size and root):
         return pdf
 
-    esc = author.encode().replace(b"\\", rb"\\").replace(b"(", rb"\(").replace(b")", rb"\)")
-    new_dict = obj.group(1)[:-2] + b"\n/Author (" + esc + b")>>"
+    # hex-строка UTF-16BE с BOM (как Skia пишет /Title) - не-ASCII корректен,
+    # экранирование не нужно
+    hexstr = b"<FEFF" + author.encode("utf-16-be").hex().upper().encode() + b">"
+    new_dict = obj.group(1)[:-2] + b"\n/Author " + hexstr + b">>"
     out = pdf if pdf.endswith(b"\n") else pdf + b"\n"
     obj_off = len(out)
     out += b"%d 0 obj\n" % num + new_dict + b"\nendobj\n"
