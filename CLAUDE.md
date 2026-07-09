@@ -143,6 +143,8 @@ claude-toolkit/
 │   │   └── SKILL.md
 │   ├── web-research/                            # universal
 │   │   └── SKILL.md
+│   ├── md-pdf/                                  # universal
+│   │   └── SKILL.md
 │   ├── telegram-snapshot/                       # management + wiki
 │   │   └── SKILL.md
 │   ├── telegram-send/                           # management + wiki
@@ -156,6 +158,7 @@ claude-toolkit/
 ├── commands/                                    # КАНОН: слэш-команды (файл на команду)
 │   └── canon.md                                 # universal -> .claude/commands/canon.md (/canon = sync)
 ├── scripts/                                     # КАНОН: проектные скрипты (путь в каноне = путь в проекте)
+│   ├── md-pdf.py                                # universal
 │   ├── telegram-snapshot.py                     # management + wiki
 │   ├── telegram-deltas.py                       # management + wiki
 │   ├── telegram-send.py                         # management + wiki
