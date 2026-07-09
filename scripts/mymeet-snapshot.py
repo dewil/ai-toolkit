@@ -120,9 +120,11 @@ def _build_url(auth: dict, path: str, params: dict | None) -> str:
 def _curl_bytes(auth: dict, url: str, timeout: int) -> bytes:
     # Python.framework на macOS не имеет CA-бандла и падает на валидном
     # публичном сертификате; curl берет сертификат из системного хранилища.
+    # Ключ - через stdin-конфиг (-K -), не argv: в argv он виден в ps и
+    # утекает в строку CalledProcessError при ошибке curl.
     result = subprocess.run(
-        ["curl", "-sS", "--fail", "-A", "mymeet-snapshot",
-         "-H", f"X-API-KEY: {auth['api_key']}", url],
+        ["curl", "-sS", "--fail", "-A", "mymeet-snapshot", "-K", "-", url],
+        input=f'header = "X-API-KEY: {auth["api_key"]}"\n'.encode(),
         check=True, capture_output=True, timeout=timeout,
     )
     return result.stdout
