@@ -156,9 +156,12 @@ file_hashes:          # sha256 канонических байт каждого 
 ```markdown
 Общие поведенческие правила (применяются всегда):
 
+@.claude/rules/typography-ru.md
 @.claude/rules/subagents-usage.md
 @.claude/rules/docs-maintenance.md
-@.claude/rules/typography-ru.md
+@.claude/rules/compact-results.md
+@.claude/rules/addressing.md
+@.claude/rules/secrets-handling.md
 
 Карта структуры проекта (справка, держи актуальной):
 
