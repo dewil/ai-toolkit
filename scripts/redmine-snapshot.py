@@ -81,13 +81,16 @@ def fetch_json(url: str, api_key: str, use_curl: bool) -> dict:
     if use_curl:
         # Redmine за корпоративным CA: urllib его не видит, curl берет
         # сертификат из системного хранилища / macOS keychain.
+        # Ключ - через stdin-конфиг (-K -), не argv: в argv он виден в ps и
+        # утекает в строку CalledProcessError при ошибке curl.
         result = subprocess.run(
             [
                 "curl", "-sS", "--fail",
                 "-A", "Mozilla/5.0 (redmine-snapshot)",
-                "-H", f"X-Redmine-API-Key: {api_key}",
+                "-K", "-",
                 url,
             ],
+            input=f'header = "X-Redmine-API-Key: {api_key}"\n'.encode(),
             check=True,
             capture_output=True,
             timeout=30,
