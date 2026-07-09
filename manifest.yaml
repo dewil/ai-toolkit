@@ -34,7 +34,9 @@ universal:
   - agents/summarizer.md
   - skills/codex-audit/SKILL.md
   - skills/web-research/SKILL.md
+  - skills/md-pdf/SKILL.md
   - commands/canon.md
+  - scripts/md-pdf.py
 
 coding:
   - rules/karpathy-guidelines.md
