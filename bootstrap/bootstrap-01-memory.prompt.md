@@ -177,4 +177,5 @@ type: feedback
 - `bootstrap-03-coding.prompt.md` - кодовые проекты
 - `bootstrap-03-management.prompt.md` - управленческие
 - `bootstrap-03-education.prompt.md` - учебные
-- `bootstrap-03-documentation.prompt.md` - документация (мануалы, технические тексты)- `bootstrap-03-wiki.prompt.md` - wiki/база знаний (Obsidian-vault: заметки, перелинковка)
+- `bootstrap-03-documentation.prompt.md` - документация (мануалы, технические тексты)
+- `bootstrap-03-wiki.prompt.md` - wiki/база знаний (Obsidian-vault: заметки, перелинковка)

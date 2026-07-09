@@ -272,16 +272,20 @@ def download_md(auth: dict, mid: str) -> str:
     body, ctype = api_get_bytes(
         auth, "/api/storage/download", {"meeting_id": mid, "format": "md"}
     )
-    # download может вернуть либо сам файл, либо JSON со ссылкой на storage
-    if "application/json" in ctype.lower():
+    # download может вернуть либо сам файл, либо JSON со ссылкой на storage.
+    # В curl-режиме Content-Type теряется (пустой), поэтому JSON-обертку ловим
+    # и по заголовку, и по виду тела (начинается с "{").
+    is_json = "application/json" in ctype.lower() or (not ctype and body[:1] == b"{")
+    if is_json:
         try:
             obj = json.loads(body)
         except ValueError:
             return body.decode("utf-8", "replace")
-        link = obj.get("url") or obj.get("download_url") or obj.get("link")
-        if link:
-            with urllib.request.urlopen(link, timeout=120) as resp:
-                return resp.read().decode("utf-8", "replace")
+        if isinstance(obj, dict):
+            link = obj.get("url") or obj.get("download_url") or obj.get("link")
+            if link:
+                with urllib.request.urlopen(link, timeout=120) as resp:
+                    return resp.read().decode("utf-8", "replace")
         # JSON без ссылки - вернем как есть
         return body.decode("utf-8", "replace")
     return body.decode("utf-8", "replace")

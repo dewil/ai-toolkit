@@ -37,7 +37,8 @@
 - `coding` - кодовые проекты.
 - `management` - управленческие.
 - `education` - учебные.
-- `documentation` - документация (скелет, требует наполнения).- `wiki` - Obsidian-vault'ы, персональные базы знаний (заметки, перелинковка `[[...]]`).
+- `documentation` - документация (скелет, требует наполнения).
+- `wiki` - Obsidian-vault'ы, персональные базы знаний (заметки, перелинковка `[[...]]`).
 
 Проект может быть **мультиспециализированным** - например, vault Obsidian со встроенной кодовой частью и документацией будет иметь `project_type: [wiki, coding, documentation]`. В bootstrap-цепочке на шаге `bootstrap-02` пользователь выбирает несколько типов; bootstrap-03 запускается **последовательно по каждому** из них, накладывая специализации друг на друга. Каждый bootstrap-03 идемпотентен и только **добавляет** свой тип в список (если еще не там), не перезаписывая.
 
@@ -99,7 +100,8 @@ claude-toolkit/
 │   ├── bootstrap-03-coding.prompt.md
 │   ├── bootstrap-03-management.prompt.md
 │   ├── bootstrap-03-education.prompt.md
-│   ├── bootstrap-03-documentation.prompt.md│   └── bootstrap-03-wiki.prompt.md
+│   ├── bootstrap-03-documentation.prompt.md
+│   └── bootstrap-03-wiki.prompt.md
 ├── rules/                                       # КАНОН: правила поведения Claude
 │   ├── typography-ru.md                         # universal
 │   ├── subagents-usage.md                       # universal
@@ -109,7 +111,8 @@ claude-toolkit/
 │   ├── secrets-handling.md                      # universal
 │   ├── karpathy-guidelines.md                   # coding-специализация
 │   ├── tests-coverage.md                        # coding-специализация
-│   ├── error-exposure.md                        # coding-специализация│   ├── wiki-notes-style.md                      # wiki-специализация
+│   ├── error-exposure.md                        # coding-специализация
+│   ├── wiki-notes-style.md                      # wiki-специализация
 │   ├── wiki-linking-obsidian.md                 # wiki-специализация
 │   ├── meetings.md                              # management-специализация
 │   ├── tasks-tracking.md                        # management-специализация
@@ -130,7 +133,8 @@ claude-toolkit/
 │   ├── debugger.md                              # coding-специализация
 │   ├── implementer.md                           # coding-специализация
 │   ├── code-reviewer.md                         # coding-специализация
-│   ├── copy-editor.md                           # documentation-специализация│   ├── note-writer.md                           # wiki-специализация
+│   ├── copy-editor.md                           # documentation-специализация
+│   ├── note-writer.md                           # wiki-специализация
 │   ├── librarian.md                             # wiki-специализация
 │   ├── tracker.md                               # management-специализация
 │   └── note-taker.md                            # education-специализация
