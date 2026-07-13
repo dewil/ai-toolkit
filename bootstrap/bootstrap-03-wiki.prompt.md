@@ -8,14 +8,8 @@
 
 Добавляет к общему scaffold:
 
-- правила: `wiki-notes-style.md` (формат заметки), `wiki-linking-obsidian.md` (правила `[[ссылок]]`)
-- агентов: `note-writer` (создает/правит заметки), `librarian` (read-only ревизия vault'а)
-- скилл `telegram-snapshot` - первая настройка автоматического pull чатов Telegram (грабли my.telegram.org, PeerUser, fallback на публичные ключи tdesktop); тот же скилл подключен у management, в мультиспециализированных проектах копируется один раз.
-- скрипты в корне vault'а:
-  - `scripts/telegram-snapshot.py` - инкрементальный pull новых сообщений с тремя режимами (bootstrap / migration / incremental).
-  - `scripts/telegram-deltas.py` - расчет дельт между текущим и предыдущим snapshot, удобно для дневных сводок.
+- канон-файлы специализации wiki (правила формата заметки и перелинковки, агенты `note-writer`/`librarian`, скилл `telegram-snapshot` со скриптами) - набор = **секция `wiki` манифеста** (`manifest.yaml`), поименно здесь не дублируется; `@`-импорт каждого правила секции в `CLAUDE.md` автоматически. Скилл `telegram-snapshot` и его скрипты общие с management - в мультиспециализированных проектах копируются один раз.
 - шаблон `rules/wiki-conventions.md` (структура разделов, теги конкретного vault'а - копируется один раз, дальше заполняется проектом)
-- `@-`ссылки на эти правила в `CLAUDE.md`
 
 ---
 

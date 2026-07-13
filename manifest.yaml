@@ -9,7 +9,9 @@
 #   .claude/canon.yaml проекта).
 #
 # При добавлении нового rule/agent/skill/script в канон - дописать его сюда,
-# в секцию по типу. universal тянется любым проектом (bootstrap-02);
+# в секцию по типу, ОДНОЙ строкой с однострочным комментом-описанием (# ...).
+# Коммент - это и человекочитаемый реестр (открыл манифест - видно, что есть),
+# и напоминание, зачем файл. universal тянется любым проектом (bootstrap-02);
 # остальные секции - только проектами своего типа (bootstrap-03-<тип>).
 # Скилл = подпапка skills/<name>/, в манифесте перечисляется по-файлово.
 # Скрипт = файл в scripts/<name>.py, копируется в scripts/ в корне проекта
@@ -21,69 +23,69 @@
 # при сборке type-set'а.
 
 universal:
-  - rules/typography-ru.md
-  - rules/subagents-usage.md
-  - rules/docs-maintenance.md
-  - rules/compact-results.md
-  - rules/addressing.md
-  - rules/secrets-handling.md
-  - agents/architect.md
-  - agents/explorer.md
-  - agents/searcher.md
-  - agents/planner.md
-  - agents/summarizer.md
-  - skills/codex-audit/SKILL.md
-  - skills/web-research/SKILL.md
-  - skills/md-pdf/SKILL.md
-  - commands/canon.md
-  - scripts/md-pdf.py
+  - rules/typography-ru.md              # русская типографика: кавычки "...", тире-дефис, "е" вместо "ё"
+  - rules/subagents-usage.md            # когда и как делегировать субагентам, экономия токенов
+  - rules/docs-maintenance.md           # актуальность документации; README - человеческий манифест, CLAUDE.md - агентский
+  - rules/compact-results.md            # сжатый вывод: результат, а не пересказ хода мысли
+  - rules/addressing.md                 # обращение к пользователю по нику
+  - rules/secrets-handling.md           # обращение с секретами: не коммитить ключи, on-device конфиги
+  - agents/architect.md                 # read-only проектирование: выбор подхода, trade-off, структура
+  - agents/explorer.md                  # read-only разбор структуры и связей модулей
+  - agents/searcher.md                  # поиск файлов/символов/паттернов (grep/glob)
+  - agents/planner.md                   # декомпозиция задачи в проверяемые шаги с критериями
+  - agents/summarizer.md                # сжатие длинного источника в структурированную заметку
+  - skills/codex-audit/SKILL.md         # аудит кода/текста вторым мнением через codex exec
+  - skills/web-research/SKILL.md        # веб-исследование с проверкой источников
+  - skills/md-pdf/SKILL.md              # рендер markdown в PDF
+  - commands/canon.md                   # /canon = синхронизация проекта с каноном
+  - scripts/md-pdf.py                   # движок рендера markdown в PDF (для скилла md-pdf)
 
 coding:
-  - rules/karpathy-guidelines.md
-  - rules/tests-coverage.md
-  - rules/error-exposure.md
-  - agents/debugger.md
-  - agents/implementer.md
-  - agents/code-reviewer.md
-  - skills/minimal-code/SKILL.md
+  - rules/karpathy-guidelines.md        # снижение типовых LLM-ошибок в коде (простота, хирургичность)
+  - rules/tests-coverage.md             # покрытие тестами, goal-driven проверка
+  - rules/error-exposure.md             # не глотать ошибки - показывать их наверх
+  - agents/debugger.md                  # воспроизведение и локализация багов
+  - agents/implementer.md               # реализация по готовому плану
+  - agents/code-reviewer.md             # ревью изменений
+  - skills/minimal-code/SKILL.md        # минимальный код: лестница ступеней сложности
 
 documentation:
-  - agents/copy-editor.md
+  - agents/copy-editor.md               # вычитка и редактура текстов
 
 wiki:
-  - rules/wiki-notes-style.md
-  - rules/wiki-linking-obsidian.md
-  - agents/note-writer.md
-  - agents/librarian.md
-  - skills/telegram-snapshot/SKILL.md
-  - skills/telegram-send/SKILL.md
-  - scripts/telegram-snapshot.py
-  - scripts/telegram-deltas.py
-  - scripts/telegram-send.py
+  - rules/wiki-notes-style.md           # формат заметки в vault
+  - rules/wiki-linking-obsidian.md      # перелинковка [[...]] в Obsidian
+  - agents/note-writer.md               # пишет заметки по конвенциям vault
+  - agents/librarian.md                 # read-only ревизия vault: битые ссылки, дубли, сироты
+  - skills/telegram-snapshot/SKILL.md   # настройка/починка зеркала чатов Telegram
+  - skills/telegram-send/SKILL.md       # настройка/починка отправки сообщений в Telegram
+  - scripts/telegram-snapshot.py        # инкрементальный pull новых сообщений Telegram
+  - scripts/telegram-deltas.py          # дельты чатов для блока "Новое в чатах" в дейлике
+  - scripts/telegram-send.py            # отправка сообщения в Telegram-чат
 
 management:
-  - rules/meetings.md
-  - rules/tasks-tracking.md
-  - rules/artifacts-structure.md
-  - rules/meeting-transcripts.md
-  - rules/name-cross-check.md
-  - rules/google-sheets-mcp.md
-  - rules/estimates-in-hours.md
-  - agents/tracker.md
-  - skills/telegram-snapshot/SKILL.md
-  - skills/telegram-send/SKILL.md
-  - skills/redmine-snapshot/SKILL.md
-  - skills/mymeet-snapshot/SKILL.md
-  - scripts/telegram-snapshot.py
-  - scripts/telegram-deltas.py
-  - scripts/telegram-send.py
-  - scripts/redmine-snapshot.py
-  - scripts/redmine-deltas.py
-  - scripts/mymeet-snapshot.py
+  - rules/meetings.md                   # формат заметок встреч
+  - rules/tasks-tracking.md             # формат задач и планов
+  - rules/artifacts-structure.md        # структура папок управленческого проекта
+  - rules/meeting-transcripts.md        # двойной формат транскрипций (KTalk + mymeet) и .summary.md
+  - rules/name-cross-check.md           # сверка имен из транскрипций по справочнику команды
+  - rules/google-sheets-mcp.md          # работа с Google Sheets через MCP google-workspace
+  - rules/estimates-in-hours.md         # оценки в часах, не в человеко-днях
+  - agents/tracker.md                   # контроль статусов, дедлайнов, владельцев задач
+  - skills/telegram-snapshot/SKILL.md   # настройка/починка зеркала чатов Telegram
+  - skills/telegram-send/SKILL.md       # настройка/починка отправки сообщений в Telegram
+  - skills/redmine-snapshot/SKILL.md    # настройка/починка зеркала открытых задач Redmine
+  - skills/mymeet-snapshot/SKILL.md     # настройка/починка зеркала расшифровок встреч из mymeet.ai
+  - scripts/telegram-snapshot.py        # инкрементальный pull новых сообщений Telegram
+  - scripts/telegram-deltas.py          # дельты чатов для блока "Новое в чатах" в дейлике
+  - scripts/telegram-send.py            # отправка сообщения в Telegram-чат
+  - scripts/redmine-snapshot.py         # snapshot открытых задач команды из Redmine
+  - scripts/redmine-deltas.py           # дельты задач для блока "Дельты со вчера" в дейлике
+  - scripts/mymeet-snapshot.py          # pull MD-расшифровок встреч mymeet.ai по whitelist-правилам
 
 education:
-  - rules/lecture-notes.md
-  - rules/homework.md
-  - rules/course-structure.md
-  - agents/note-taker.md
-  - skills/tutor/SKILL.md
+  - rules/lecture-notes.md              # формат конспекта лекции
+  - rules/homework.md                   # формат домашних заданий
+  - rules/course-structure.md           # структура курса
+  - agents/note-taker.md                # конспектирование лекций и учебных материалов
+  - skills/tutor/SKILL.md               # режим репетитора: объяснение и проверка понимания
