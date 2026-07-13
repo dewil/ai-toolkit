@@ -6,10 +6,8 @@
 
 Добавляет к общему scaffold:
 
-- агентов: `debugger`, `implementer`, `code-reviewer`
-- правила: `karpathy-guidelines.md`, `tests-coverage.md`, `error-exposure.md`
+- канон-файлы специализации coding (правила, агенты) - набор = **секция `coding` манифеста** (`manifest.yaml`), поименно здесь не дублируется; `@`-импорт каждого правила секции в `CLAUDE.md` добавляется автоматически
 - стек-специфичные allow в `.claude/settings.json` (по подтверждению, по списку)
-- `@-`ссылки на `karpathy-guidelines.md`, `tests-coverage.md` и `error-exposure.md` в `CLAUDE.md`
 - PostToolUse-хуки для авто-проверок (синтаксический lint после Edit/Write) - по подтверждению, на основе стека.
 
 ---
