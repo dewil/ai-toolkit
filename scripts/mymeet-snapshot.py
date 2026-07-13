@@ -76,6 +76,10 @@ DATE_KEYS = (
 TITLE_KEYS = ("title", "name", "meeting_name", "meeting_title")
 ID_KEYS = ("meeting_id", "id", "uuid")
 STATUS_KEYS = ("status", "state")
+# Статусы, при которых запись реально не готова (обрабатывается / упала).
+# Прочие ("processed", "new" - свежая непросмотренная, MD уже доступен)
+# считаем готовыми: allowlist по "processed" прятал свежие записи даже из review.
+PROCESSING_STATUSES = {"processing", "in_progress", "pending", "failed", "error"}
 
 
 def load_auth() -> dict:
@@ -463,7 +467,7 @@ def main(argv: list[str]) -> int:
         if mid in index.get("meetings", {}):
             skipped_known += 1
             continue
-        if status and status != "processed":
+        if status in PROCESSING_STATUSES:
             continue  # еще обрабатывается / упала - вернемся на след. прогоне
 
         rule = match_rule(title, rules)
