@@ -45,6 +45,7 @@ coding:
   - agents/debugger.md
   - agents/implementer.md
   - agents/code-reviewer.md
+  - skills/minimal-code/SKILL.md
 
 documentation:
   - agents/copy-editor.md

@@ -145,6 +145,8 @@ claude-toolkit/
 │   │   └── SKILL.md
 │   ├── md-pdf/                                  # universal
 │   │   └── SKILL.md
+│   ├── minimal-code/                            # coding-специализация
+│   │   └── SKILL.md
 │   ├── telegram-snapshot/                       # management + wiki
 │   │   └── SKILL.md
 │   ├── telegram-send/                           # management + wiki
