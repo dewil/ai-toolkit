@@ -49,6 +49,7 @@ coding:
   - agents/implementer.md               # реализация по готовому плану
   - agents/code-reviewer.md             # ревью изменений
   - skills/minimal-code/SKILL.md        # минимальный код: лестница ступеней сложности
+  - skills/requirements/SKILL.md        # сбор размытых бизнес-требований в ТЗ + user stories до кода
 
 documentation:
   - agents/copy-editor.md               # вычитка и редактура текстов
@@ -77,6 +78,7 @@ management:
   - skills/telegram-send/SKILL.md       # настройка/починка отправки сообщений в Telegram
   - skills/redmine-snapshot/SKILL.md    # настройка/починка зеркала открытых задач Redmine
   - skills/mymeet-snapshot/SKILL.md     # настройка/починка зеркала расшифровок встреч из mymeet.ai
+  - skills/local-transcription/SKILL.md # локальная (offline) транскрипция записи встречи/лекции: выбор ASR, token-free диаризация, грабли
   - scripts/telegram-snapshot.py        # инкрементальный pull новых сообщений Telegram
   - scripts/telegram-deltas.py          # дельты чатов для блока "Новое в чатах" в дейлике
   - scripts/telegram-send.py            # отправка сообщения в Telegram-чат
@@ -90,3 +92,4 @@ education:
   - rules/course-structure.md           # структура курса
   - agents/note-taker.md                # конспектирование лекций и учебных материалов
   - skills/tutor/SKILL.md               # режим репетитора: объяснение и проверка понимания
+  - skills/local-transcription/SKILL.md # локальная (offline) транскрипция записи встречи/лекции: выбор ASR, token-free диаризация, грабли
