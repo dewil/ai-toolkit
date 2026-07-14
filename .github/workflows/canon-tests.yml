@@ -1,0 +1,39 @@
+name: canon-delta tests
+
+# Прогон детерминированного дельта-движка канона (этап 8, часть a).
+# stdlib-only, нужен только python3 + git (для git-fixture в build-lock/integration).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/build-lock.py"
+      - "scripts/canon-delta.py"
+      - "scripts/canon-migrate.py"
+      - "tests/test_*.py"
+      - "manifest.yaml"
+      - ".github/workflows/canon-tests.yml"
+  pull_request:
+    paths:
+      - "scripts/build-lock.py"
+      - "scripts/canon-delta.py"
+      - "scripts/canon-migrate.py"
+      - "tests/test_*.py"
+      - "manifest.yaml"
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: run delta engine tests
+        run: |
+          set -e
+          for t in build_lock classify wal integration migrate; do
+            echo "::group::test_$t"
+            python3 tests/test_$t.py
+            echo "::endgroup::"
+          done

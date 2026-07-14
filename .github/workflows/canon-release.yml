@@ -1,0 +1,50 @@
+name: canon release descriptor
+
+# Издание release-descriptor канона (этап 8, §2). Триггер - annotated-тег canon-vN.
+# CI - ЕДИНСТВЕННЫЙ издатель descriptor + server-side gate R1: build-lock падает,
+# если manifest ссылается на путь вне дерева тега или на неподдержанный mode ->
+# издание блокируется (иначе up-to-date-файлы не тянутся, изменение доедет молча).
+# commit_sha в lock НЕ пишется - identity ревизии несет сам тег (git-объект).
+
+on:
+  push:
+    tags:
+      - "canon-v*"
+
+permissions:
+  contents: write   # для публикации lock как release-asset тега
+
+jobs:
+  release-descriptor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # полная история: build-lock снимает blob_sha/mode из git-tree тега
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: build release-descriptor from tag tree
+        run: |
+          set -e
+          python3 scripts/build-lock.py --ref "${GITHUB_REF_NAME}" --output canon.lock.json
+
+      - name: server-side gate (R1) - lock детерминирован и соответствует дереву тега
+        run: |
+          set -e
+          python3 scripts/build-lock.py --check canon.lock.json --ref "${GITHUB_REF_NAME}"
+
+      - name: publish descriptor as release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" canon.lock.json --clobber
+          else
+            gh release create "$TAG" canon.lock.json \
+              --title "$TAG" \
+              --notes "Release-descriptor канона (canon.lock.json). identity ревизии = commit тега; commit_sha в файл не пишется."
+          fi
