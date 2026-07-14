@@ -9,3 +9,11 @@ __pycache__/
 docs/dev/
 .obsidian/
 
+# release-descriptor генерится build-lock.py в CI (этап 8), в репо не коммитится
+canon.lock.json
+# WAL-артефакты дельта-синхронизации (рантайм в проектах-потребителях)
+.canon-journal.json
+.canon-stage/
+.canon-bak/
+.canon-lock
+
