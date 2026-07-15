@@ -14,11 +14,15 @@ docs/design-2026-07-14-stage8-canon-sync.md (claude-control).
   rollout_record, resolution_records.
 - harvester-ledger (harvester): upstream_pending.
 
-Этот файл - срез 1: утилиты, модель состояния, UNION-классификатор (§3 п.4),
-команда classify (read-only анализ). WAL-apply / resolution / recovery - далее.
+Состав: утилиты, модель состояния, UNION-классификатор, fast-path/планировщик,
+транзакционный WAL-apply (prepare/commit/clear + crash-recovery), resolution-API.
 
-Запуск:
-  canon-delta.py classify --lock canon.lock.json     # классификация путей (JSON)
+Запуск (--root - глобальный флаг, ДО субкоманды):
+  canon-delta.py --root <proj> classify --lock canon.lock.json
+  canon-delta.py --root <proj> plan     --lock canon.lock.json
+  canon-delta.py --root <proj> sync    --lock L --mirror M --target <commit_sha>
+  canon-delta.py --root <proj> resolve --path P --outcome accept|keep-local|skip ...
+  canon-delta.py --root <proj> recover [--mirror M]
 """
 from __future__ import annotations
 

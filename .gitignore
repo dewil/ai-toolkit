@@ -9,8 +9,9 @@ __pycache__/
 docs/dev/
 .obsidian/
 
-# release-descriptor генерится build-lock.py в CI (этап 8), в репо не коммитится
-canon.lock.json
+# release-descriptor canon.lock.json КОММИТИТСЯ в дерево при издании релиза
+# (зеркала читают его git-объектом: git show <sha>:canon.lock.json, дизайн §2);
+# CI на теге canon-vN лишь сверяет его с деревом (gate R1).
 # WAL-артефакты дельта-синхронизации (рантайм в проектах-потребителях)
 .canon-journal.json
 .canon-stage/
