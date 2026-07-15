@@ -26,6 +26,10 @@ Before implementing:
 - No abstractions for single-use code.
 - No "flexibility" or "configurability" that wasn't requested.
 - No error handling for impossible scenarios.
+- A linter/scanner finding is advisory input, not an automatic mandate. A change
+  whose only purpose is to silence a tool (an exemption comment, over-tightening
+  best-effort code) is itself overcomplication - fix the real issue or skip it
+  deliberately, stating why.
 - If you write 200 lines and it could be 50, rewrite it.
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
