@@ -1,0 +1,401 @@
+{
+  "files": {
+    "agents/architect.md": {
+      "blob_sha": "14d0e90bc6e173a1ab5a70b6e46841c02de04e0e",
+      "mode": "100644"
+    },
+    "agents/code-reviewer.md": {
+      "blob_sha": "4845af5c12a09b2b6074d83d2707a156dac14e44",
+      "mode": "100644"
+    },
+    "agents/copy-editor.md": {
+      "blob_sha": "21325309e49645f5449e3e75d40ae3b6a1705757",
+      "mode": "100644"
+    },
+    "agents/debugger.md": {
+      "blob_sha": "357487079f01380f86cb4420b7763facd108ab31",
+      "mode": "100644"
+    },
+    "agents/explorer.md": {
+      "blob_sha": "06552c4674cbdd93d71de528e16f1e87a0865f75",
+      "mode": "100644"
+    },
+    "agents/implementer.md": {
+      "blob_sha": "cdb2f30d7ef695d5259c59fb4d0cdbd5d1194648",
+      "mode": "100644"
+    },
+    "agents/librarian.md": {
+      "blob_sha": "6b50f207a41e8963347cf65fdd6e15c4b180a03d",
+      "mode": "100644"
+    },
+    "agents/note-taker.md": {
+      "blob_sha": "601c0dca01884052eba9a6f94e08bd77cea2a43d",
+      "mode": "100644"
+    },
+    "agents/note-writer.md": {
+      "blob_sha": "3c0e3157aeed6ff0fe3f77640868cbf97ff4ebee",
+      "mode": "100644"
+    },
+    "agents/planner.md": {
+      "blob_sha": "eb3a7b94f3483ea796405abf5f485db0733a1693",
+      "mode": "100644"
+    },
+    "agents/searcher.md": {
+      "blob_sha": "d41cdf7d71997072edd8242038d52cd45a68a27e",
+      "mode": "100644"
+    },
+    "agents/summarizer.md": {
+      "blob_sha": "0757fe41d0b999a504df3e529cd5e2c8487a6932",
+      "mode": "100644"
+    },
+    "agents/tracker.md": {
+      "blob_sha": "7816a57df4b8ff359acb6f932a4a0ab1096bffac",
+      "mode": "100644"
+    },
+    "commands/canon.md": {
+      "blob_sha": "cf00cf5de39f938b61136e7b1ccced8e5f4c74dc",
+      "mode": "100644"
+    },
+    "rules/addressing.md": {
+      "blob_sha": "a22d14f023def85888012c3076434a8e8f3041cf",
+      "mode": "100644"
+    },
+    "rules/artifacts-structure.md": {
+      "blob_sha": "da22464d5ac124a8f575a323bc7f02339f558fd6",
+      "mode": "100644"
+    },
+    "rules/compact-results.md": {
+      "blob_sha": "7f6cb1394f33fba5926dcdb026fe89b4bb0584d1",
+      "mode": "100644"
+    },
+    "rules/course-structure.md": {
+      "blob_sha": "88d0804460b7d223ba1d857501a1b751ef326868",
+      "mode": "100644"
+    },
+    "rules/docs-maintenance.md": {
+      "blob_sha": "d9716aa8bb6fef0be81e760f9365c309ca9d063e",
+      "mode": "100644"
+    },
+    "rules/error-exposure.md": {
+      "blob_sha": "352c55676e1db4d171606537e232023ecb1d8dea",
+      "mode": "100644"
+    },
+    "rules/estimates-in-hours.md": {
+      "blob_sha": "e677e56e56aa31ca2634c789f402769fd9b5ce9d",
+      "mode": "100644"
+    },
+    "rules/google-sheets-mcp.md": {
+      "blob_sha": "f0cb919d5c07670dee39df980b32d34522cb4855",
+      "mode": "100644"
+    },
+    "rules/homework.md": {
+      "blob_sha": "995d17dd71810d7b9a9f06f3ac012b94b4ce191f",
+      "mode": "100644"
+    },
+    "rules/karpathy-guidelines.md": {
+      "blob_sha": "656341098f4da2f900be9d221979e954a5c25511",
+      "mode": "100644"
+    },
+    "rules/lecture-notes.md": {
+      "blob_sha": "6aa3e5f19f43c33b966107630eb9a86c56a6cd94",
+      "mode": "100644"
+    },
+    "rules/meeting-transcripts.md": {
+      "blob_sha": "540b46d18e3ba42d8bae55dff6fcec21ff027948",
+      "mode": "100644"
+    },
+    "rules/meetings.md": {
+      "blob_sha": "f1b3335daeefc52962015c1e3ed473a3d0fbe7dd",
+      "mode": "100644"
+    },
+    "rules/name-cross-check.md": {
+      "blob_sha": "a81ec771fc131da1b760cbf77b9c80d719f43a5c",
+      "mode": "100644"
+    },
+    "rules/secrets-handling.md": {
+      "blob_sha": "dd2f6e7f9ec2bcb6885cd15287bf2165661ae64e",
+      "mode": "100644"
+    },
+    "rules/subagents-usage.md": {
+      "blob_sha": "523fd33f499a8d72399959470b7579a60c66fcce",
+      "mode": "100644"
+    },
+    "rules/tasks-tracking.md": {
+      "blob_sha": "7b48dbbded80ff7643380aae2ce6aac5cb41473a",
+      "mode": "100644"
+    },
+    "rules/tests-coverage.md": {
+      "blob_sha": "65ebcd051ca908f95f7d78f5bef9d25b9497782d",
+      "mode": "100644"
+    },
+    "rules/typography-ru.md": {
+      "blob_sha": "72106d511d6b4be2e7f8da60cbd47a1c42695eba",
+      "mode": "100644"
+    },
+    "rules/wiki-linking-obsidian.md": {
+      "blob_sha": "186c59322f4179dc60ef6481e21981a3171aca6c",
+      "mode": "100644"
+    },
+    "rules/wiki-notes-style.md": {
+      "blob_sha": "9cf714b9ec80fee7c15ed90d8fbf7b89d8601454",
+      "mode": "100644"
+    },
+    "scripts/md-pdf.py": {
+      "blob_sha": "dcfd4ea465a6a1a23ab4648dd57382950b56ea27",
+      "mode": "100755"
+    },
+    "scripts/mymeet-snapshot.py": {
+      "blob_sha": "933c302de744cffa5d39f8942ad3efe3a665dc29",
+      "mode": "100755"
+    },
+    "scripts/redmine-deltas.py": {
+      "blob_sha": "86509ba3277d0f788121ecb0d3cf7b33cd88d435",
+      "mode": "100755"
+    },
+    "scripts/redmine-snapshot.py": {
+      "blob_sha": "3e0fdf5bc6ff152a8e5e0de1082849a8a54aee6b",
+      "mode": "100755"
+    },
+    "scripts/telegram-deltas.py": {
+      "blob_sha": "3d353cb871f15b0e840322427e2f06ef432a9580",
+      "mode": "100755"
+    },
+    "scripts/telegram-send.py": {
+      "blob_sha": "503d65d78a8748c555ec9847319d06a7865a27ca",
+      "mode": "100755"
+    },
+    "scripts/telegram-snapshot.py": {
+      "blob_sha": "d193d33eb2cdb4dbe2a2ba929548ebac24f859df",
+      "mode": "100755"
+    },
+    "skills/codex-audit/SKILL.md": {
+      "blob_sha": "304948ae25fb0c13c370105bdf0e407563457c19",
+      "mode": "100644"
+    },
+    "skills/harvest-canon/SKILL.md": {
+      "blob_sha": "574fcbea3492183c7d924f5ebc253f7e347cb1d0",
+      "mode": "100644"
+    },
+    "skills/local-transcription/SKILL.md": {
+      "blob_sha": "dd73905312c3cb513273ef31f3e365285f95b8c4",
+      "mode": "100644"
+    },
+    "skills/md-pdf/SKILL.md": {
+      "blob_sha": "a794196653ef56b70a68a2048ee66ecac062eb6a",
+      "mode": "100644"
+    },
+    "skills/minimal-code/SKILL.md": {
+      "blob_sha": "408d2c273d090016907706b2e4a1df9f5d41ebab",
+      "mode": "100644"
+    },
+    "skills/mymeet-snapshot/SKILL.md": {
+      "blob_sha": "55623b708deee2a6aa0f504bc403f4aa86512e22",
+      "mode": "100644"
+    },
+    "skills/qa-browser/SKILL.md": {
+      "blob_sha": "228fb1e0539fb9ee1bdb567a8942bba7cfb7dfe5",
+      "mode": "100644"
+    },
+    "skills/redmine-snapshot/SKILL.md": {
+      "blob_sha": "ed3b8ede8900cfefaf9a2fac1d6198f774d10d46",
+      "mode": "100644"
+    },
+    "skills/requirements/SKILL.md": {
+      "blob_sha": "4f536a7a4ec890bd3351a94a73340fb0ee9b4e5f",
+      "mode": "100644"
+    },
+    "skills/telegram-send/SKILL.md": {
+      "blob_sha": "074127088ba7d175fa1ff415623fbba7b55fac5c",
+      "mode": "100644"
+    },
+    "skills/telegram-snapshot/SKILL.md": {
+      "blob_sha": "79f4a00a05c532bb55e47a32ae758ff1a33cae29",
+      "mode": "100644"
+    },
+    "skills/tutor/SKILL.md": {
+      "blob_sha": "379eeca7139c45741f259be8b1b7b799d807c686",
+      "mode": "100644"
+    },
+    "skills/web-research/SKILL.md": {
+      "blob_sha": "59e19322580c03b09aa87bcc34c7eede2c716f75",
+      "mode": "100644"
+    }
+  },
+  "manifest_digest": "829bd7a5007d99d424a691d6543d60bc9d445f8a2c9da9f20493922378e472de",
+  "membership": {
+    "agents/architect.md": [
+      "universal"
+    ],
+    "agents/code-reviewer.md": [
+      "coding"
+    ],
+    "agents/copy-editor.md": [
+      "documentation"
+    ],
+    "agents/debugger.md": [
+      "coding"
+    ],
+    "agents/explorer.md": [
+      "universal"
+    ],
+    "agents/implementer.md": [
+      "coding"
+    ],
+    "agents/librarian.md": [
+      "wiki"
+    ],
+    "agents/note-taker.md": [
+      "education"
+    ],
+    "agents/note-writer.md": [
+      "wiki"
+    ],
+    "agents/planner.md": [
+      "universal"
+    ],
+    "agents/searcher.md": [
+      "universal"
+    ],
+    "agents/summarizer.md": [
+      "universal"
+    ],
+    "agents/tracker.md": [
+      "management"
+    ],
+    "commands/canon.md": [
+      "universal"
+    ],
+    "rules/addressing.md": [
+      "universal"
+    ],
+    "rules/artifacts-structure.md": [
+      "management"
+    ],
+    "rules/compact-results.md": [
+      "universal"
+    ],
+    "rules/course-structure.md": [
+      "education"
+    ],
+    "rules/docs-maintenance.md": [
+      "universal"
+    ],
+    "rules/error-exposure.md": [
+      "coding"
+    ],
+    "rules/estimates-in-hours.md": [
+      "management"
+    ],
+    "rules/google-sheets-mcp.md": [
+      "management"
+    ],
+    "rules/homework.md": [
+      "education"
+    ],
+    "rules/karpathy-guidelines.md": [
+      "coding"
+    ],
+    "rules/lecture-notes.md": [
+      "education"
+    ],
+    "rules/meeting-transcripts.md": [
+      "management"
+    ],
+    "rules/meetings.md": [
+      "management"
+    ],
+    "rules/name-cross-check.md": [
+      "management"
+    ],
+    "rules/secrets-handling.md": [
+      "universal"
+    ],
+    "rules/subagents-usage.md": [
+      "universal"
+    ],
+    "rules/tasks-tracking.md": [
+      "management"
+    ],
+    "rules/tests-coverage.md": [
+      "coding"
+    ],
+    "rules/typography-ru.md": [
+      "universal"
+    ],
+    "rules/wiki-linking-obsidian.md": [
+      "wiki"
+    ],
+    "rules/wiki-notes-style.md": [
+      "wiki"
+    ],
+    "scripts/md-pdf.py": [
+      "universal"
+    ],
+    "scripts/mymeet-snapshot.py": [
+      "management"
+    ],
+    "scripts/redmine-deltas.py": [
+      "management"
+    ],
+    "scripts/redmine-snapshot.py": [
+      "management"
+    ],
+    "scripts/telegram-deltas.py": [
+      "wiki",
+      "management"
+    ],
+    "scripts/telegram-send.py": [
+      "wiki",
+      "management"
+    ],
+    "scripts/telegram-snapshot.py": [
+      "wiki",
+      "management"
+    ],
+    "skills/codex-audit/SKILL.md": [
+      "universal"
+    ],
+    "skills/harvest-canon/SKILL.md": [
+      "universal"
+    ],
+    "skills/local-transcription/SKILL.md": [
+      "management",
+      "education"
+    ],
+    "skills/md-pdf/SKILL.md": [
+      "universal"
+    ],
+    "skills/minimal-code/SKILL.md": [
+      "coding"
+    ],
+    "skills/mymeet-snapshot/SKILL.md": [
+      "management"
+    ],
+    "skills/qa-browser/SKILL.md": [
+      "coding"
+    ],
+    "skills/redmine-snapshot/SKILL.md": [
+      "management"
+    ],
+    "skills/requirements/SKILL.md": [
+      "coding"
+    ],
+    "skills/telegram-send/SKILL.md": [
+      "wiki",
+      "management"
+    ],
+    "skills/telegram-snapshot/SKILL.md": [
+      "wiki",
+      "management"
+    ],
+    "skills/tutor/SKILL.md": [
+      "education"
+    ],
+    "skills/web-research/SKILL.md": [
+      "universal"
+    ]
+  },
+  "min_cli_version": 1,
+  "plugin_source": null,
+  "schema_version": 1
+}
