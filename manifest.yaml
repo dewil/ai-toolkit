@@ -50,6 +50,7 @@ coding:
   - agents/code-reviewer.md             # ревью изменений
   - skills/minimal-code/SKILL.md        # минимальный код: лестница ступеней сложности
   - skills/requirements/SKILL.md        # сбор размытых бизнес-требований в ТЗ + user stories до кода
+  - skills/qa-browser/SKILL.md          # report-only QA-проход по веб-UI через браузер (chrome-devtools MCP)
 
 documentation:
   - agents/copy-editor.md               # вычитка и редактура текстов
