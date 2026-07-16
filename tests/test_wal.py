@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -553,6 +554,57 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(self._klass(st), cd.UP_TO_DATE)
         # WAL очищен
         self.assertIsNone(cd.read_journal(self.root))
+
+
+class LeftoversTest(WalBase):
+    """Остаточные не-блокеры codex-r4 части (a), закрываются в части (c) T27:
+    GC осиротевших temp + lifecycle recovery_conflicts."""
+
+    def _mk_temp(self, rel_dir: str, base: str, age_s: float) -> Path:
+        d = self.root / rel_dir
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f".{base}.tmp.{'a' * 32}"
+        p.write_text("orphan", encoding="utf-8")
+        old = time.time() - age_s
+        os.utime(p, (old, old))
+        return p
+
+    def test_orphan_temps_gc_on_recover(self) -> None:
+        stale_claude = self._mk_temp(".claude", "canon.state.json", 7200)
+        stale_rule = self._mk_temp("rules", "mod.md", 7200)
+        fresh = self._mk_temp(".claude", "canon.intent.yaml", 10)
+        alien = self.root / "rules" / ".unrelated-dotfile"
+        alien.write_text("keep me", encoding="utf-8")
+        res = cd.recover(self.root, self.blob_source, self.state_path)
+        self.assertEqual(res["status"], "clean")
+        self.assertFalse(stale_claude.exists(), "сирота в .claude не убрана")
+        self.assertFalse(stale_rule.exists(), "сирота в каталоге правила не убрана")
+        self.assertTrue(fresh.exists(), "свежий temp удален (живой писатель?)")
+        self.assertTrue(alien.exists(), "чужой dot-файл удален GC")
+
+    def test_orphan_temps_gc_on_apply(self) -> None:
+        stale = self._mk_temp(".claude", "canon.state.json", 7200)
+        cd.apply_release(self.root, self.intent, self.state, self.descriptor,
+                         self.target, self.blob_source, self.state_path)
+        self.assertFalse(stale.exists(), "успешный apply не почистил сироту")
+
+    def test_recovery_conflict_cleared_on_clean_replay(self) -> None:
+        self.state["recovery_conflicts"] = [
+            {"path": "rules/mod.md", "release": {"commit_sha": "c1"},
+             "reason": "committed-recovery-abort"},
+            {"path": "rules/other.md", "release": {"commit_sha": "c1"},
+             "reason": "committed-recovery-abort"},
+        ]
+        cd.save_state(self.state_path, self.state)
+        res = cd.apply_release(self.root, self.intent, self.state, self.descriptor,
+                               self.target, self.blob_source, self.state_path)
+        self.assertEqual(res["aborted"], [])
+        st = self._load_state()
+        paths = [x["path"] for x in st.get("recovery_conflicts", [])]
+        self.assertNotIn("rules/mod.md", paths,
+                         "чистый re-apply пути не снял recovery_conflict")
+        self.assertIn("rules/other.md", paths,
+                      "запись НЕприменявшегося пути снята огульно")
 
 
 if __name__ == "__main__":

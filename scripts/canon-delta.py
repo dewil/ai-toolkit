@@ -786,6 +786,14 @@ def _finalize_state(state: dict, journal: dict, applied: list[dict], aborted: li
     for e in applied:
         fh[e["path"]] = {"sha": e["new_sha"], "mode": e["mode"]}
         memb[e["path"]] = e.get("membership", [])
+    # lifecycle recovery_conflicts (T27, не-блокер codex-r4): чистый re-apply
+    # пути снимает его застрявшую запись (stale после крэша между save_state
+    # и clear_wal); записи НЕприменявшихся путей остаются человеку
+    applied_paths = {e["path"] for e in applied}
+    rc = st.get("recovery_conflicts") or []
+    if rc and applied_paths:
+        st["recovery_conflicts"] = [x for x in rc
+                                    if x.get("path") not in applied_paths]
     # retire T1: снять из file_hashes АТОМАРНО с commit (WAL-изовано), идемпотентно
     # под replay recovery (dedup по (path,release))
     rel_commit = (journal["header"].get("release") or {}).get("commit_sha")
@@ -915,19 +923,65 @@ def _recover_locked(root: Path, journal: dict, blob_source, state_path: Path) ->
     }
 
 
+def _is_our_temp(name: str) -> bool:
+    """Наш temp-неймспейс: .<base>.tmp.<hex32> (atomic_write + EXDEV-fallback)."""
+    if not name.startswith(".") or ".tmp." not in name:
+        return False
+    suffix = name.rsplit(".tmp.", 1)[1]
+    return len(suffix) == 32 and all(c in "0123456789abcdef" for c in suffix)
+
+
+def gc_orphan_temps(root: Path, state: dict, max_age: float = 3600.0) -> list[str]:
+    """Не-блокер codex-r4 части (a): temp может осиротеть при крэше между
+    созданием и link/replace (EXDEV-fallback, atomic_write). Temp старше
+    max_age - гарантированная сирота (живой писатель работает секунды и
+    держит project_flock). Каталоги: .claude + родители известных канон-путей
+    (state.file_hashes). Возвращает список убранных (для лога/тестов)."""
+    dirs = {root / ".claude"}
+    for p in (state.get("file_hashes") or {}):
+        dirs.add((root / p).parent)
+    removed: list[str] = []
+    now = time.time()
+    for d in dirs:
+        try:
+            entries = list(d.iterdir())
+        except OSError:
+            continue
+        for f in entries:
+            if not _is_our_temp(f.name):
+                continue
+            try:
+                if now - f.stat().st_mtime > max_age:
+                    f.unlink()
+                    removed.append(str(f.relative_to(root)))
+            except OSError:
+                pass
+    return removed
+
+
 def recover(root: Path, blob_source=None, state_path: Path | None = None) -> dict:
     """Терминализует незавершенную транзакцию под project_flock. phase=prepare ->
     roll-back; phase=committed -> roll-forward (доиграть файлы + state.json по scope).
-    ВСЕГДА доводит committed до конца, не оставляет частичный post-image со старым state."""
+    ВСЕГДА доводит committed до конца, не оставляет частичный post-image со старым state.
+    Попутно (T27) собирает осиротевшие temp: recover - гарантированная точка
+    'никто больше не пишет'."""
     if state_path is None:
         state_path = root / ".claude" / "canon.state.json"
-    if read_journal(root) is None:
-        return {"status": "clean"}
+
+    def _gc():
+        try:
+            gc_orphan_temps(root, load_state(state_path))
+        except SystemExit:  # битый state не меняет контракт recover
+            gc_orphan_temps(root, {})
+
     with project_flock(root):
-        journal = read_journal(root)  # перечитать под lock (мог измениться)
+        journal = read_journal(root)  # читать под lock
         if journal is None:
+            _gc()
             return {"status": "clean"}
-        return _recover_locked(root, journal, blob_source, state_path)
+        res = _recover_locked(root, journal, blob_source, state_path)
+        _gc()
+        return res
 
 
 # --- оркестратор apply: classify -> reconcile -> desired -> WAL(files+retire) -> clear ---
@@ -996,6 +1050,7 @@ def apply_release(root: Path, intent: dict, state: dict, descriptor: dict,
         committed = prepare(root, journal, blob_source)
         new_state, aborted = _commit_locked(root, committed, work, state_path, blob_source)
         clear_wal(root, committed)
+        gc_orphan_temps(root, new_state)  # T27: транзакция завершена - сироты в мусор
         aborted_paths = {e["path"] for e in aborted}
         return {
             "status": "applied" if scope == SCOPE_RELEASE and not aborted else "partial",
