@@ -193,6 +193,15 @@ def build_descriptor(ref: str, min_cli: int) -> dict:
             manifest_paths.setdefault(p, set()).add(section)
     tree = git_ls_tree(ref)
     files, membership = expand_paths(manifest_paths, tree)
+    # инъективность fs_rel на case-insensitive ФС проекта: два канон-пути,
+    # различающихся лишь регистром, слились бы в один файл (T31 fs-mapping r2)
+    seen: dict[str, str] = {}
+    for p in files:
+        fs = ("" if p.startswith("scripts/") else ".claude/") + p
+        key = fs.casefold()
+        if key in seen and seen[key] != p:
+            die(f"manifest: case-fold коллизия путей {seen[key]!r} и {p!r}")
+        seen.setdefault(key, p)
     digest = compute_digest(files, membership)
     return {
         "schema_version": SCHEMA_VERSION,

@@ -290,5 +290,111 @@ class ContainmentTest(unittest.TestCase):
         self.assertTrue(orphan.exists(), "GC удалил файл вне root")
 
 
+class R2HardeningTest(unittest.TestCase):
+    """T31-r2 fs-mapping: case-fold коллизия, внутренние WAL-пути, containment
+    до mkdir (codex r2 blocker'ы)."""
+
+    def _lock(self, td, files):
+        import json as _json
+        lock = Path(td) / "canon.lock.json"
+        lock.write_text(_json.dumps({
+            "schema_version": 1, "min_cli_version": 1,
+            "release": {"commit_sha": "c" * 40, "manifest_digest": "d" * 64},
+            "manifest_digest": "d" * 64, "files": files,
+            "membership": {k: ["universal"] for k in files},
+            "plugin_source": None,
+        }), encoding="utf-8")
+        return lock
+
+    def test_casefold_alias_in_descriptor_dies(self):
+        with tempfile.TemporaryDirectory() as td:
+            lock = self._lock(td, {
+                "rules/a.md": {"blob_sha": blob("x"), "mode": "100644"},
+                "rules/A.md": {"blob_sha": blob("y"), "mode": "100644"}})
+            with self.assertRaises(SystemExit):
+                cd.load_descriptor(lock)
+
+    def test_journal_bad_pass_id_dies(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".claude").mkdir()
+            j = {"header": {"phase": "prepare", "pass_id": "../../../outside",
+                            "release_identity": "c" * 40, "release": {},
+                            "scope": "release", "retire": []}, "files": []}
+            cd.write_journal(root, j)
+            with self.assertRaises(SystemExit):
+                cd.read_journal(root)
+
+    def test_journal_forged_staging_path_dies(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".claude").mkdir()
+            j = {"header": {"phase": "committed", "pass_id": "P1",
+                            "release_identity": "c" * 40, "release": {},
+                            "scope": "release", "retire": []},
+                 "files": [{"path": "rules/a.md", "action": "create",
+                            "base_sha": None, "base_mode": None,
+                            "target_sha": "a" * 40, "new_sha": "a" * 40,
+                            "mode": "100644", "membership": [],
+                            "staging_path": "/etc/evil",  # абсолютный, не дериват
+                            "backup_path": None}]}
+            cd.write_journal(root, j)
+            with self.assertRaises(SystemExit):
+                cd.read_journal(root)
+
+    def test_no_outside_dir_created_on_symlink_parent(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root, outside = base / "proj", base / "outside"
+            (root / ".claude").mkdir(parents=True)
+            outside.mkdir()
+            os.symlink(outside, root / ".claude" / "rules")
+            sha = blob("X")
+            desc = {"schema_version": 1, "min_cli_version": 1,
+                    "files": {"rules/sub/a.md": {"blob_sha": sha, "mode": "100644"}},
+                    "membership": {"rules/sub/a.md": ["universal"]},
+                    "plugin_source": None, "manifest_digest": "d" * 64}
+            intent = {"project_type": ["universal"], "skip_sync": [],
+                      "local_only": [], "overrides": []}
+            cd.apply_release(root, intent, cd.empty_state(), desc, "c" * 40,
+                             cd.DictBlobSource({sha: b"X"}),
+                             root / ".claude" / "canon.state.json")
+            self.assertFalse((outside / "sub").exists(), "создан каталог вне root до abort")
+
+
+class R2ClassifyEdgeTest(unittest.TestCase):
+    """pre-fix layout: split-brain (mapped И literal) и недоступный legacy."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / ".claude").mkdir(parents=True)
+        self.desc = {"schema_version": 1, "min_cli_version": 1,
+                     "files": {"rules/a.md": {"blob_sha": blob("up"), "mode": "100644"}},
+                     "membership": {"rules/a.md": ["universal"]},
+                     "plugin_source": None, "manifest_digest": "d" * 64}
+        self.intent = {"project_type": ["universal"], "skip_sync": [],
+                       "local_only": [], "overrides": []}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _klass(self, state):
+        res = cd.classify(self.intent, state, self.desc, self.root)
+        return next(r["klass"] for r in res if r["path"] == "rules/a.md")
+
+    def test_split_brain_mapped_and_literal_conflicts(self):
+        # mapped существует (up-to-date), но literal-дубль в корне тоже есть ->
+        # не тихий up-to-date, а CONFLICT (человек разберет дубль)
+        mp = cd.fs_path(self.root, "rules/a.md")
+        mp.parent.mkdir(parents=True, exist_ok=True)
+        mp.write_text("up", encoding="utf-8")
+        (self.root / "rules").mkdir(exist_ok=True)
+        (self.root / "rules" / "a.md").write_text("edited legacy", encoding="utf-8")
+        st = cd.empty_state()
+        st["file_hashes"] = {"rules/a.md": {"sha": blob("up"), "mode": "100644"}}
+        self.assertEqual(self._klass(st), cd.CONFLICT)
+
+
 if __name__ == "__main__":
     unittest.main()
