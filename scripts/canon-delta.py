@@ -37,6 +37,7 @@ import shutil
 import stat
 import sys
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -179,9 +180,11 @@ def _die_on_casefold_collision(paths, where: str) -> None:
     на границе (T31 fs-mapping r2)."""
     seen: dict[str, str] = {}
     for p in paths:
-        key = fs_rel(p).casefold()
+        # NFC + casefold: APFS/HFS+ нечувствительны и к регистру, и к Unicode-
+        # нормализации (é одним codepoint vs e+combining) - r3
+        key = unicodedata.normalize("NFC", fs_rel(p)).casefold()
         if key in seen and seen[key] != p:
-            die(f"{where}: case-fold коллизия путей {seen[key]!r} и {p!r}",
+            die(f"{where}: case/unicode коллизия путей {seen[key]!r} и {p!r}",
                 EXIT_INCOMPAT)
         seen.setdefault(key, p)
 
@@ -533,6 +536,10 @@ def local_matches_state(state: dict, root: Path) -> bool:
             return False
         if local["sha"] != base.get("sha") or local["mode"] != base.get("mode"):
             return False
+        # split-brain: mapped совпал, но literal-дубль в корне (pre-fix) с
+        # правками - не молчим по fast-path, уводим в classify -> CONFLICT (r3)
+        if _legacy_layout_present(root, path):
+            return False
     return True
 
 
@@ -812,8 +819,12 @@ def materialize_staging(root: Path, entry: dict, blob_source) -> None:
 def snapshot_backup(root: Path, entry: dict) -> None:
     if entry["backup_path"] is None:
         return
+    bak = root / entry["backup_path"]
+    if not _write_contained(root, bak):
+        # .claude/.canon-bak подменен симлинком наружу/на стейдж (r3)
+        raise RecoveryRequired(f"backup-неймспейс вне root: {entry['backup_path']}")
     data = fs_path(root, entry["path"]).read_bytes()
-    atomic_write_bytes(root / entry["backup_path"], data)
+    atomic_write_bytes(bak, data)
 
 
 def prepare(root: Path, journal: dict, blob_source, fault=_noop_fault) -> dict:
@@ -894,7 +905,10 @@ def _apply_one(root: Path, entry: dict, blob_source, fault=_noop_fault) -> str:
     if not _cas_ok(entry, local):
         return "abort"
     stage = root / entry["staging_path"]
-    if not stage.exists():
+    # стейдж потреблен/битый/подменен (в т.ч. backup-alias через симлинк
+    # неймспейса) -> re-fetch из источника, не публикуем не-target (r3)
+    stage_ok = stage.exists() and git_blob_sha(stage.read_bytes()) == entry["target_sha"]
+    if not stage_ok:
         if blob_source is None:
             raise RecoveryRequired(entry["path"])
         atomic_write_bytes(stage, blob_source.get(entry["target_sha"]), _mode_to_bits(entry["mode"]))

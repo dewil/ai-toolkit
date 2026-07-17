@@ -396,5 +396,76 @@ class R2ClassifyEdgeTest(unittest.TestCase):
         self.assertEqual(self._klass(st), cd.CONFLICT)
 
 
+class R3HardeningTest(unittest.TestCase):
+    """T31-r3: Unicode-NFC коллизия, SHA-recheck стейджа, fast-path split-brain."""
+
+    def test_unicode_nfd_nfc_collision_dies(self):
+        import json as _json
+        nfc = "rules/é.md"          # é как один codepoint
+        nfd = "rules/é.md"         # e + combining acute
+        with tempfile.TemporaryDirectory() as td:
+            lock = Path(td) / "canon.lock.json"
+            lock.write_text(_json.dumps({
+                "schema_version": 1, "min_cli_version": 1,
+                "release": {"commit_sha": "c" * 40, "manifest_digest": "d" * 64},
+                "manifest_digest": "d" * 64,
+                "files": {nfc: {"blob_sha": blob("x"), "mode": "100644"},
+                          nfd: {"blob_sha": blob("y"), "mode": "100644"}},
+                "membership": {nfc: ["universal"], nfd: ["universal"]},
+                "plugin_source": None,
+            }), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                cd.load_descriptor(lock)
+
+    def test_apply_rechecks_stage_sha_before_publish(self):
+        # стейдж подменен чужими байтами (эмуляция backup-alias/битого стейджа):
+        # _apply_one НЕ должен опубликовать не-target
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".claude").mkdir()
+            target = blob("correct")
+            pid = "P1"
+            entry = {"path": "rules/a.md", "action": "create",
+                     "base_sha": None, "base_mode": None,
+                     "target_sha": target, "new_sha": target, "mode": "100644",
+                     "membership": [], "staging_path": cd._stage_rel(pid, "rules/a.md"),
+                     "backup_path": None}
+            stage = root / entry["staging_path"]
+            stage.parent.mkdir(parents=True, exist_ok=True)
+            stage.write_bytes(b"WRONG")  # не target
+            r = cd._apply_one(root, entry, cd.DictBlobSource({target: b"correct"}))
+            self.assertEqual(r, "applied")
+            self.assertEqual((root / ".claude/rules/a.md").read_bytes(), b"correct")
+
+    def test_snapshot_backup_outside_root_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root, outside = base / "proj", base / "outside"
+            (root / ".claude").mkdir(parents=True)
+            outside.mkdir()
+            os.symlink(outside, root / ".claude" / ".canon-bak")
+            mp = cd.fs_path(root, "rules/a.md")
+            mp.parent.mkdir(parents=True, exist_ok=True)
+            mp.write_text("cur", encoding="utf-8")
+            entry = {"path": "rules/a.md", "backup_path": ".claude/.canon-bak/P1/rules/a.md"}
+            with self.assertRaises(cd.RecoveryRequired):
+                cd.snapshot_backup(root, entry)
+
+    def test_fast_path_false_on_legacy_literal(self):
+        # applied==target и mapped совпадает, но literal-дубль с правками в корне
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".claude").mkdir()
+            mp = cd.fs_path(root, "rules/a.md")
+            mp.parent.mkdir(parents=True, exist_ok=True)
+            mp.write_text("up", encoding="utf-8")
+            (root / "rules").mkdir()
+            (root / "rules" / "a.md").write_text("legacy edited", encoding="utf-8")
+            st = cd.empty_state()
+            st["applied_release"] = {"commit_sha": "c" * 40, "manifest_digest": "d" * 64}
+            st["file_hashes"] = {"rules/a.md": {"sha": blob("up"), "mode": "100644"}}
+            self.assertFalse(cd.fast_path(st, "c" * 40, root))
+
+
 if __name__ == "__main__":
     unittest.main()
