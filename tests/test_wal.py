@@ -89,15 +89,16 @@ class WalBase(unittest.TestCase):
         self.tmp.cleanup()
 
     def _write(self, rel: str, content: str) -> None:
-        p = self.root / rel
+        # rel канонический; на диске файл живет по fs_path (маппинг .claude/)
+        p = cd.fs_path(self.root, rel)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
 
     def _read(self, rel: str) -> str:
-        return (self.root / rel).read_text(encoding="utf-8")
+        return cd.fs_path(self.root, rel).read_text(encoding="utf-8")
 
     def _exists(self, rel: str) -> bool:
-        return (self.root / rel).exists()
+        return cd.fs_path(self.root, rel).exists()
 
     def _load_state(self) -> dict:
         return cd.load_state(self.state_path)
@@ -362,7 +363,8 @@ class AdversarialRegressionTest(WalBase):
         journal = self._plan_journal(cd.SCOPE_RELEASE)
         cd.prepare(self.root, journal, self.blob_source)
         self._flip_to_prepare()
-        p = self.root / "rules" / "new.md"
+        p = cd.fs_path(self.root, "rules/new.md")
+        p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("new-file\n", encoding="utf-8")
         p.chmod(0o755)
         res = cd.recover(self.root, self.blob_source, self.state_path)
@@ -382,7 +384,9 @@ class AdversarialRegressionTest(WalBase):
         # foreign создал new.md ДО commit -> CAS(create=absent) валится -> abort, не clobber
         journal = self._plan_journal(cd.SCOPE_RELEASE)
         committed = cd.prepare(self.root, journal, self.blob_source)
-        (self.root / "rules" / "new.md").write_text("foreign\n", encoding="utf-8")
+        fp = cd.fs_path(self.root, "rules/new.md")
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text("foreign\n", encoding="utf-8")
         _, aborted = cd.commit(self.root, committed, self.state, self.state_path, self.blob_source)
         self.assertIn("rules/new.md", [e["path"] for e in aborted])
         self.assertEqual(self._read("rules/new.md"), "foreign\n")  # не затерт
@@ -516,8 +520,9 @@ class ResolveTest(unittest.TestCase):
         self.state["applied_release"] = {"commit_sha": "c1", "manifest_digest": "d1"}
         self.state["file_hashes"] = {"rules/conf.md": {"sha": blob("base-v1\n"), "mode": "100644"}}
         self.state["membership"] = {"rules/conf.md": ["universal"]}
-        (self.root / "rules").mkdir()
-        (self.root / "rules" / "conf.md").write_text("local-edit\n", encoding="utf-8")
+        conf = cd.fs_path(self.root, "rules/conf.md")
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text("local-edit\n", encoding="utf-8")
         cd.save_state(self.state_path, self.state)
 
     def tearDown(self) -> None:
@@ -533,7 +538,7 @@ class ResolveTest(unittest.TestCase):
     def test_keep_local_then_resolved_then_r6(self) -> None:
         st = cd.resolve_keep_local(self.root, self.descriptor, "rules/conf.md", "c2", self.state_path)
         # запись есть, файл не тронут
-        self.assertEqual((self.root / "rules" / "conf.md").read_text(), "local-edit\n")
+        self.assertEqual(cd.fs_path(self.root, "rules/conf.md").read_text(), "local-edit\n")
         self.assertEqual(self._klass(st), cd.RESOLVED_LOCAL)
         # канон двигает путь дальше (v2 -> v3): record больше не матчит (R6)
         self.descriptor["files"]["rules/conf.md"]["blob_sha"] = blob("upstream-v3\n")
@@ -544,7 +549,7 @@ class ResolveTest(unittest.TestCase):
                                          "rules/conf.md", "c2", self.blob_source, self.state_path)
         self.assertEqual(res["aborted"], [])
         # файл перезаписан upstream-байтами
-        self.assertEqual((self.root / "rules" / "conf.md").read_text(), "upstream-v2\n")
+        self.assertEqual(cd.fs_path(self.root, "rules/conf.md").read_text(), "upstream-v2\n")
         st = cd.load_state(self.state_path)
         self.assertEqual(st["file_hashes"]["rules/conf.md"]["sha"], blob("upstream-v2\n"))
         # per-path: applied_release НЕ двинут
@@ -571,9 +576,9 @@ class LeftoversTest(WalBase):
 
     def test_orphan_temps_gc_on_recover(self) -> None:
         stale_claude = self._mk_temp(".claude", "canon.state.json", 7200)
-        stale_rule = self._mk_temp("rules", "mod.md", 7200)
+        stale_rule = self._mk_temp(".claude/rules", "mod.md", 7200)
         fresh = self._mk_temp(".claude", "canon.intent.yaml", 10)
-        alien = self.root / "rules" / ".unrelated-dotfile"
+        alien = self.root / ".claude" / "rules" / ".unrelated-dotfile"
         alien.write_text("keep me", encoding="utf-8")
         res = cd.recover(self.root, self.blob_source, self.state_path)
         self.assertEqual(res["status"], "clean")

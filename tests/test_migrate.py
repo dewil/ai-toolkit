@@ -49,10 +49,12 @@ class MigrateTest(unittest.TestCase):
         self.root = Path(self.tmp.name)
         (self.root / ".claude").mkdir(parents=True)
         (self.root / ".claude" / "canon.yaml").write_text(OLD_CANON, encoding="utf-8")
-        (self.root / "rules").mkdir()
-        (self.root / "rules" / "a.md").write_text("rule A body\n", encoding="utf-8")
-        (self.root / "scripts").mkdir()
-        tool = self.root / "scripts" / "tool.py"
+        # раскладка проекта: rules/ живут под .claude/, scripts/ - в корне (fs_rel)
+        rule = cd.fs_path(self.root, "rules/a.md")
+        rule.parent.mkdir(parents=True, exist_ok=True)
+        rule.write_text("rule A body\n", encoding="utf-8")
+        tool = cd.fs_path(self.root, "scripts/tool.py")
+        tool.parent.mkdir(parents=True, exist_ok=True)
         tool.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         tool.chmod(0o755)
 

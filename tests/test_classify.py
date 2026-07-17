@@ -34,7 +34,8 @@ class ClassifyTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def mkfile(self, rel: str, content: str, ex: bool = False) -> str:
-        p = self.root / rel
+        # rel канонический; на диске файл живет по fs_path (маппинг .claude/)
+        p = cd.fs_path(self.root, rel)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         if ex:
@@ -44,7 +45,7 @@ class ClassifyTest(unittest.TestCase):
         return blob(content)
 
     def mksymlink(self, rel: str, target: str) -> None:
-        p = self.root / rel
+        p = cd.fs_path(self.root, rel)
         p.parent.mkdir(parents=True, exist_ok=True)
         os.symlink(target, p)
 

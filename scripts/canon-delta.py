@@ -144,13 +144,32 @@ def git_mode_of(st: os.stat_result) -> str:
     return "100644"
 
 
+def fs_rel(rel: str) -> str:
+    """Канонический путь (дерево toolkit) -> путь в проекте.
+
+    Конвенция CLAUDE-проектов: канон живет под .claude/ (rules/, agents/,
+    skills/, commands/, ...), КРОМЕ scripts/ - они в корне проекта рядом с
+    прочими скриптами. Раньше это знание жило в LLM-промпте /canon; движок
+    применяет его на ФС-границе. Идентичность (журнал, state.file_hashes,
+    membership, резолюции) везде остается канонической.
+    """
+    if rel.startswith("scripts/") or rel.startswith(".claude/"):
+        return rel
+    return ".claude/" + rel
+
+
+def fs_path(root: Path, rel: str) -> Path:
+    return root / fs_rel(rel)
+
+
 def read_local(root: Path, rel: str) -> dict:
     """Локальное состояние файла проекта через lstat (НЕ следуя symlink, находка 7).
 
     Возвращает {exists, symlink, sha, mode}. symlink на месте канон-файла -> sha/mode
     считаются по самой ссылке (git-mode 120000), классификатор даст conflict.
+    rel канонический - на ФС смотрим по fs_path.
     """
-    p = root / rel
+    p = fs_path(root, rel)
     try:
         st = p.lstat()
     except FileNotFoundError:
@@ -678,7 +697,7 @@ def materialize_staging(root: Path, entry: dict, blob_source) -> None:
 def snapshot_backup(root: Path, entry: dict) -> None:
     if entry["backup_path"] is None:
         return
-    data = (root / entry["path"]).read_bytes()
+    data = fs_path(root, entry["path"]).read_bytes()
     atomic_write_bytes(root / entry["backup_path"], data)
 
 
@@ -765,7 +784,7 @@ def _apply_one(root: Path, entry: dict, blob_source, fault=_noop_fault) -> str:
             raise RecoveryRequired(entry["path"])
         atomic_write_bytes(stage, blob_source.get(entry["target_sha"]), _mode_to_bits(entry["mode"]))
     os.chmod(stage, _mode_to_bits(entry["mode"]))
-    final = root / entry["path"]
+    final = fs_path(root, entry["path"])
     final.parent.mkdir(parents=True, exist_ok=True)
     fault("pre-rename:" + entry["path"])
     if entry["action"] == ACTION_MODIFY:
@@ -852,7 +871,7 @@ def _restore_from_backup(root: Path, entry: dict) -> None:
     atomic_write_bytes (mode на temp до rename) - нет частичного bytes-без-chmod
     состояния (находка 1)."""
     data = (root / entry["backup_path"]).read_bytes()
-    atomic_write_bytes(root / entry["path"], data, _mode_to_bits(entry["base_mode"]))
+    atomic_write_bytes(fs_path(root, entry["path"]), data, _mode_to_bits(entry["base_mode"]))
 
 
 def _recover_prepare(root: Path, journal: dict) -> list[str]:
@@ -882,7 +901,7 @@ def _recover_prepare(root: Path, journal: dict) -> list[str]:
             if not local["exists"]:
                 continue
             if (local["sha"], local["mode"]) == (e["new_sha"], e["mode"]):
-                (root / e["path"]).unlink()  # это МЫ создали (sha+mode) -> удалить
+                fs_path(root, e["path"]).unlink()  # это МЫ создали (sha+mode) -> удалить
             else:
                 escalated.append(e["path"])  # чужой файл (иные байты/режим) -> не трогаем
     return escalated
@@ -939,7 +958,7 @@ def gc_orphan_temps(root: Path, state: dict, max_age: float = 3600.0) -> list[st
     (state.file_hashes). Возвращает список убранных (для лога/тестов)."""
     dirs = {root / ".claude"}
     for p in (state.get("file_hashes") or {}):
-        dirs.add((root / p).parent)
+        dirs.add(fs_path(root, p).parent)
     removed: list[str] = []
     now = time.time()
     for d in dirs:
