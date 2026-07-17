@@ -144,6 +144,35 @@ def git_mode_of(st: os.stat_result) -> str:
     return "100644"
 
 
+def validate_rel(rel) -> str | None:
+    """Валидация канонического пути на входной границе (lock/state/journal/CLI).
+
+    None = безопасен; иначе причина отказа. Закрывает (T31 fs-mapping r1):
+    path traversal (../, абсолютные, пустые компоненты), backslash-обход,
+    коллизию алиасов через зарезервированный неймспейс .claude/ (без него
+    'rules/a.md' и '.claude/rules/a.md' мапились бы в один файл).
+    """
+    if not isinstance(rel, str) or not rel:
+        return "пустой путь"
+    if rel.startswith("/"):
+        return "абсолютный путь"
+    if "\\" in rel:
+        return "backslash в пути"
+    parts = rel.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return "недопустимый компонент пути"
+    if parts[0] == ".claude":
+        return "зарезервированный неймспейс .claude/"
+    return None
+
+
+def _die_on_bad_rels(paths, where: str) -> None:
+    for p in paths:
+        err = validate_rel(p)
+        if err:
+            die(f"{where}: {err}: {p!r}", EXIT_INCOMPAT)
+
+
 def fs_rel(rel: str) -> str:
     """Канонический путь (дерево toolkit) -> путь в проекте.
 
@@ -160,6 +189,28 @@ def fs_rel(rel: str) -> str:
 
 def fs_path(root: Path, rel: str) -> Path:
     return root / fs_rel(rel)
+
+
+def _legacy_layout_present(root: Path, rel: str) -> bool:
+    """Есть ли файл по ЛИТЕРАЛЬНОМУ (pre-fix) канон-пути в корне проекта."""
+    if fs_rel(rel) == rel:
+        return False  # scripts/ и так литеральный
+    try:
+        (root / rel).lstat()
+        return True
+    except OSError:
+        return False
+
+
+def _write_contained(root: Path, final: Path) -> bool:
+    """Родитель финального пути обязан резолвиться ВНУТРИ root: закрывает
+    побег записи через symlink-родителя (.claude/rules -> наружу) и любой
+    другой обход (T31 fs-mapping r1). Проверка перед каждой записью/unlink
+    по канон-пути; false = не писать (abort/эскалация)."""
+    try:
+        return final.parent.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
 
 
 def read_local(root: Path, rel: str) -> dict:
@@ -279,6 +330,9 @@ def load_state(path: Path) -> dict:
         die(f"state.json битый: {e}")
     base = empty_state()
     base.update(data)
+    # fail-closed: пути в state - наши же записи; мусор/враждебный ключ =
+    # ручной разбор, а не выполнение traversal (T31 fs-mapping r1)
+    _die_on_bad_rels((base.get("file_hashes") or {}).keys(), "state.file_hashes")
     return base
 
 
@@ -305,6 +359,10 @@ def load_descriptor(path: Path) -> dict:
     mcv = d.get("min_cli_version", 1)
     if CLI_VERSION < mcv:
         die(f"lock требует min_cli_version={mcv}, у CLI {CLI_VERSION}", EXIT_INCOMPAT)
+    # канонические пути lock'а обязаны быть безопасными и вне .claude/ -
+    # иначе алиас-коллизия fs_rel / traversal (T31 fs-mapping r1)
+    _die_on_bad_rels((d.get("files") or {}).keys(), "lock.files")
+    _die_on_bad_rels((d.get("membership") or {}).keys(), "lock.membership")
     return d
 
 
@@ -393,6 +451,12 @@ def classify(intent: dict, state: dict, descriptor: dict, root: Path) -> list[di
 
         if local["symlink"]:
             rec["klass"] = CONFLICT  # symlink на месте канон-файла (находка 7)
+        elif not local["exists"] and _legacy_layout_present(root, path):
+            # pre-fix раскладка: файл лежит по ЛИТЕРАЛЬНОМУ канон-пути в корне
+            # (старый движок клал туда). Тихий MISSING_LOCAL/NEW потерял бы
+            # локальные правки дублем - эскалируем человеку (T31 fs-mapping r1)
+            rec["klass"] = CONFLICT
+            rec["legacy_layout"] = True
         elif not in_state:
             # новый для проекта
             rec["klass"] = UNTRACKED_COLLISION if local["exists"] else NEW
@@ -617,9 +681,14 @@ def read_journal(root: Path) -> dict | None:
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        j = json.loads(p.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         die(f"WAL-журнал битый: {e}", EXIT_RECOVERY)
+    # fail-closed: журнал с небезопасным путем нельзя ИСПОЛНЯТЬ (recovery
+    # писал бы за пределы root) - ручной разбор (T31 fs-mapping r1)
+    _die_on_bad_rels([e.get("path") for e in j.get("files") or []], "journal.files")
+    _die_on_bad_rels((j.get("header") or {}).get("retire") or [], "journal.retire")
+    return j
 
 
 def clear_wal(root: Path, journal: dict) -> None:
@@ -786,6 +855,8 @@ def _apply_one(root: Path, entry: dict, blob_source, fault=_noop_fault) -> str:
     os.chmod(stage, _mode_to_bits(entry["mode"]))
     final = fs_path(root, entry["path"])
     final.parent.mkdir(parents=True, exist_ok=True)
+    if not _write_contained(root, final):
+        return "abort"  # symlink-родитель выводит за root - не пишем
     fault("pre-rename:" + entry["path"])
     if entry["action"] == ACTION_MODIFY:
         os.replace(stage, final)  # атомарная замена существующего (CAS сверил base)
@@ -894,6 +965,9 @@ def _recover_prepare(root: Path, journal: dict) -> list[str]:
                 if bak is None or not bak.exists():
                     escalated.append(e["path"])  # backup нет (crash до snapshot) -> no-touch
                     continue
+                if not _write_contained(root, fs_path(root, e["path"])):
+                    escalated.append(e["path"])  # symlink-родитель за root -> no-touch
+                    continue
                 _restore_from_backup(root, e)
             else:
                 escalated.append(e["path"])  # чужая правка / иной mode -> не трогаем
@@ -901,7 +975,11 @@ def _recover_prepare(root: Path, journal: dict) -> list[str]:
             if not local["exists"]:
                 continue
             if (local["sha"], local["mode"]) == (e["new_sha"], e["mode"]):
-                fs_path(root, e["path"]).unlink()  # это МЫ создали (sha+mode) -> удалить
+                target = fs_path(root, e["path"])
+                if not _write_contained(root, target):
+                    escalated.append(e["path"])  # symlink-родитель за root -> no-touch
+                    continue
+                target.unlink()  # это МЫ создали (sha+mode) -> удалить
             else:
                 escalated.append(e["path"])  # чужой файл (иные байты/режим) -> не трогаем
     return escalated
@@ -958,10 +1036,18 @@ def gc_orphan_temps(root: Path, state: dict, max_age: float = 3600.0) -> list[st
     (state.file_hashes). Возвращает список убранных (для лога/тестов)."""
     dirs = {root / ".claude"}
     for p in (state.get("file_hashes") or {}):
+        if validate_rel(p):  # мусорный ключ не превращаем в скан-путь
+            continue
         dirs.add(fs_path(root, p).parent)
     removed: list[str] = []
     now = time.time()
+    root_resolved = root.resolve()
     for d in dirs:
+        try:
+            if not d.resolve().is_relative_to(root_resolved):
+                continue  # symlink-родитель выводит за root - не сканируем
+        except OSError:
+            continue
         try:
             entries = list(d.iterdir())
         except OSError:
@@ -1104,6 +1190,9 @@ def resolve_keep_local(root: Path, descriptor: dict, path: str, target_commit: s
     том же (upstream_sha, local_sha) выдаст resolved-local. R6: при движении upstream
     record перестанет матчить -> путь всплывет как новый conflict. Под flock +
     recover-first: не пишем state поверх живого WAL."""
+    err = validate_rel(path)
+    if err:
+        die(f"resolve: {err}: {path!r}")
     with project_flock(root):
         state = _terminate_wal_locked(root, blob_source, state_path)
         local = read_local(root, path)

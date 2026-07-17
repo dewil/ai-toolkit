@@ -7,7 +7,9 @@ scripts/). В проекте канон живет под .claude/, КРОМЕ s
 канонической - маппинг применяется только на ФС-границе.
 """
 import importlib.util
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -127,6 +129,165 @@ class MappedIoTest(unittest.TestCase):
             if name == target:
                 raise cd.CrashSim(name)
         return f
+
+
+class ValidateRelTest(unittest.TestCase):
+    """T31-r1 fs-mapping: валидация канонических путей на всех границах
+    (codex-находки: коллизия алиасов, path traversal)."""
+
+    def test_good_rels_pass(self):
+        for rel in ("rules/a.md", "scripts/t.py", "skills/x/SKILL.md", "scripts"):
+            self.assertIsNone(cd.validate_rel(rel), rel)
+
+    def test_bad_rels_rejected(self):
+        for rel in ("", "/abs/x", "../x", "rules/../a.md", "rules//a.md",
+                    "rules/./a.md", ".claude/rules/a.md", "rules\\a.md", None):
+            self.assertIsNotNone(cd.validate_rel(rel), repr(rel))
+
+    def test_descriptor_with_claude_prefix_dies(self):
+        import json as _json
+        with tempfile.TemporaryDirectory() as td:
+            lock = Path(td) / "canon.lock.json"
+            lock.write_text(_json.dumps({
+                "schema_version": 1, "min_cli_version": 1,
+                "release": {"commit_sha": "c" * 40, "manifest_digest": "d" * 64},
+                "manifest_digest": "d" * 64,
+                "files": {".claude/rules/a.md": {"blob_sha": blob("x"), "mode": "100644"}},
+                "membership": {".claude/rules/a.md": ["universal"]},
+                "plugin_source": None,
+            }), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                cd.load_descriptor(lock)
+
+    def test_descriptor_with_traversal_dies(self):
+        import json as _json
+        with tempfile.TemporaryDirectory() as td:
+            lock = Path(td) / "canon.lock.json"
+            lock.write_text(_json.dumps({
+                "schema_version": 1, "min_cli_version": 1,
+                "release": {"commit_sha": "c" * 40, "manifest_digest": "d" * 64},
+                "manifest_digest": "d" * 64,
+                "files": {"../../victim": {"blob_sha": blob("x"), "mode": "100644"}},
+                "membership": {"../../victim": ["universal"]},
+                "plugin_source": None,
+            }), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                cd.load_descriptor(lock)
+
+    def test_state_with_traversal_key_dies(self):
+        with tempfile.TemporaryDirectory() as td:
+            sp = Path(td) / "canon.state.json"
+            st = cd.empty_state()
+            st["file_hashes"] = {"../../outside/x": {"sha": "a" * 40, "mode": "100644"}}
+            sp.write_text(__import__("json").dumps(st), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                cd.load_state(sp)
+
+    def test_journal_with_traversal_path_dies(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".claude").mkdir()
+            journal = {"header": {"phase": "prepare", "pass_id": "P1",
+                                  "release_identity": "c" * 40,
+                                  "release": {}, "scope": "release", "retire": []},
+                       "files": [{"path": "../../victim", "action": "create",
+                                  "base_sha": None, "base_mode": None,
+                                  "target_sha": "a" * 40, "new_sha": "a" * 40,
+                                  "mode": "100644", "membership": [],
+                                  "staging_path": ".claude/.canon-stage/P1/../../victim",
+                                  "backup_path": None}]}
+            cd.write_journal(root, journal)
+            with self.assertRaises(SystemExit):
+                cd.read_journal(root)
+
+
+class LegacyLayoutGuardTest(unittest.TestCase):
+    """Pre-fix раскладка (канон в корне): не терять правки тихо - CONFLICT."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / ".claude").mkdir(parents=True)
+        self.desc = {"schema_version": 1, "min_cli_version": 1,
+                     "files": {"rules/a.md": {"blob_sha": blob("up"), "mode": "100644"}},
+                     "membership": {"rules/a.md": ["universal"]},
+                     "plugin_source": None, "manifest_digest": "d" * 64}
+        self.intent = {"project_type": ["universal"], "skip_sync": [],
+                       "local_only": [], "overrides": []}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _legacy_file(self, content: str):
+        p = self.root / "rules" / "a.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+
+    def _klass(self, state):
+        res = cd.classify(self.intent, state, self.desc, self.root)
+        return next(r["klass"] for r in res if r["path"] == "rules/a.md")
+
+    def test_prefix_state_with_root_file_conflicts_not_missing(self):
+        # pre-fix state: ключ есть, файл лежит в корне (старый движок) и ПРАВЛЕН
+        st = cd.empty_state()
+        st["file_hashes"] = {"rules/a.md": {"sha": blob("base"), "mode": "100644"}}
+        self._legacy_file("edited locally")
+        self.assertEqual(self._klass(st), cd.CONFLICT)
+
+    def test_fresh_project_with_root_file_conflicts_not_new(self):
+        self._legacy_file("stray legacy")
+        self.assertEqual(self._klass(cd.empty_state()), cd.CONFLICT)
+
+    def test_no_legacy_file_still_missing_or_new(self):
+        st = cd.empty_state()
+        st["file_hashes"] = {"rules/a.md": {"sha": blob("base"), "mode": "100644"}}
+        self.assertEqual(self._klass(st), cd.MISSING_LOCAL)
+        self.assertEqual(self._klass(cd.empty_state()), cd.NEW)
+
+
+class ContainmentTest(unittest.TestCase):
+    """Symlink-родитель не должен выпускать запись за пределы root; GC не
+    сканирует каталоги вне root."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.root = self.base / "proj"
+        self.outside = self.base / "outside"
+        (self.root / ".claude").mkdir(parents=True)
+        self.outside.mkdir()
+        self.state_path = self.root / ".claude" / "canon.state.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_apply_through_symlinked_parent_aborts(self):
+        # .claude/rules -> symlink наружу; create rules/a.md должен abort, не писать
+        os.symlink(self.outside, self.root / ".claude" / "rules")
+        sha = blob("X")
+        desc = {"schema_version": 1, "min_cli_version": 1,
+                "files": {"rules/a.md": {"blob_sha": sha, "mode": "100644"}},
+                "membership": {"rules/a.md": ["universal"]},
+                "plugin_source": None, "manifest_digest": "d" * 64}
+        intent = {"project_type": ["universal"], "skip_sync": [],
+                  "local_only": [], "overrides": []}
+        res = cd.apply_release(self.root, intent, cd.empty_state(), desc,
+                               "c" * 40, cd.DictBlobSource({sha: b"X"}), self.state_path)
+        self.assertIn("rules/a.md", [a if isinstance(a, str) else a.get("path")
+                                     for a in res.get("aborted", [])])
+        self.assertFalse((self.outside / "a.md").exists(), "запись утекла за root")
+
+    def test_gc_skips_dirs_outside_root(self):
+        # свежесозданный симлинк-родитель: GC не должен ходить наружу
+        os.symlink(self.outside, self.root / ".claude" / "rules")
+        orphan = self.outside / (".x.tmp." + "a" * 32)
+        orphan.write_text("orphan", encoding="utf-8")
+        old = time.time() - 7200
+        os.utime(orphan, (old, old))
+        st = cd.empty_state()
+        st["file_hashes"] = {"rules/x.md": {"sha": "a" * 40, "mode": "100644"}}
+        cd.gc_orphan_temps(self.root, st)
+        self.assertTrue(orphan.exists(), "GC удалил файл вне root")
 
 
 if __name__ == "__main__":
