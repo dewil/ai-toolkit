@@ -27,6 +27,7 @@ import json
 import os
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -198,9 +199,10 @@ def build_descriptor(ref: str, min_cli: int) -> dict:
     seen: dict[str, str] = {}
     for p in files:
         fs = ("" if p.startswith("scripts/") else ".claude/") + p
-        key = fs.casefold()
+        # NFC + casefold: APFS/HFS+ нечувствительны к регистру И Unicode-норме
+        key = unicodedata.normalize("NFC", fs).casefold()
         if key in seen and seen[key] != p:
-            die(f"manifest: case-fold коллизия путей {seen[key]!r} и {p!r}")
+            die(f"manifest: case/unicode коллизия путей {seen[key]!r} и {p!r}")
         seen.setdefault(key, p)
     digest = compute_digest(files, membership)
     return {
