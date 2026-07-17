@@ -173,6 +173,28 @@ def _die_on_bad_rels(paths, where: str) -> None:
             die(f"{where}: {err}: {p!r}", EXIT_INCOMPAT)
 
 
+def _die_on_casefold_collision(paths, where: str) -> None:
+    """Инъективность fs_rel на case-insensitive ФС (macOS, core.ignorecase):
+    'rules/a.md' и 'rules/A.md' мапятся в один физический файл/стейдж. Ловим
+    на границе (T31 fs-mapping r2)."""
+    seen: dict[str, str] = {}
+    for p in paths:
+        key = fs_rel(p).casefold()
+        if key in seen and seen[key] != p:
+            die(f"{where}: case-fold коллизия путей {seen[key]!r} и {p!r}",
+                EXIT_INCOMPAT)
+        seen.setdefault(key, p)
+
+
+def _safe_pass_id(pass_id) -> bool:
+    """pass_id идет компонентом ФС-пути стейджа/бэкапа (clear_wal rmtree,
+    _stage_rel). Разрешаем безопасный токен без слешей/traversal."""
+    return (isinstance(pass_id, str) and bool(pass_id)
+            and pass_id not in (".", "..")
+            and "/" not in pass_id and "\\" not in pass_id
+            and "\x00" not in pass_id)
+
+
 def fs_rel(rel: str) -> str:
     """Канонический путь (дерево toolkit) -> путь в проекте.
 
@@ -192,14 +214,18 @@ def fs_path(root: Path, rel: str) -> Path:
 
 
 def _legacy_layout_present(root: Path, rel: str) -> bool:
-    """Есть ли файл по ЛИТЕРАЛЬНОМУ (pre-fix) канон-пути в корне проекта."""
+    """Есть ли файл по ЛИТЕРАЛЬНОМУ (pre-fix) канон-пути в корне проекта.
+    fail-closed: недоступность (PermissionError/ELOOP) трактуем как "есть"
+    (лучше ложная эскалация, чем тихая потеря правок; r2)."""
     if fs_rel(rel) == rel:
         return False  # scripts/ и так литеральный
     try:
         (root / rel).lstat()
         return True
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError:
+        return True  # недоступен - не считаем отсутствующим
 
 
 def _write_contained(root: Path, final: Path) -> bool:
@@ -363,6 +389,7 @@ def load_descriptor(path: Path) -> dict:
     # иначе алиас-коллизия fs_rel / traversal (T31 fs-mapping r1)
     _die_on_bad_rels((d.get("files") or {}).keys(), "lock.files")
     _die_on_bad_rels((d.get("membership") or {}).keys(), "lock.membership")
+    _die_on_casefold_collision((d.get("files") or {}).keys(), "lock.files")
     return d
 
 
@@ -451,10 +478,11 @@ def classify(intent: dict, state: dict, descriptor: dict, root: Path) -> list[di
 
         if local["symlink"]:
             rec["klass"] = CONFLICT  # symlink на месте канон-файла (находка 7)
-        elif not local["exists"] and _legacy_layout_present(root, path):
+        elif _legacy_layout_present(root, path):
             # pre-fix раскладка: файл лежит по ЛИТЕРАЛЬНОМУ канон-пути в корне
-            # (старый движок клал туда). Тихий MISSING_LOCAL/NEW потерял бы
-            # локальные правки дублем - эскалируем человеку (T31 fs-mapping r1)
+            # (старый движок клал туда). Тихий класс потерял бы правки дублем -
+            # эскалируем человеку. Ловит и split-brain (mapped И literal оба
+            # существуют), не только mapped-отсутствие (T31 fs-mapping r1/r2).
             rec["klass"] = CONFLICT
             rec["legacy_layout"] = True
         elif not in_state:
@@ -688,6 +716,21 @@ def read_journal(root: Path) -> dict | None:
     # писал бы за пределы root) - ручной разбор (T31 fs-mapping r1)
     _die_on_bad_rels([e.get("path") for e in j.get("files") or []], "journal.files")
     _die_on_bad_rels((j.get("header") or {}).get("retire") or [], "journal.retire")
+    # pass_id идет в rmtree/стейдж-путь; staging/backup ОБЯЗАНЫ быть деривами
+    # (pass_id, path), а не произвольными - иначе абсолютный staging_path в
+    # _apply_one перемещает внешний файл (T31 fs-mapping r2)
+    pid = (j.get("header") or {}).get("pass_id")
+    if not _safe_pass_id(pid):
+        die(f"journal: небезопасный pass_id: {pid!r}", EXIT_INCOMPAT)
+    for e in j.get("files") or []:
+        want_stage = _stage_rel(pid, e.get("path"))
+        if e.get("staging_path") != want_stage:
+            die(f"journal: staging_path не дериват pass_id/path: "
+                f"{e.get('staging_path')!r}", EXIT_INCOMPAT)
+        bp = e.get("backup_path")
+        if bp is not None and bp != _bak_rel(pid, e.get("path")):
+            die(f"journal: backup_path не дериват pass_id/path: {bp!r}",
+                EXIT_INCOMPAT)
     return j
 
 
@@ -757,6 +800,9 @@ def build_journal(
 def materialize_staging(root: Path, entry: dict, blob_source) -> None:
     data = blob_source.get(entry["target_sha"])  # сверяет sha источника внутри
     stage = root / entry["staging_path"]
+    if not _write_contained(root, stage):
+        # .claude/.canon-stage подменен симлинком наружу (r2 defense-in-depth)
+        raise RecoveryRequired(f"стейдж-неймспейс вне root: {entry['staging_path']}")
     atomic_write_bytes(stage, data, _mode_to_bits(entry["mode"]))
     # re-verify МАТЕРИАЛИЗОВАННОГО стейджа (ловит усечение/битую запись до commit, §10)
     if git_blob_sha(stage.read_bytes()) != entry["target_sha"]:
@@ -854,9 +900,10 @@ def _apply_one(root: Path, entry: dict, blob_source, fault=_noop_fault) -> str:
         atomic_write_bytes(stage, blob_source.get(entry["target_sha"]), _mode_to_bits(entry["mode"]))
     os.chmod(stage, _mode_to_bits(entry["mode"]))
     final = fs_path(root, entry["path"])
-    final.parent.mkdir(parents=True, exist_ok=True)
     if not _write_contained(root, final):
-        return "abort"  # symlink-родитель выводит за root - не пишем
+        return "abort"  # symlink-родитель за root: проверяем ДО mkdir,
+        #                  чтобы не создать пустой каталог снаружи (r2)
+    final.parent.mkdir(parents=True, exist_ok=True)
     fault("pre-rename:" + entry["path"])
     if entry["action"] == ACTION_MODIFY:
         os.replace(stage, final)  # атомарная замена существующего (CAS сверил base)
