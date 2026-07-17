@@ -135,6 +135,13 @@ def expand_paths(
     membership: dict[str, set[str]] = {}
 
     def add(real_path: str, sections: set[str]) -> None:
+        # produce-сторона того же инварианта, что load_descriptor у CLI:
+        # безопасный относительный путь вне .claude/ (иначе алиас-коллизия
+        # fs_rel / traversal на стороне проекта; T31 fs-mapping r1)
+        parts = real_path.split("/")
+        if (not real_path or real_path.startswith("/") or "\\" in real_path
+                or any(c in ("", ".", "..") for c in parts) or parts[0] == ".claude"):
+            die(f"manifest: недопустимый канонический путь: {real_path!r}")
         mode, blob_sha = tree[real_path]
         files[real_path] = {"blob_sha": blob_sha, "mode": mode}
         membership.setdefault(real_path, set()).update(sections)

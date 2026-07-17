@@ -99,6 +99,11 @@ def build_state(old: dict, root: Path) -> dict:
     fh: dict = {}
     skipped = []
     for path in old.get("files") or []:
+        # небезопасный/`.claude/`-префиксный legacy-путь не сидим (validate_rel:
+        # traversal и алиас-коллизия fs_rel; T31 fs-mapping r1)
+        if cd.validate_rel(path):
+            skipped.append(path)
+            continue
         local = cd.read_local(root, path)
         if not local["exists"] or local["symlink"]:
             skipped.append(path)
