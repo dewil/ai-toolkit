@@ -89,9 +89,11 @@ class IntegrationTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
         self.assertEqual(out["status"], "applied")
-        # блобы материализованы из зеркала на диск проекта
-        self.assertEqual((self.project / "rules" / "a.md").read_text(), "canon A v1\n")
-        self.assertEqual((self.project / "rules" / "b.md").read_text(), "canon B v1\n")
+        # блобы материализованы из зеркала на диск проекта по fs_rel-маппингу:
+        # rules/ -> под .claude/, scripts/ -> в корень проекта
+        self.assertEqual((self.project / ".claude" / "rules" / "a.md").read_text(), "canon A v1\n")
+        self.assertEqual((self.project / ".claude" / "rules" / "b.md").read_text(), "canon B v1\n")
+        self.assertFalse((self.project / "rules").exists())  # корень не замусорен
         self.assertEqual((self.project / "scripts" / "tool.py").read_text(),
                          "#!/usr/bin/env python3\nprint('hi')\n")
         # +x бит перенесен из descriptor.mode
@@ -118,7 +120,7 @@ class IntegrationTest(unittest.TestCase):
         self.build_lock()
         r = self.sync()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual((self.project / "rules" / "a.md").read_text(), "canon A v2\n")
+        self.assertEqual((self.project / ".claude" / "rules" / "a.md").read_text(), "canon A v2\n")
         self.assertEqual(self.state()["applied_release"]["commit_sha"], self.commit)
 
     def test_recover_cli_finishes_committed_journal(self) -> None:
