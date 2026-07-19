@@ -78,12 +78,14 @@ management:
   - rules/name-cross-check.md           # сверка имен из транскрипций по справочнику команды
   - rules/google-sheets-mcp.md          # работа с Google Sheets через MCP google-workspace
   - rules/estimates-in-hours.md         # оценки в часах, не в человеко-днях
+  - rules/billing-ai-work.md            # раскрытие при биллинге AI-работы: human-equiv часы, без wall-clock и cache_read, без фиктивных строк
   - agents/tracker.md                   # контроль статусов, дедлайнов, владельцев задач
   - skills/telegram-snapshot/SKILL.md   # настройка/починка зеркала чатов Telegram
   - skills/telegram-send/SKILL.md       # настройка/починка отправки сообщений в Telegram
   - skills/redmine-snapshot/SKILL.md    # настройка/починка зеркала открытых задач Redmine
   - skills/mymeet-snapshot/SKILL.md     # настройка/починка зеркала расшифровок встреч из mymeet.ai
   - skills/local-transcription/SKILL.md # локальная (offline) транскрипция записи встречи/лекции: выбор ASR, token-free диаризация, грабли
+  - skills/estimate-calibration/SKILL.md # калибровочная оценка трудоемкости: якоря -> рубрика архетипов -> модификаторы -> калибровка по факту
   - scripts/telegram-snapshot.py        # инкрементальный pull новых сообщений Telegram
   - scripts/telegram-deltas.py          # дельты чатов для блока "Новое в чатах" в дейлике
   - scripts/telegram-send.py            # отправка сообщения в Telegram-чат
