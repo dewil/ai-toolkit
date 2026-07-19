@@ -29,6 +29,7 @@ universal:
   - rules/compact-results.md            # сжатый вывод: результат, а не пересказ хода мысли
   - rules/addressing.md                 # обращение к пользователю по нику
   - rules/secrets-handling.md           # обращение с секретами: не коммитить ключи, on-device конфиги
+  - rules/client-umbrella.md            # клиент-зонтик: корень = папка клиента, одна память, ASCII-токен в имени
   - agents/architect.md                 # read-only проектирование: выбор подхода, trade-off, структура
   - agents/explorer.md                  # read-only разбор структуры и связей модулей
   - agents/searcher.md                  # поиск файлов/символов/паттернов (grep/glob)
