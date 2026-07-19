@@ -67,6 +67,8 @@ wiki:
   - scripts/telegram-snapshot.py        # инкрементальный pull новых сообщений Telegram
   - scripts/telegram-deltas.py          # дельты чатов для блока "Новое в чатах" в дейлике
   - scripts/telegram-send.py            # отправка сообщения в Telegram-чат
+  - scripts/telegram-pull-one.py        # pull одного чата по id в произвольную папку, минуя конфиг
+  - scripts/telegram-send-one.py        # отправка в один чат по id, минуя конфиг (dry-run гейт, сверка username)
 
 management:
   - rules/meetings.md                   # формат заметок встреч
@@ -85,6 +87,8 @@ management:
   - scripts/telegram-snapshot.py        # инкрементальный pull новых сообщений Telegram
   - scripts/telegram-deltas.py          # дельты чатов для блока "Новое в чатах" в дейлике
   - scripts/telegram-send.py            # отправка сообщения в Telegram-чат
+  - scripts/telegram-pull-one.py        # pull одного чата по id в произвольную папку, минуя конфиг
+  - scripts/telegram-send-one.py        # отправка в один чат по id, минуя конфиг (dry-run гейт, сверка username)
   - scripts/redmine-snapshot.py         # snapshot открытых задач команды из Redmine
   - scripts/redmine-deltas.py           # дельты задач для блока "Дельты со вчера" в дейлике
   - scripts/mymeet-snapshot.py          # pull MD-расшифровок встреч mymeet.ai по whitelist-правилам
