@@ -38,8 +38,10 @@ universal:
   - skills/web-research/SKILL.md        # веб-исследование с проверкой источников
   - skills/md-pdf/SKILL.md              # рендер markdown в PDF
   - skills/harvest-canon/SKILL.md       # оформить переиспользуемый прием проекта в upstream-кандидат канона
+  - skills/session-cost/SKILL.md        # подсчет токенов сессии Claude Code из транскрипта (смета, отчет)
   - commands/canon.md                   # /canon = синхронизация проекта с каноном
   - scripts/md-pdf.py                   # движок рендера markdown в PDF (для скилла md-pdf)
+  - scripts/session-cost.py             # движок подсчета токенов сессии (для скилла session-cost)
 
 coding:
   - rules/karpathy-guidelines.md        # снижение типовых LLM-ошибок в коде (простота, хирургичность)
