@@ -43,6 +43,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -63,6 +64,7 @@ try:
         MessageEntityTextUrl,
         MessageEntityUnderline,
         MessageEntityUrl,
+        MessageMediaWebPage,
         PeerChannel,
         PeerChat,
     )
@@ -76,6 +78,14 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 AUTH_DIR = Path.home() / ".config" / "telegram-snapshot"
 AUTH_PATH = AUTH_DIR / "auth.json"
+
+# Вложения качаются в локальный НЕсинкаемый кэш (не в vault/проект - там бывают
+# секреты клиентов, а папки проекта синкаются в облако). result.json остается
+# текстовым (медиа туда НЕ пишем); корреляция сообщение<->файл по <msg_id> в
+# имени файла кэша + метаданные file_name/mime в самой записи. TTL: на каждом
+# запуске чистим файлы старше суток.
+MEDIA_CACHE = Path.home() / ".cache" / "telegram-snapshot" / "media"
+MEDIA_TTL_HOURS = 24
 PROJECT_CONFIG_PATH = PROJECT_ROOT / ".telegram-snapshot.json"
 
 ENTITY_MAP = {
@@ -473,15 +483,60 @@ def repair_legacy_migration(data: dict) -> tuple[dict, dict]:
     return data, {"messages_repaired": repaired}
 
 
-async def fetch_new(client: TelegramClient, entity, min_id: int) -> tuple[list[dict], list[dict], dict]:
+async def download_message_media(client: TelegramClient, msg, chat_media_dir: Path) -> str | None:
+    """Скачивает вложение сообщения в несинкаемый кэш. Возвращает имя файла или None.
+
+    result.json НЕ трогаем - метаданные (file_name/mime) уже пишет
+    message_to_record, здесь только байты на диск, чтобы их мог прочитать агент
+    (скрин - через Read визуально, файл - сканером). Превью ссылок (webpage)
+    вложением не считаем. Имя файла несет <msg_id> для корреляции с сообщением.
+    """
+    media = getattr(msg, "media", None)
+    if not media or isinstance(media, MessageMediaWebPage):
+        return None
+    base = msg.file.name if (msg.file and msg.file.name) else None
+    ext = (msg.file.ext if msg.file else "") or ".bin"
+    fname = f"{msg.id}_{base}" if base else f"{msg.id}{ext}"
+    dest = chat_media_dir / fname
+    if dest.exists():
+        return dest.name
+    chat_media_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        await client.download_media(msg, file=str(dest))
+        return dest.name
+    except Exception as exc:  # noqa: BLE001 - best-effort, не роняем pull из-за одного файла
+        sys.stderr.write(f"медиа msg {msg.id}: не скачалось ({exc})\n")
+        return None
+
+
+def cleanup_old_media(ttl_hours: int = MEDIA_TTL_HOURS) -> int:
+    """Удаляет файлы медиа-кэша старше ttl_hours (по mtime). Возвращает число удаленных."""
+    if not MEDIA_CACHE.exists():
+        return 0
+    cutoff = time.time() - ttl_hours * 3600
+    removed = 0
+    for f in MEDIA_CACHE.rglob("*"):
+        if f.is_file() and f.stat().st_mtime < cutoff:
+            try:
+                f.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+async def fetch_new(client: TelegramClient, entity, min_id: int) -> tuple[list[dict], list[dict], dict, list[str]]:
     """Тянет новые сообщения с id > min_id.
 
-    Возвращает (messages, new_topics, topic_edits) - сообщения в формате TG Desktop,
-    свежесозданные темы и накопленные правки названий (root_id -> new_title).
+    Возвращает (messages, new_topics, topic_edits, downloaded_media) - сообщения
+    в формате TG Desktop, свежесозданные темы, накопленные правки названий
+    (root_id -> new_title) и имена скачанных в кэш вложений.
     """
     out: list[dict] = []
     new_topics: list[dict] = []
     topic_edits: dict = {}
+    downloaded: list[str] = []
+    chat_media_dir = MEDIA_CACHE / str(getattr(entity, "id", "unknown"))
     async for msg in client.iter_messages(entity, min_id=min_id, reverse=True):
         if min_id and msg.id <= min_id:
             continue
@@ -497,7 +552,10 @@ async def fetch_new(client: TelegramClient, entity, min_id: int) -> tuple[list[d
         record = await message_to_record(client, msg)
         if record:
             out.append(record)
-    return out, new_topics, topic_edits
+            name = await download_message_media(client, msg, chat_media_dir)
+            if name:
+                downloaded.append(name)
+    return out, new_topics, topic_edits, downloaded
 
 
 async def message_to_record(client: TelegramClient, msg) -> dict | None:
@@ -585,6 +643,10 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
     result_path = chats_root / label / "result.json"
     entity = await resolve_entity(client, chat_id, dialog_entities)
 
+    removed = cleanup_old_media()
+    if removed:
+        print(f"  медиа-кэш: удалено файлов старше {MEDIA_TTL_HOURS}ч: {removed}")
+
     migrated = False
     repaired = False
     if result_path.exists():
@@ -644,7 +706,7 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
     data.setdefault("topics", [])
     topics_by_id = {t["id"]: t for t in data["topics"]}
 
-    new_msgs, new_topics, topic_edits = await fetch_new(client, entity, min_id)
+    new_msgs, new_topics, topic_edits, downloaded_media = await fetch_new(client, entity, min_id)
 
     for t in new_topics:
         topics_by_id[t["id"]] = t
@@ -678,6 +740,8 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
     last_date = new_msgs[-1]["date"] if new_msgs else (data["messages"][-1]["date"] if data.get("messages") else "?")
     prefix = "bootstrap " if is_bootstrap else ""
     print(f"  {label}: {prefix}+{len(new_msgs)} (последнее {last_date}, тем: {len(data['topics'])})")
+    if downloaded_media:
+        print(f"  {label}: вложений скачано в кэш: {len(downloaded_media)} -> {MEDIA_CACHE / str(chat_id)}")
     return len(new_msgs), last_date
 
 

@@ -73,6 +73,19 @@ python3 scripts/telegram-send.py --to "бот" --reply-to 4821 --text "..." --se
 
 Чтобы написать в новый чат, сначала добавь его label в `.telegram-snapshot.json -> chats` (формат записи и как узнать `chat_id` - см. скилл `telegram-snapshot`, шаг 6). После этого `--to <новый label>` заработает.
 
+### Single-chat-by-id: адресат вне конфига
+
+Для сценариев, где адресата в общий конфиг класть нельзя (разовый чат, клиент трека поддержки - его чат не должен попадать в ежедневные pull/дельты), есть драйвер `scripts/telegram-send-one.py` - явное исключение из правила выше:
+
+```bash
+# dry-run (по умолчанию), id прямо в командной строке:
+python3 scripts/telegram-send-one.py <chat_id> [expected_username] --text "..."
+# реальная отправка (после "ок"):
+python3 scripts/telegram-send-one.py <chat_id> [expected_username] --text "..." --send
+```
+
+Тот же гейт dry-run/`--send`, что у основного скрипта. Вместо защиты "только из конфига" - опциональная сверка `expected_username`: если username чата не совпал с ожидаемым, отправка прерывается (страховка от "не туда"). Флаг `--html` включает HTML-форматирование (жирный/код/ссылки); HTML, а не MarkdownV2 - тот требует экранировать точки/дефисы/скобки, на русском тексте это грабли. Симметричный pull одного чата по id - `scripts/telegram-pull-one.py` (см. скилл `telegram-snapshot`).
+
 ## Авторизация
 
 Та же, что у `telegram-snapshot`: `~/.config/telegram-snapshot/auth.json` (api_id, api_hash, session_name) + общая `.session`. Отдельной настройки для отправки не нужно - если snapshot уже работает на устройстве, работает и send. При проблемах с авторизацией/сессией (`AuthKeyUnregisteredError`, PeerUser-ошибки, нет auth.json) - см. скилл `telegram-snapshot`.
@@ -80,13 +93,14 @@ python3 scripts/telegram-send.py --to "бот" --reply-to 4821 --text "..." --se
 ## Жесткие правила
 
 1. **Без dry-run и явного "ок" - не отправлять.** Всегда показать пользователю заголовок чата и текст дословно перед `--send`.
-2. **Только чаты из `.telegram-snapshot.json`.** Нет label - не отправлять, предложить добавить в конфиг.
+2. **Только чаты из `.telegram-snapshot.json`** - либо `telegram-send-one.py` со сверкой `expected_username` для адресата вне конфига (см. "Single-chat-by-id"). Нет label и не single-chat-сценарий - не отправлять, предложить добавить в конфиг.
 3. **Текст - от имени пользователя, дословно по согласованию.** Не переписывать продиктованное, не дописывать от себя.
 4. **Auth и .session - не в проектной папке.** Только `~/.config/telegram-snapshot/` (см. `telegram-snapshot`).
 
 ## Связанные файлы
 
 - `scripts/telegram-send.py` в корне проекта - эталонный скрипт отправки (dry-run по умолчанию, `--send` для реальной отправки).
+- `scripts/telegram-send-one.py` - драйвер single-chat-by-id: отправка в один чат по id, минуя конфиг (тот же гейт, сверка username, `--html`). Переиспользует логику telegram-send.py через импорт.
 - `.telegram-snapshot.json` в корне проекта - справочник адресатов `{label: chat_id}` (общий со snapshot/deltas).
 - `~/.config/telegram-snapshot/auth.json` + `.session` - общая авторизация на устройство.
 - Скилл `telegram-snapshot` - первичная настройка авторизации и подключение чатов в конфиг.
