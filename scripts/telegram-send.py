@@ -77,6 +77,24 @@ def load_auth() -> dict:
     return auth
 
 
+def client_kwargs(auth: dict) -> dict:
+    """Опциональный per-device прокси из auth.json: "proxy": "socks5://127.0.0.1:7890".
+
+    Нужен там, где прямой доступ к Telegram API режется (RU-датацентры, DPI).
+    Для socks-схем требуется пакет python-socks. Без поля proxy - прямое подключение.
+    Копия хелпера из telegram-snapshot.py: скрипт намеренно самодостаточный.
+    """
+    proxy = auth.get("proxy")
+    if not proxy:
+        return {}
+    from urllib.parse import urlparse
+    u = urlparse(proxy)
+    if not (u.scheme and u.hostname and u.port):
+        sys.stderr.write(f"Некорректный proxy в {AUTH_PATH}: {proxy!r} (жду scheme://host:port)\n")
+        sys.exit(2)
+    return {"proxy": (u.scheme, u.hostname, u.port)}
+
+
 def chat_entry(value) -> dict:
     """Нормализует значение из chats к {"id": int, "topic_id": int|None}.
 
@@ -200,7 +218,7 @@ async def amain(args) -> int:
 
     auth = load_auth()
     session_path = str(AUTH_DIR / auth["session_name"])
-    client = TelegramClient(session_path, auth["api_id"], auth["api_hash"])
+    client = TelegramClient(session_path, auth["api_id"], auth["api_hash"], **client_kwargs(auth))
 
     # Не client.start(): на неготовой/отозванной сессии он уходит в
     # интерактивный логин (ввод телефона/кода) и в автоматизации зависает.
