@@ -41,7 +41,7 @@ async def amain(args) -> int:
 
     auth = tgs.load_auth()
     session_path = str(tgs.AUTH_DIR / auth["session_name"])
-    client = tgs.TelegramClient(session_path, auth["api_id"], auth["api_hash"])
+    client = tgs.TelegramClient(session_path, auth["api_id"], auth["api_hash"], **tgs.client_kwargs(auth))
 
     await client.connect()
     if not await client.is_user_authorized():

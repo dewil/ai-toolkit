@@ -71,6 +71,8 @@ chmod 700 ~/.config/telegram-snapshot
 
 `session_name` - произвольное (например `dwl`), под этим именем будет файл `<name>.session` в той же папке.
 
+Опциональное поле `proxy` - для хостов, где прямой доступ к Telegram режется (см. "Запуск с сервера / прокси").
+
 ### Шаг 4. Поставить telethon и сделать первый запуск
 
 ```bash
@@ -214,6 +216,19 @@ python3 scripts/telegram-pull-one.py <chat_id> <out_path> [expected_username]
 ```
 
 `out_path` - путь от корня проекта, результат в `<out_path>/result.json` (тот же формат, тот же инкремент, тот же медиа-кэш - вся логика переиспользуется из `telegram-snapshot.py` через импорт). Опциональный `expected_username` - страховка: если username чата не совпал, pull прерывается, чтобы не выкачать чужой чат. Симметричная отправка по id - `scripts/telegram-send-one.py` (см. скилл `telegram-send`).
+
+## Запуск с сервера / прокси
+
+С хостов, где прямой доступ к Telegram API режется DPI (типично для RU-датацентров), telethon на каждом коннекте падает с `Attempt N at connecting failed: TimeoutError`. Env-прокси (`HTTP_PROXY`/`ALL_PROXY`) telethon не читает - прокси задается полем `proxy` в `~/.config/telegram-snapshot/auth.json` этого устройства:
+
+```json
+{ "api_id": ..., "api_hash": "...", "session_name": "...", "proxy": "socks5://127.0.0.1:7890" }
+```
+
+- Формат - `scheme://host:port`. Для socks-схем нужен пакет: `pip3 install --user "python-socks[asyncio]"`. Нет поля - прямое подключение, поведение прежнее.
+- Настройка per-device: ноутбук ходит напрямую (без поля), серверная VM - через свой локальный прокси.
+- На сервере - **отдельное `session_name`** и свой интерактивный первый запуск: одновременная работа одного `.session` с двух IP кончается `AuthKeyUnregisteredError` / конфликтом auth-ключа.
+- Поле читают все клиентские скрипты: `telegram-snapshot.py`, `telegram-pull-one.py`, `telegram-send-one.py`, `telegram-send.py` (хелпер `client_kwargs`).
 
 ## Жесткие правила
 
