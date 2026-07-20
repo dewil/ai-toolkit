@@ -14,10 +14,13 @@ Chrome сам /Author не пишет - при --author поле дописыв�
 обновлением Info-словаря готового PDF (см. add_author).
 
 Поддерживаемый markdown: YAML-frontmatter (пропускается), заголовки H1-H4,
-абзацы, плоские списки (- и 1.), **bold**, *italic*, `code`, fenced-блоки
-```...```, цитаты "> ", ссылки [текст](url) и голые URL, картинки ![alt](путь)
-(локальные встраиваются base64 data-URI), разделитель ---.
-Вложенные списки и таблицы не поддерживаются - при необходимости дорабатывать
+абзацы (соседние текстовые строки склеиваются в один абзац - мягкий перенос,
+как в стандартном markdown), плоские списки (- и 1.), **bold**, *italic*,
+`code`, fenced-блоки ```...```, цитаты "> ", ссылки [текст](url) и голые URL,
+картинки ![alt](путь) (локальные встраиваются base64 data-URI), разделитель ---,
+GFM-таблицы (| ячейка | ...; строка-разделитель |---| пропускается,
+экранированных | в ячейках нет).
+Вложенные списки не поддерживаются - при необходимости дорабатывать
 конвертер, не менять формат исходника.
 """
 
@@ -55,6 +58,10 @@ pre { background: #f4f4f4; padding: 2.5mm; margin: 2mm 0; font-size: 9pt; white-
 code { font-family: "SF Mono", Menlo, monospace; font-size: .92em; background: #f4f4f4; padding: 0 .3em; }
 pre code { padding: 0; background: none; }
 hr { border: none; border-top: 1px solid #ccc; margin: 4mm 0; }
+table { border-collapse: collapse; margin: 2mm 0 3mm; font-size: 9.5pt; }
+th, td { border: 1px solid #ccc; padding: 1.2mm 2mm; text-align: left; vertical-align: top; }
+th { background: #f2f2f2; page-break-after: avoid; }
+tr { page-break-inside: avoid; }
 a { color: #1a5276; text-decoration: none; }
 img { max-width: 100%; }
 """
@@ -83,7 +90,24 @@ def md_to_html(md: str) -> tuple[str, str]:
 
     title = ""
     out: list[str] = []
-    mode = ""  # "", "ul", "ol", "quote", "pre"
+    mode = ""  # "", "ul", "ol", "quote", "pre", "table", "p"
+    tbl: list[str] = []
+
+    def flush_table() -> None:
+        rows = [
+            [c.strip() for c in r.strip().strip("|").split("|")]
+            for r in tbl
+            if not re.fullmatch(r"[\s|:-]+", r)  # строка-разделитель |---|
+        ]
+        if not rows:
+            return
+        out.append("<table>")
+        for i, cells in enumerate(rows):
+            tag = "th" if i == 0 else "td"
+            out.append(
+                "<tr>" + "".join(f"<{tag}>{inline(c)}</{tag}>" for c in cells) + "</tr>"
+            )
+        out.append("</table>")
 
     def close() -> None:
         nonlocal mode
@@ -95,6 +119,9 @@ def md_to_html(md: str) -> tuple[str, str]:
             out.append("</blockquote>")
         elif mode == "pre":
             out.append("</code></pre>")
+        elif mode == "table":
+            flush_table()
+            tbl.clear()
         mode = ""
 
     for raw in lines:
@@ -125,6 +152,11 @@ def md_to_html(md: str) -> tuple[str, str]:
         elif re.fullmatch(r"-{3,}", line.strip()):
             close()
             out.append("<hr>")
+        elif line.lstrip().startswith("|"):
+            if mode != "table":
+                close()
+                mode = "table"
+            tbl.append(line)
         elif line.startswith("- ") or line.startswith("* "):
             if mode != "ul":
                 close()
@@ -145,8 +177,13 @@ def md_to_html(md: str) -> tuple[str, str]:
                 mode = "quote"
             out.append(f"<p>{inline(line[2:])}</p>")
         else:
-            close()
-            out.append(f"<p>{inline(line)}</p>")
+            # мягкий перенос: продолжение абзаца клеим к предыдущей строке
+            if mode == "p" and out and out[-1].endswith("</p>"):
+                out[-1] = out[-1][: -len("</p>")] + " " + inline(line.strip()) + "</p>"
+            else:
+                close()
+                out.append(f"<p>{inline(line)}</p>")
+                mode = "p"
     close()
     return title, "\n".join(out)
 
