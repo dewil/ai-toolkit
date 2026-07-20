@@ -32,6 +32,8 @@ _ * ` в тексте не искажаются.
     python3 scripts/telegram-send.py --to "бот" --topic 30127 --text "..." --send
     # ответом на сообщение (ответ попадет в тему этого сообщения):
     python3 scripts/telegram-send.py --to "бот" --reply-to 4821 --text "..." --send
+    # файл-вложение (текст уходит подписью к файлу):
+    python3 scripts/telegram-send.py --to "с командой" --file "путь/к/архиву.zip" --text "..." --send
 
 Зависимости:
     pip3 install --user telethon
@@ -252,17 +254,33 @@ async def amain(args) -> int:
         kind = type(entity).__name__
         lines = text.split("\n")
 
+        file_path = None
+        if args.file:
+            file_path = Path(args.file).expanduser().resolve()
+            if not file_path.is_file():
+                sys.stderr.write(f"Файл не найден: {file_path}\n")
+                return 2
+
         if not args.send:
             print("DRY-RUN (без --send отправка не сделана)")
             print(f"  -> \"{title}\" ({kind}, id={chat_id})")
             print(f"  тема: {topic_id if topic_id is not None else '-'}   ответ на: {reply_id if reply_id is not None else '-'}")
+            if file_path:
+                print(f"  файл: {file_path.name} ({file_path.stat().st_size // 1024} KB, подпись - текст ниже)")
             print(f"  текст ({len(lines)} строк):")
             for ln in lines:
                 print(f"  | {ln}")
             return 0
 
         reply_to = build_reply_to(topic_id, reply_id)
-        sent = await client.send_message(entity, text, reply_to=reply_to, parse_mode=None)
+        if file_path:
+            # файл с подписью-текстом; force_document - имя и расширение как есть
+            sent = await client.send_file(
+                entity, str(file_path), caption=text, reply_to=reply_to,
+                force_document=True, parse_mode=None,
+            )
+        else:
+            sent = await client.send_message(entity, text, reply_to=reply_to, parse_mode=None)
         print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
@@ -275,6 +293,7 @@ def main() -> int:
     )
     parser.add_argument("--to", required=True, help="label чата из .telegram-snapshot.json")
     parser.add_argument("--text", help="текст сообщения; если опущен - читается из stdin")
+    parser.add_argument("--file", help="путь к файлу-вложению; текст уходит подписью к нему")
     parser.add_argument("--send", action="store_true", help="реально отправить (без флага - dry-run)")
     parser.add_argument("--topic", type=int, help="id корня форумной темы (по умолчанию - из конфига, если задан)")
     parser.add_argument("--reply-to", type=int, dest="reply_to", help="id сообщения, на которое отвечаем")
