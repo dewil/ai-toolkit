@@ -30,6 +30,7 @@ universal:
   - rules/addressing.md                 # обращение к пользователю по нику
   - rules/secrets-handling.md           # обращение с секретами: не коммитить ключи, on-device конфиги
   - rules/client-umbrella.md            # клиент-зонтик: корень = папка клиента, одна память, ASCII-токен в имени
+  - rules/memory-persistence.md         # проактивно сохранять durable-факты в память сразу, не дожидаясь конца сессии; память != контекст задачи
   - agents/architect.md                 # read-only проектирование: выбор подхода, trade-off, структура
   - agents/explorer.md                  # read-only разбор структуры и связей модулей
   - agents/searcher.md                  # поиск файлов/символов/паттернов (grep/glob)
