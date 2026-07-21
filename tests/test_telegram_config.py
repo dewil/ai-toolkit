@@ -263,5 +263,37 @@ class DeltasCompat(unittest.TestCase):
         self.assertEqual(DELTAS.chat_entry({"id": 7, "topic_id": "42"})["topic_id"], 42)
 
 
+class AtomicWrite(unittest.TestCase):
+    """Имя временного файла было фиксированным (`<файл>.tmp`), поэтому два
+    одновременных прогона писали в один и тот же .tmp и подменяли друг другу
+    недописанный файл. Теперь имя содержит pid, а мусор чистится при падении."""
+
+    def test_writes_json_and_leaves_no_temp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "result.json"
+            SNAPSHOT.atomic_write_json(path, {"a": 1})
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"a": 1})
+            self.assertEqual([f.name for f in Path(tmp).iterdir()], ["result.json"])
+
+    def test_does_not_clobber_foreign_temp(self):
+        """Регресс: на старой схеме имен этот файл был бы перезаписан и исчез."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "result.json"
+            foreign = path.with_name("result.json.tmp")
+            foreign.write_text("чужой недописанный", encoding="utf-8")
+            SNAPSHOT.atomic_write_json(path, {"a": 1})
+            self.assertTrue(foreign.exists(), "чужой .tmp не должен быть тронут")
+            self.assertEqual(foreign.read_text(encoding="utf-8"), "чужой недописанный")
+
+    def test_failed_write_cleans_up_and_keeps_original(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "result.json"
+            path.write_text('{"old": true}', encoding="utf-8")
+            with self.assertRaises(TypeError):
+                SNAPSHOT.atomic_write_json(path, {"bad": object()})
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"old": True})
+            self.assertEqual([f.name for f in Path(tmp).iterdir()], ["result.json"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

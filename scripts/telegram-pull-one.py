@@ -54,33 +54,35 @@ async def amain(
     session_path = str(tgs.AUTH_DIR / auth["session_name"])
 
     client = tgs.TelegramClient(session_path, auth["api_id"], auth["api_hash"], **tgs.client_kwargs(auth))
-    await client.start()
+    # disconnect в finally: раньше он стоял на двух путях выхода, и любое
+    # исключение между ними (резолв, выкачка) оставляло соединение висеть
+    try:
+        await client.start()
 
-    # Карта диалогов - авторитетный источник entity (см. resolve_entity в
-    # telegram-snapshot.py: get_entity на голый int бывает резолвит чужой чат).
-    dialog_entities: dict = {}
-    async for d in client.iter_dialogs():
-        eid = getattr(d.entity, "id", None)
-        if eid is not None:
-            dialog_entities[eid] = d.entity
+        # Карта диалогов - авторитетный источник entity (см. resolve_entity в
+        # telegram-snapshot.py: get_entity на голый int бывает резолвит чужой чат).
+        dialog_entities: dict = {}
+        async for d in client.iter_dialogs():
+            eid = getattr(d.entity, "id", None)
+            if eid is not None:
+                dialog_entities[eid] = d.entity
 
-    entity = await tgs.resolve_entity(client, chat_id, dialog_entities)
-    uname = getattr(entity, "username", None)
-    print(f"resolved {chat_id}: {display_name(entity)!r} @{uname} (type {type(entity).__name__})")
+        entity = await tgs.resolve_entity(client, chat_id, dialog_entities)
+        uname = getattr(entity, "username", None)
+        print(f"resolved {chat_id}: {display_name(entity)!r} @{uname} (type {type(entity).__name__})")
 
-    if expected_username and uname and uname.lower() != expected_username.lower():
-        sys.stderr.write(
-            f"!! username не совпал: ожидали @{expected_username}, получили @{uname}. "
-            f"Прерываю, чтобы не выкачать чужой чат.\n"
+        if expected_username and uname and uname.lower() != expected_username.lower():
+            sys.stderr.write(
+                f"!! username не совпал: ожидали @{expected_username}, получили @{uname}. "
+                f"Прерываю, чтобы не выкачать чужой чат.\n"
+            )
+            return 2
+
+        n, last_date = await tgs.process_chat(
+            client, tgs.PROJECT_ROOT, out_path, chat_id, dialog_entities
         )
+    finally:
         await client.disconnect()
-        return 2
-
-    n, last_date = await tgs.process_chat(
-        client, tgs.PROJECT_ROOT, out_path, chat_id, dialog_entities
-    )
-
-    await client.disconnect()
 
     # Шапку личного чата TG Desktop именует контактом, а не путем-лейблом.
     # process_chat при bootstrap кладет name = title|label; для User title нет,
