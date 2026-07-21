@@ -62,7 +62,21 @@ AUTH_PATH = AUTH_DIR / "auth.json"
 PROJECT_CONFIG_PATH = PROJECT_ROOT / ".telegram-snapshot.json"
 
 
-def load_auth() -> dict:
+def load_auth(account: str = "default") -> dict:
+    """Конфиг одного аккаунта из auth.json.
+
+    Два формата. Плоский (исторический): api_id/api_hash/session_name/proxy в
+    корне - трактуется как единственный аккаунт "default". Новый: секция
+    accounts {"<имя>": {...}} для нескольких номеров. Ключи верхнего уровня
+    наследуются аккаунтом, если он их не переопределил - иначе при переезде на
+    accounts молча потерялись бы общие api_id/api_hash и proxy.
+
+    session_name по умолчанию равен имени аккаунта: у каждого аккаунта свой
+    .session-файл, поэтому аккаунты не дерутся за одну сессию.
+
+    Дефолт account="default" сохраняет контракт для telegram-send-one.py,
+    который зовет load_auth() без аргументов.
+    """
     if not AUTH_PATH.exists():
         sys.stderr.write(
             f"Нет общего конфига {AUTH_PATH}.\n"
@@ -70,12 +84,35 @@ def load_auth() -> dict:
         )
         sys.exit(2)
     with AUTH_PATH.open(encoding="utf-8") as f:
-        auth = json.load(f)
+        raw = json.load(f)
+
+    accounts = raw.get("accounts")
+    if accounts:
+        if account not in accounts:
+            sys.stderr.write(
+                f"В {AUTH_PATH} нет аккаунта \"{account}\". "
+                f"Доступные: {', '.join(sorted(accounts))}\n"
+            )
+            sys.exit(2)
+        inherited = {k: v for k, v in raw.items() if k != "accounts"}
+        auth = {**inherited, **accounts[account]}
+        auth.setdefault("session_name", account)
+    else:
+        if account != "default":
+            sys.stderr.write(
+                f"В {AUTH_PATH} нет секции accounts - доступен только \"default\", "
+                f"а запрошен \"{account}\".\n"
+            )
+            sys.exit(2)
+        auth = dict(raw)
+        auth.setdefault("session_name", "default")
+
     missing = [k for k in ("api_id", "api_hash") if not auth.get(k)]
     if missing:
-        sys.stderr.write(f"В {AUTH_PATH} не заполнены поля: {missing}\n")
+        sys.stderr.write(
+            f"В {AUTH_PATH} у аккаунта \"{account}\" не заполнены поля: {missing}\n"
+        )
         sys.exit(2)
-    auth.setdefault("session_name", "default")
     return auth
 
 
@@ -100,16 +137,24 @@ def client_kwargs(auth: dict) -> dict:
 def chat_entry(value) -> dict:
     """Нормализует значение из chats к {"id": int, "topic_id": int|None}.
 
-    Короткая форма "label": <id> и расширенная "label": {"id", "topic_id"}.
-    topic_id (если задан) используется как тема по умолчанию при отправке -
-    сообщение уйдет в эту форумную тему, если --topic не задан явно.
+    Короткая форма "label": <id> и расширенная "label": {"id", "topic_id",
+    "account"}. topic_id (если задан) используется как тема по умолчанию при
+    отправке - сообщение уйдет в эту форумную тему, если --topic не задан явно.
+
+    account - имя аккаунта из auth.json (по умолчанию "default"): сообщение
+    уходит от того аккаунта, которому принадлежит чат. Ключ необязательный,
+    поэтому старые конфиги читаются без изменений.
     """
     if isinstance(value, dict):
         if "id" not in value:
             raise ValueError("в расширенной записи чата нет поля id")
         topic = value.get("topic_id")
-        return {"id": int(value["id"]), "topic_id": int(topic) if topic is not None else None}
-    return {"id": int(value), "topic_id": None}
+        return {
+            "id": int(value["id"]),
+            "topic_id": int(topic) if topic is not None else None,
+            "account": str(value.get("account") or "default"),
+        }
+    return {"id": int(value), "topic_id": None, "account": "default"}
 
 
 def load_project_config() -> dict:
@@ -228,7 +273,7 @@ async def amain(args) -> int:
 
     text = read_text(args, allow_empty=bool(args.file))
 
-    auth = load_auth()
+    auth = load_auth(entry["account"])
     session_path = str(AUTH_DIR / auth["session_name"])
     client = TelegramClient(session_path, auth["api_id"], auth["api_hash"], **client_kwargs(auth))
 
@@ -274,6 +319,9 @@ async def amain(args) -> int:
         if not args.send:
             print("DRY-RUN (без --send отправка не сделана)")
             print(f"  -> \"{title}\" ({kind}, id={chat_id})")
+            # от какого аккаунта уйдет - часть гейта: при нескольких номерах
+            # ошибиться отправителем так же легко, как чатом
+            print(f"  от аккаунта: {entry['account']}")
             print(f"  тема: {topic_id if topic_id is not None else '-'}   ответ на: {reply_id if reply_id is not None else '-'}")
             if file_path:
                 # полный резолвленный путь и точный размер: dry-run - это
