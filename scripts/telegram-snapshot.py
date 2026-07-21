@@ -102,7 +102,21 @@ ENTITY_MAP = {
 }
 
 
-def load_auth() -> dict:
+def load_auth(account: str = "default") -> dict:
+    """Конфиг одного аккаунта из auth.json.
+
+    Два формата. Плоский (исторический): api_id/api_hash/session_name/proxy в
+    корне - трактуется как единственный аккаунт "default". Новый: секция
+    accounts {"<имя>": {...}} для нескольких номеров. Ключи верхнего уровня
+    наследуются аккаунтом, если он их не переопределил - иначе при переезде на
+    accounts молча потерялись бы общие api_id/api_hash и proxy.
+
+    session_name по умолчанию равен имени аккаунта: у каждого аккаунта свой
+    .session-файл, поэтому аккаунты не дерутся за одну сессию.
+
+    Дефолт account="default" сохраняет контракт для telegram-pull-one.py и
+    telegram-send-one.py, которые зовут load_auth() без аргументов.
+    """
     if not AUTH_PATH.exists():
         sys.stderr.write(
             f"Нет общего конфига {AUTH_PATH}.\n"
@@ -110,12 +124,35 @@ def load_auth() -> dict:
         )
         sys.exit(2)
     with AUTH_PATH.open(encoding="utf-8") as f:
-        auth = json.load(f)
+        raw = json.load(f)
+
+    accounts = raw.get("accounts")
+    if accounts:
+        if account not in accounts:
+            sys.stderr.write(
+                f"В {AUTH_PATH} нет аккаунта \"{account}\". "
+                f"Доступные: {', '.join(sorted(accounts))}\n"
+            )
+            sys.exit(2)
+        inherited = {k: v for k, v in raw.items() if k != "accounts"}
+        auth = {**inherited, **accounts[account]}
+        auth.setdefault("session_name", account)
+    else:
+        if account != "default":
+            sys.stderr.write(
+                f"В {AUTH_PATH} нет секции accounts - доступен только \"default\", "
+                f"а запрошен \"{account}\".\n"
+            )
+            sys.exit(2)
+        auth = dict(raw)
+        auth.setdefault("session_name", "default")
+
     missing = [k for k in ("api_id", "api_hash") if not auth.get(k)]
     if missing:
-        sys.stderr.write(f"В {AUTH_PATH} не заполнены поля: {missing}\n")
+        sys.stderr.write(
+            f"В {AUTH_PATH} у аккаунта \"{account}\" не заполнены поля: {missing}\n"
+        )
         sys.exit(2)
-    auth.setdefault("session_name", "default")
     return auth
 
 
@@ -137,21 +174,29 @@ def client_kwargs(auth: dict) -> dict:
 
 
 def chat_entry(value) -> dict:
-    """Нормализует значение из chats к {"id": int, "topic_id": int|None}.
+    """Нормализует значение из chats к {"id", "topic_id", "account"}.
 
     Поддерживаются две формы записи чата:
       - короткая:  "label": 4715985727
-      - расширенная: "label": {"id": 4715985727, "topic_id": 123}
+      - расширенная: "label": {"id": 4715985727, "topic_id": 123, "account": "cv"}
 
     topic_id используется telegram-deltas.py для отбора сообщений только
     нужной форумной темы (например, топика бота). На саму выкачку не
     влияет - snapshot всегда тянет чат целиком.
+
+    account - имя аккаунта из auth.json (по умолчанию "default"): чат тянется
+    той сессией, которой он принадлежит. Ключ необязательный, поэтому старые
+    конфиги читаются без изменений.
     """
     if isinstance(value, dict):
         if "id" not in value:
             raise ValueError("в расширенной записи чата нет поля id")
-        return {"id": int(value["id"]), "topic_id": value.get("topic_id")}
-    return {"id": int(value), "topic_id": None}
+        return {
+            "id": int(value["id"]),
+            "topic_id": value.get("topic_id"),
+            "account": str(value.get("account") or "default"),
+        }
+    return {"id": int(value), "topic_id": None, "account": "default"}
 
 
 def load_project_config() -> dict:
@@ -763,35 +808,57 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
 
 
 async def amain() -> int:
-    auth = load_auth()
     project_cfg = load_project_config()
     chats_root = chats_root_path(project_cfg)
-    session_path = str(AUTH_DIR / auth["session_name"])
-
-    client = TelegramClient(session_path, auth["api_id"], auth["api_hash"], **client_kwargs(auth))
-    await client.start()
 
     print(f"snapshot {datetime.now(timezone.utc).isoformat()}")
 
-    # Перебор диалогов: строим карту {unmarked_id -> свежий entity}. Нужна
-    # и для прогрева (get_entity на свежей сессии иначе трактует int как
-    # PeerUser), и - главное - как авторитетный источник entity вместо
-    # битого локального кеша (см. resolve_entity).
-    dialog_entities: dict = {}
-    async for d in client.iter_dialogs():
-        eid = getattr(d.entity, "id", None)
-        if eid is not None:
-            dialog_entities[eid] = d.entity
+    # Чаты группируем по аккаунту и обходим аккаунты ПОСЛЕДОВАТЕЛЬНО, каждый
+    # своим клиентом. Одновременно живых клиентов нет, поэтому за session-файлы
+    # никто не дерется (у аккаунтов они и так разные - см. load_auth).
+    by_account: dict[str, list] = {}
+    for label, entry in project_cfg["chats"].items():
+        by_account.setdefault(entry["account"], []).append((label, entry))
 
     total = 0
-    for label, entry in project_cfg["chats"].items():
-        chat_id = entry["id"]
+    for account in sorted(by_account):
+        auth = load_auth(account)
+        session_path = str(AUTH_DIR / auth["session_name"])
+        client = TelegramClient(
+            session_path, auth["api_id"], auth["api_hash"], **client_kwargs(auth)
+        )
         try:
-            n, _ = await process_chat(client, chats_root, label, chat_id, dialog_entities)
-            total += n
-        except Exception as exc:
-            sys.stderr.write(f"!! {label} ({chat_id}): {exc}\n")
-    await client.disconnect()
+            # start() внутри try: он же и подключает, а упасть может уже после
+            # (например, прерванный интерактивный логин нового аккаунта) -
+            # в цикле по аккаунтам это утекло бы соединением
+            await client.start()
+            if len(by_account) > 1:
+                print(f"\n[аккаунт {account}]")
+
+            # Карта {unmarked_id -> свежий entity}. Нужна и для прогрева
+            # (get_entity на свежей сессии иначе трактует int как PeerUser), и -
+            # главное - как авторитетный источник entity вместо битого кеша
+            # (см. resolve_entity). Строится ЗАНОВО на каждый аккаунт: entity
+            # принадлежит конкретной сессии (свой access_hash), и переиспользование
+            # чужой карты дало бы резолв не того чата.
+            dialog_entities: dict = {}
+            async for d in client.iter_dialogs():
+                eid = getattr(d.entity, "id", None)
+                if eid is not None:
+                    dialog_entities[eid] = d.entity
+
+            for label, entry in by_account[account]:
+                chat_id = entry["id"]
+                try:
+                    n, _ = await process_chat(
+                        client, chats_root, label, chat_id, dialog_entities
+                    )
+                    total += n
+                except Exception as exc:
+                    sys.stderr.write(f"!! {label} ({chat_id}): {exc}\n")
+        finally:
+            await client.disconnect()
+
     print(f"\nOK: +{total} сообщений всего")
     return 0
 

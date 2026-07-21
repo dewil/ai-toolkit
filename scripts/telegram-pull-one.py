@@ -15,16 +15,19 @@ username, поправить шапку личного чата.
 
 Запуск:
     python3 scripts/telegram-pull-one.py <chat_id> <out_path> [expected_username]
+    python3 scripts/telegram-pull-one.py <chat_id> <out_path> --account cv
 
 Пример:
     python3 scripts/telegram-pull-one.py 123456789 "support/@somebody/чат" somebody
 
 out_path - относительный путь от корня проекта; результат пишется в
 <out_path>/result.json. Повторный запуск делает инкрементальный pull.
+--account выбирает аккаунт из auth.json (по умолчанию default).
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import importlib.util
 import sys
@@ -44,8 +47,10 @@ def display_name(entity) -> str:
     return getattr(entity, "title", None) or getattr(entity, "username", None) or ""
 
 
-async def amain(chat_id: int, out_path: str, expected_username: str | None) -> int:
-    auth = tgs.load_auth()
+async def amain(
+    chat_id: int, out_path: str, expected_username: str | None, account: str = "default"
+) -> int:
+    auth = tgs.load_auth(account)
     session_path = str(tgs.AUTH_DIR / auth["session_name"])
 
     client = tgs.TelegramClient(session_path, auth["api_id"], auth["api_hash"], **tgs.client_kwargs(auth))
@@ -100,15 +105,21 @@ async def amain(chat_id: int, out_path: str, expected_username: str | None) -> i
 
 
 def main() -> int:
-    if len(sys.argv) < 3:
-        sys.stderr.write(
-            "usage: telegram-pull-one.py <chat_id> <out_path> [expected_username]\n"
-        )
-        return 2
-    chat_id = int(sys.argv[1])
-    out_path = sys.argv[2]
-    expected_username = sys.argv[3] if len(sys.argv) > 3 else None
-    return asyncio.run(amain(chat_id, out_path, expected_username))
+    parser = argparse.ArgumentParser(
+        description="Снапшот одного Telegram-чата по id в произвольную папку."
+    )
+    parser.add_argument("chat_id", type=int, help="числовой id чата")
+    parser.add_argument("out_path", help="путь папки назначения от корня проекта")
+    parser.add_argument(
+        "username", nargs="?", default=None,
+        help="ожидаемый username для сверки (без @); при несовпадении - стоп",
+    )
+    parser.add_argument(
+        "--account", default="default",
+        help="имя аккаунта из auth.json (по умолчанию default)",
+    )
+    args = parser.parse_args()
+    return asyncio.run(amain(args.chat_id, args.out_path, args.username, args.account))
 
 
 if __name__ == "__main__":

@@ -39,7 +39,7 @@ async def amain(args) -> int:
     chat_id = int(args.chat_id)
     text = tgs.read_text(args)
 
-    auth = tgs.load_auth()
+    auth = tgs.load_auth(args.account)
     session_path = str(tgs.AUTH_DIR / auth["session_name"])
     client = tgs.TelegramClient(session_path, auth["api_id"], auth["api_hash"], **tgs.client_kwargs(auth))
 
@@ -85,7 +85,7 @@ async def amain(args) -> int:
         if not args.send:
             print("DRY-RUN (без --send отправка не сделана)")
             print(f"  -> \"{title}\" (@{actual_username or '?'}, {kind}, id={chat_id})")
-            print(f"  ответ на: {args.reply_to if args.reply_to is not None else '-'}   формат: {'html' if args.html else 'сырой текст'}")
+            print(f"  ответ на: {args.reply_to if args.reply_to is not None else '-'}   формат: {'html' if args.html else 'сырой текст'}   аккаунт: {args.account}")
             print(f"  текст ({len(lines)} строк):")
             for ln in lines:
                 print(f"  | {ln}")
@@ -112,6 +112,8 @@ def main() -> int:
     parser.add_argument("--topic", type=int, help="id корня форумной темы (для форум-чатов)")
     parser.add_argument("--reply-to", type=int, dest="reply_to",
                         help="id сообщения, на которое отвечаем")
+    parser.add_argument("--account", default="default",
+                        help="имя аккаунта из auth.json (по умолчанию default)")
     parser.add_argument("--html", action="store_true",
                         help="слать как HTML (жирный/код/ссылки). Без флага - сырой текст. "
                              "HTML, а не MarkdownV2: тот требует экранировать точки/дефисы/скобки, "
