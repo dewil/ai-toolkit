@@ -266,13 +266,24 @@ def atomic_write_json(path: Path, data: dict) -> None:
     """Записывает JSON атомарно через временный файл + os.replace.
 
     Защита от битого файла при падении посреди json.dump (Ctrl+C, OOM, ...).
+
+    Имя временного файла включает pid. При фиксированном имени два
+    одновременных прогона (крон и ручной запуск) писали в один и тот же .tmp и
+    подменяли друг другу недописанный файл - в result.json мог попасть битый
+    JSON. Разные имена этого не допускают; потеря обновления остается
+    возможной (побеждает тот, кто сделал replace последним), но это
+    восстанавливается следующим инкрементальным pull, а битый файл - нет.
     """
-    tmp_path = path.with_name(path.name + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, path)
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)  # не оставлять мусор при падении
+        raise
 
 
 def last_message_id(data: dict) -> int:
