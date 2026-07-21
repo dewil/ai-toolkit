@@ -65,6 +65,12 @@ class Tables(unittest.TestCase):
         h = body("| Expr |\n|---|\n| a \\| b |\n")
         self.assertIn("<td>a | b</td>", h)
 
+    def test_escaped_backslash_before_pipe_splits(self):
+        """Удвоенный бэкслеш экранирует сам себя, значит следующий | - настоящий
+        разделитель. Lookbehind на один символ здесь ошибался и склеивал ячейки."""
+        h = body("| A | B | C |\n|---|---|---|\n| x \\\\| y | z |\n")
+        self.assertIn("<td>x \\</td><td>y</td><td>z</td>", h)
+
     def test_empty_trailing_cell_preserved(self):
         h = body("| A | B |\n|---|---|\n| x ||\n")
         self.assertIn("<tr><td>x</td><td></td></tr>", h)
@@ -84,6 +90,17 @@ class Tables(unittest.TestCase):
         h = body("| A |\n|---|\n| <script> |\n")
         self.assertIn("&lt;script&gt;", h)
         self.assertNotIn("<script>", h)
+
+    def test_header_delimiter_width_mismatch_is_not_a_table(self):
+        """По GFM шапка и разделитель обязаны совпадать по числу ячеек."""
+        h = body("| A | B |\n|---|\n| x | y |\n")
+        self.assertNotIn("<table>", h)
+
+    def test_invalid_block_becomes_one_paragraph(self):
+        """Не таблица -> один абзац, а не абзац на строку: иначе рвется перенос."""
+        h = body("| not a table\n| second line\n")
+        self.assertEqual(h.count("<p>"), 1)
+        self.assertIn("| not a table | second line", h)
 
     def test_table_without_trailing_pipe(self):
         h = body("| A | B\n|---|---\n| 1 | 2\n")
@@ -128,6 +145,13 @@ class ModeInteraction(unittest.TestCase):
         h = body("```\n| A |\n|---|\n```\n")
         self.assertNotIn("<table>", h)
         self.assertIn("<pre><code>", h)
+
+    def test_table_cannot_interrupt_paragraph(self):
+        """По GFM таблица не прерывает абзац. Иначе строка "|x| - модуль числа"
+        посреди текста рвала бы абзац на три куска."""
+        h = body("before\n| first\nafter\n")
+        self.assertNotIn("<table>", h)
+        self.assertEqual(h, "<p>before | first after</p>")
 
     def test_hr_still_works(self):
         h = body("до\n\n---\n\nпосле\n")
