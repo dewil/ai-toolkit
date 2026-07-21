@@ -34,7 +34,10 @@ def chat_entry(value) -> dict:
     if isinstance(value, dict):
         if "id" not in value:
             raise ValueError("в расширенной записи чата нет поля id")
-        return {"id": int(value["id"]), "topic_id": value.get("topic_id")}
+        topic = value.get("topic_id")
+        # int обязателен: topic_id сравнивается с числовым полем сообщения,
+        # и строковый "42" из конфига молча не совпал бы ни с чем
+        return {"id": int(value["id"]), "topic_id": int(topic) if topic is not None else None}
     return {"id": int(value), "topic_id": None}
 
 

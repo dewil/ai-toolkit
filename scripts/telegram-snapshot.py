@@ -127,6 +127,12 @@ def load_auth(account: str = "default") -> dict:
         raw = json.load(f)
 
     accounts = raw.get("accounts")
+    if accounts is not None and not isinstance(accounts, dict):
+        sys.stderr.write(
+            f"В {AUTH_PATH} поле accounts должно быть объектом вида "
+            f"{{\"имя\": {{...}}}}\n"
+        )
+        sys.exit(2)
     if accounts:
         if account not in accounts:
             sys.stderr.write(
@@ -134,9 +140,33 @@ def load_auth(account: str = "default") -> dict:
                 f"Доступные: {', '.join(sorted(accounts))}\n"
             )
             sys.exit(2)
-        inherited = {k: v for k, v in raw.items() if k != "accounts"}
+        bad = sorted(n for n, cfg in accounts.items() if not isinstance(cfg, dict))
+        if bad:
+            sys.stderr.write(
+                f"В {AUTH_PATH} настройки аккаунта должны быть объектом; "
+                f"не так у: {', '.join(bad)}\n"
+            )
+            sys.exit(2)
+        # session_name НАМЕРЕННО не наследуется от верхнего уровня: конфиг, где
+        # он был задан до появления accounts, посадил бы все аккаунты на один
+        # .session - то есть на одну авторизованную сессию, и изоляции бы не было
+        inherited = {
+            k: v for k, v in raw.items() if k not in ("accounts", "session_name")
+        }
         auth = {**inherited, **accounts[account]}
         auth.setdefault("session_name", account)
+
+        sessions = {n: (cfg.get("session_name") or n) for n, cfg in accounts.items()}
+        clash = sorted(
+            n for n, s in sessions.items() if n != account and s == sessions[account]
+        )
+        if clash:
+            sys.stderr.write(
+                f"В {AUTH_PATH} аккаунт \"{account}\" делит session_name "
+                f"\"{sessions[account]}\" с: {', '.join(clash)}. "
+                f"У каждого аккаунта должен быть свой .session-файл.\n"
+            )
+            sys.exit(2)
     else:
         if account != "default":
             sys.stderr.write(
@@ -191,9 +221,12 @@ def chat_entry(value) -> dict:
     if isinstance(value, dict):
         if "id" not in value:
             raise ValueError("в расширенной записи чата нет поля id")
+        topic = value.get("topic_id")
         return {
             "id": int(value["id"]),
-            "topic_id": value.get("topic_id"),
+            # int обязателен: topic_id сравнивается с числовым полем сообщения,
+            # и строковый "42" из конфига молча не совпал бы ни с чем
+            "topic_id": int(topic) if topic is not None else None,
             "account": str(value.get("account") or "default"),
         }
     return {"id": int(value), "topic_id": None, "account": "default"}

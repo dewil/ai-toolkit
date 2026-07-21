@@ -151,6 +151,46 @@ class LoadAuth(unittest.TestCase):
                 self.assertEqual(auth["api_id"], 2)
                 self.assertEqual(auth["proxy"], "socks5://10.0.0.1:1080")
 
+    def test_top_level_session_name_not_inherited(self):
+        """Блокер: конфиг, где session_name задан до появления accounts, иначе
+        сажает ВСЕ аккаунты на один .session - то есть на одну авторизованную
+        сессию, и изоляции аккаунтов нет вовсе."""
+        payload = {
+            "api_id": 1, "api_hash": "h", "session_name": "legacy",
+            "accounts": {"default": {}, "cv": {}},
+        }
+        for name, mod in BOTH:
+            with self.subTest(mod=name), auth_file(mod, payload):
+                self.assertEqual(mod.load_auth("default")["session_name"], "default")
+                self.assertEqual(mod.load_auth("cv")["session_name"], "cv")
+
+    def test_account_may_set_own_session_name(self):
+        payload = {"api_id": 1, "api_hash": "h", "accounts": {"cv": {"session_name": "mine"}}}
+        for name, mod in BOTH:
+            with self.subTest(mod=name), auth_file(mod, payload):
+                self.assertEqual(mod.load_auth("cv")["session_name"], "mine")
+
+    def test_colliding_session_names_rejected(self):
+        payload = {
+            "api_id": 1, "api_hash": "h",
+            "accounts": {"a": {"session_name": "same"}, "b": {"session_name": "same"}},
+        }
+        for name, mod in BOTH:
+            with self.subTest(mod=name):
+                expect_exit(self, mod, payload, "a")
+
+    def test_non_dict_accounts_rejected(self):
+        payload = {"api_id": 1, "api_hash": "h", "accounts": ["metadata"]}
+        for name, mod in BOTH:
+            with self.subTest(mod=name):
+                expect_exit(self, mod, payload, "default")
+
+    def test_non_dict_account_config_rejected(self):
+        payload = {"api_id": 1, "api_hash": "h", "accounts": {"cv": "oops"}}
+        for name, mod in BOTH:
+            with self.subTest(mod=name):
+                expect_exit(self, mod, payload, "cv")
+
     def test_unknown_account_exits(self):
         for name, mod in BOTH:
             with self.subTest(mod=name):
@@ -193,6 +233,13 @@ class ChatEntry(unittest.TestCase):
             with self.subTest(mod=name):
                 self.assertEqual(mod.chat_entry({"id": 7, "topic_id": 42})["topic_id"], 42)
 
+    def test_topic_id_coerced_to_int(self):
+        """Копии расходились: одна отдавала "42", другая 42. topic_id сравнивается
+        с числовым полем сообщения, поэтому строка молча не совпала бы ни с чем."""
+        for name, mod in BOTH:
+            with self.subTest(mod=name):
+                self.assertEqual(mod.chat_entry({"id": 7, "topic_id": "42"})["topic_id"], 42)
+
     def test_missing_id_raises(self):
         for name, mod in BOTH:
             with self.subTest(mod=name):
@@ -211,6 +258,9 @@ class DeltasCompat(unittest.TestCase):
 
     def test_deltas_short_form_unchanged(self):
         self.assertEqual(DELTAS.chat_entry(7), {"id": 7, "topic_id": None})
+
+    def test_deltas_topic_id_coerced_to_int(self):
+        self.assertEqual(DELTAS.chat_entry({"id": 7, "topic_id": "42"})["topic_id"], 42)
 
 
 if __name__ == "__main__":
