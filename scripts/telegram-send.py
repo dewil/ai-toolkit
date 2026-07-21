@@ -183,16 +183,26 @@ def build_reply_to(topic_id, reply_id):
     return None
 
 
-def read_text(args) -> str:
+def read_text(args, allow_empty: bool = False) -> str:
+    """Текст сообщения из --text или stdin.
+
+    allow_empty=True нужен для отправки файла без подписи (--file): Telegram
+    разрешает документ с пустым caption. Дефолт False сохраняет прежний
+    контракт - его использует telegram-send-one.py, вызывающий read_text(args).
+    """
     if args.text is not None:
         text = args.text
     else:
         if sys.stdin.isatty():
+            if allow_empty:
+                return ""
             sys.stderr.write("Нет текста: задай --text или передай его через stdin.\n")
             sys.exit(2)
         text = sys.stdin.read()
     text = text.rstrip("\n")
     if not text.strip():
+        if allow_empty:
+            return ""
         sys.stderr.write("Пустой текст сообщения (--text или stdin).\n")
         sys.exit(2)
     return text
@@ -216,7 +226,7 @@ async def amain(args) -> int:
     topic_id = args.topic if args.topic is not None else entry["topic_id"]
     reply_id = args.reply_to
 
-    text = read_text(args)
+    text = read_text(args, allow_empty=bool(args.file))
 
     auth = load_auth()
     session_path = str(AUTH_DIR / auth["session_name"])
@@ -266,10 +276,15 @@ async def amain(args) -> int:
             print(f"  -> \"{title}\" ({kind}, id={chat_id})")
             print(f"  тема: {topic_id if topic_id is not None else '-'}   ответ на: {reply_id if reply_id is not None else '-'}")
             if file_path:
-                print(f"  файл: {file_path.name} ({file_path.stat().st_size // 1024} KB, подпись - текст ниже)")
-            print(f"  текст ({len(lines)} строк):")
-            for ln in lines:
-                print(f"  | {ln}")
+                # полный резолвленный путь и точный размер: dry-run - это
+                # предохранитель "тот ли файл", по одному имени его не проверить
+                print(f"  файл: {file_path} ({file_path.stat().st_size} байт)")
+            if text:
+                print(f"  {'подпись' if file_path else 'текст'} ({len(lines)} строк):")
+                for ln in lines:
+                    print(f"  | {ln}")
+            else:
+                print("  подпись: нет (файл уйдет без текста)")
             return 0
 
         reply_to = build_reply_to(topic_id, reply_id)
