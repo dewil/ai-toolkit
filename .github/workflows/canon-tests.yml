@@ -1,23 +1,23 @@
 name: canon-delta tests
 
-# Прогон детерминированного дельта-движка канона (этап 8, часть a).
+# Прогон детерминированного дельта-движка канона (этап 8, часть a) плюс тесты
+# канонических скриптов, которые раскатываются в проекты.
 # stdlib-only, нужен только python3 + git (для git-fixture в build-lock/integration).
+#
+# paths - маской по scripts/*.py, а не поименно: раскатываемые скрипты раньше
+# в триггер не входили вовсе, и дефект в них доезжал до парка мимо CI.
 
 on:
   push:
     branches: [main]
     paths:
-      - "scripts/build-lock.py"
-      - "scripts/canon-delta.py"
-      - "scripts/canon-migrate.py"
+      - "scripts/*.py"
       - "tests/test_*.py"
       - "manifest.yaml"
       - ".github/workflows/canon-tests.yml"
   pull_request:
     paths:
-      - "scripts/build-lock.py"
-      - "scripts/canon-delta.py"
-      - "scripts/canon-migrate.py"
+      - "scripts/*.py"
       - "tests/test_*.py"
       - "manifest.yaml"
 
@@ -29,10 +29,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: run delta engine tests
+      - name: byte-compile canon scripts
+        # scripts/ копируются в проекты как есть - синтаксическая ошибка
+        # не должна доезжать до парка
+        run: python3 -m compileall -q scripts/
+      - name: run tests
         run: |
           set -e
-          for t in build_lock classify wal integration migrate; do
+          for t in build_lock classify wal integration migrate fs_mapping md_pdf; do
             echo "::group::test_$t"
             python3 tests/test_$t.py
             echo "::endgroup::"

@@ -18,10 +18,11 @@ Chrome сам /Author не пишет - при --author поле дописыв�
 как в стандартном markdown), плоские списки (- и 1.), **bold**, *italic*,
 `code`, fenced-блоки ```...```, цитаты "> ", ссылки [текст](url) и голые URL,
 картинки ![alt](путь) (локальные встраиваются base64 data-URI), разделитель ---,
-GFM-таблицы (| ячейка | ...; строка-разделитель |---| пропускается,
-экранированных | в ячейках нет).
-Вложенные списки не поддерживаются - при необходимости дорабатывать
-конвертер, не менять формат исходника.
+GFM-таблицы (строка-разделитель |---| обязательна второй строкой, иначе блок -
+не таблица и уходит абзацами; ширина строк нормализуется по шапке; \\| в ячейке
+экранирует разделитель).
+Вложенные списки и выравнивание колонок (:--:) не поддерживаются - при
+необходимости дорабатывать конвертер, не менять формат исходника.
 """
 
 import argparse
@@ -91,23 +92,51 @@ def md_to_html(md: str) -> tuple[str, str]:
     title = ""
     out: list[str] = []
     mode = ""  # "", "ul", "ol", "quote", "pre", "table", "p"
-    tbl: list[str] = []
+    tbl: list[str] = []   # сырые строки таблицы - до валидации
+    para: list[str] = []  # сырые строки абзаца - до склейки
+
+    def split_row(row: str) -> list[str]:
+        """Ячейки строки таблицы: снимает ровно один крайний |, уважает \\|."""
+        s = row.strip()
+        if s.startswith("|"):
+            s = s[1:]
+        if s.endswith("|") and not s.endswith("\\|"):
+            s = s[:-1]
+        return [c.replace("\\|", "|").strip() for c in re.split(r"(?<!\\)\|", s)]
+
+    def is_delim_row(cells: list[str]) -> bool:
+        """Строка-разделитель GFM: только ячейки вида ---, :--, --:, :-:."""
+        return bool(cells) and all(re.fullmatch(r":?-+:?", c) for c in cells)
 
     def flush_table() -> None:
-        rows = [
-            [c.strip() for c in r.strip().strip("|").split("|")]
-            for r in tbl
-            if not re.fullmatch(r"[\s|:-]+", r)  # строка-разделитель |---|
-        ]
-        if not rows:
+        """Буфер tbl -> <table>, но только если это валидная GFM-таблица.
+
+        Валидность определяет ВТОРАЯ строка: она обязана быть разделителем.
+        Иначе блок - не таблица (абзац с "|" в начале, формула |x| и т.п.), и
+        строки уходят абзацами: молча терять их нельзя.
+        """
+        rows = [split_row(r) for r in tbl]
+        if len(rows) < 2 or not is_delim_row(rows[1]):
+            for r in tbl:
+                out.append(f"<p>{inline(r.strip())}</p>")
             return
+        header = rows[0]
+        width = len(header)
         out.append("<table>")
-        for i, cells in enumerate(rows):
-            tag = "th" if i == 0 else "td"
-            out.append(
-                "<tr>" + "".join(f"<{tag}>{inline(c)}</{tag}>" for c in cells) + "</tr>"
-            )
+        out.append("<tr>" + "".join(f"<th>{inline(c)}</th>" for c in header) + "</tr>")
+        # разделитель отсеиваем ПО ПОЗИЦИИ (строка 1), а не по виду строки:
+        # иначе легитимная ячейка-прочерк "| - |" исчезает из документа
+        for cells in rows[2:]:
+            cells = (cells + [""] * width)[:width]  # ширина строк - по шапке
+            out.append("<tr>" + "".join(f"<td>{inline(c)}</td>" for c in cells) + "</tr>")
         out.append("</table>")
+
+    def flush_para() -> None:
+        """Склеенный абзац. inline() применяется ПОСЛЕ склейки - иначе разметка,
+        разорванная переносом строки (**bold\\ntext**), не соберется обратно."""
+        if para:
+            out.append(f"<p>{inline(' '.join(para))}</p>")
+            para.clear()
 
     def close() -> None:
         nonlocal mode
@@ -122,6 +151,8 @@ def md_to_html(md: str) -> tuple[str, str]:
         elif mode == "table":
             flush_table()
             tbl.clear()
+        elif mode == "p":
+            flush_para()
         mode = ""
 
     for raw in lines:
@@ -177,13 +208,11 @@ def md_to_html(md: str) -> tuple[str, str]:
                 mode = "quote"
             out.append(f"<p>{inline(line[2:])}</p>")
         else:
-            # мягкий перенос: продолжение абзаца клеим к предыдущей строке
-            if mode == "p" and out and out[-1].endswith("</p>"):
-                out[-1] = out[-1][: -len("</p>")] + " " + inline(line.strip()) + "</p>"
-            else:
+            # мягкий перенос: копим сырые строки, склеиваем и размечаем в flush_para
+            if mode != "p":
                 close()
-                out.append(f"<p>{inline(line)}</p>")
                 mode = "p"
+            para.append(line.strip())
     close()
     return title, "\n".join(out)
 
