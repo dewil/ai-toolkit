@@ -88,6 +88,8 @@ management:
   - skills/mymeet-snapshot/SKILL.md     # настройка/починка зеркала расшифровок встреч из mymeet.ai
   - skills/local-transcription/SKILL.md # локальная (offline) транскрипция записи встречи/лекции: выбор ASR, token-free диаризация, грабли
   - skills/estimate-calibration/SKILL.md # калибровочная оценка трудоемкости: якоря -> рубрика архетипов -> модификаторы -> калибровка по факту
+  - skills/asana-comments/SKILL.md      # чтение ленты комментариев задачи Asana в обход потолка MCP в 50 штук
+  - scripts/asana-comments.py           # постраничное чтение stories задачи Asana через REST (для скилла asana-comments)
   - scripts/telegram-snapshot.py        # инкрементальный pull новых сообщений Telegram
   - scripts/telegram-deltas.py          # дельты чатов для блока "Новое в чатах" в дейлике
   - scripts/telegram-send.py            # отправка сообщения в Telegram-чат
