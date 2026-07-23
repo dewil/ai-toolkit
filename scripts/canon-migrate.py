@@ -26,7 +26,7 @@ import hashlib
 import importlib.util
 import json
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # переиспользуем git_blob_sha/read_local/empty_state из canon-delta (имя с дефисом -> importlib)
 _CD_PATH = Path(__file__).resolve().parent / "canon-delta.py"
@@ -113,6 +113,34 @@ def build_state(old: dict, root: Path) -> dict:
     return state, skipped
 
 
+def _legacy_brief_path(root: Path, entry: str) -> str:
+    """Путь брифа для legacy-записи upstream_pending.
+
+    Legacy-контракт хранит канон-путь кандидата (skills/foo/SKILL.md), а сам
+    бриф лежит в toolkit-log/upstream-pending/<slug>.md. Копировать строку в
+    brief_path как есть нельзя: schema-aware sync не найдет по ней файла,
+    сочтет запись осиротевшей и уничтожит ее. Если строка уже указывает на
+    существующий файл - берем ее; иначе ищем бриф по кандидатам слага
+    (skills/foo/SKILL.md -> skills-foo; rules/bar.md -> bar, rules-bar);
+    не нашли - оставляем строку как есть (хуже не делаем).
+    """
+    if (root / entry).is_file() and entry.startswith("toolkit-log/"):
+        return entry
+    p = PurePosixPath(entry)
+    slugs: list[str] = []
+    if p.stem == "SKILL" and len(p.parts) >= 2:
+        slugs.append("-".join(p.parts[:-1]))
+    else:
+        slugs.append(p.stem)
+        if len(p.parts) >= 2:
+            slugs.append("-".join([*p.parts[:-1], p.stem]))
+    for slug in slugs:
+        cand = f"toolkit-log/upstream-pending/{slug}.md"
+        if (root / cand).is_file():
+            return cand
+    return entry
+
+
 def build_ledger(old: dict, root: Path, external: list[dict] | None) -> dict:
     """Свести старый upstream_pending (без candidate-id) и внешний harvester-lifecycle
     в единый ledger. Дедуп по candidate-id: старому присваивается синтетический
@@ -124,6 +152,7 @@ def build_ledger(old: dict, root: Path, external: list[dict] | None) -> dict:
         if cid:
             by_id[cid] = {"candidate_id": cid, "brief_path": e.get("brief_path"), "source": "harvester"}
     for brief in old.get("upstream_pending") or []:
+        brief = _legacy_brief_path(root, str(brief))
         bp = (root / brief)
         try:
             content = bp.read_bytes() if bp.exists() else brief.encode("utf-8")
