@@ -113,6 +113,28 @@ def build_state(old: dict, root: Path) -> dict:
     return state, skipped
 
 
+def _slug_candidates(entry: str) -> list[str]:
+    """Кандидаты слага для канон-пути, от специфичного к общему.
+
+    Контракт слага (harvest / 4e синка): имя брифа выводится из канон-пути;
+    skills/foo/SKILL.md -> skills-foo, migrations/sync-from-canon.prompt.md ->
+    migrations-sync-from-canon (все суффиксы срезаются, не только последний),
+    rules/bar.md -> rules-bar либо bar. Директорийный вариант идет ПЕРВЫМ:
+    голый stem может привязать запись к чужому брифу (rules/bar.md и
+    agents/bar.md делят bar.md).
+    """
+    p = PurePosixPath(entry)
+    stem = p.name.split(".")[0]
+    dirs = list(p.parts[:-1])
+    if stem == "SKILL" and dirs:
+        return ["-".join(dirs)]
+    cands = []
+    if dirs:
+        cands.append("-".join([*dirs, stem]))
+    cands.append(stem)
+    return cands
+
+
 def _legacy_brief_path(root: Path, entry: str) -> str:
     """Путь брифа для legacy-записи upstream_pending.
 
@@ -120,21 +142,12 @@ def _legacy_brief_path(root: Path, entry: str) -> str:
     бриф лежит в toolkit-log/upstream-pending/<slug>.md. Копировать строку в
     brief_path как есть нельзя: schema-aware sync не найдет по ней файла,
     сочтет запись осиротевшей и уничтожит ее. Если строка уже указывает на
-    существующий файл - берем ее; иначе ищем бриф по кандидатам слага
-    (skills/foo/SKILL.md -> skills-foo; rules/bar.md -> bar, rules-bar);
-    не нашли - оставляем строку как есть (хуже не делаем).
+    существующий файл в toolkit-log/ - берем ее; иначе ищем бриф по
+    кандидатам слага; не нашли - оставляем строку как есть (хуже не делаем).
     """
-    if (root / entry).is_file() and entry.startswith("toolkit-log/"):
+    if entry.startswith("toolkit-log/") and (root / entry).is_file():
         return entry
-    p = PurePosixPath(entry)
-    slugs: list[str] = []
-    if p.stem == "SKILL" and len(p.parts) >= 2:
-        slugs.append("-".join(p.parts[:-1]))
-    else:
-        slugs.append(p.stem)
-        if len(p.parts) >= 2:
-            slugs.append("-".join([*p.parts[:-1], p.stem]))
-    for slug in slugs:
+    for slug in _slug_candidates(entry):
         cand = f"toolkit-log/upstream-pending/{slug}.md"
         if (root / cand).is_file():
             return cand
@@ -147,21 +160,35 @@ def build_ledger(old: dict, root: Path, external: list[dict] | None) -> dict:
     sha256(<содержимое брифа>); при совпадении с внешним берется внешний id."""
     external = external or []
     by_id: dict[str, dict] = {}
+    by_path: dict[str, str] = {}  # brief_path -> candidate_id (дедуп по пути)
     for e in external:
         cid = e.get("candidate_id")
         if cid:
             by_id[cid] = {"candidate_id": cid, "brief_path": e.get("brief_path"), "source": "harvester"}
-    for brief in old.get("upstream_pending") or []:
-        brief = _legacy_brief_path(root, str(brief))
+            if e.get("brief_path"):
+                by_path[e["brief_path"]] = cid
+    for raw in old.get("upstream_pending") or []:
+        # legacy-запись бывает не строкой (рукой занесенный объект) - берем из
+        # нее brief_path, пустую пропускаем, не роняя миграцию
+        if isinstance(raw, dict):
+            raw = str(raw.get("brief_path") or "")
+            if not raw:
+                continue
+        brief = _legacy_brief_path(root, str(raw))
+        if brief in by_path:
+            if by_id[by_path[brief]]["source"] == "harvester":
+                continue  # тот же кандидат уже в ledger от harvester (пусть и с другим хешем)
+            brief = str(raw)  # бриф уже привязан к другой legacy-записи - не гадаем, оставляем путь
         bp = (root / brief)
         try:
-            content = bp.read_bytes() if bp.exists() else brief.encode("utf-8")
+            content = bp.read_bytes() if bp.is_file() else brief.encode("utf-8")
         except OSError:
             content = brief.encode("utf-8")
         cid = hashlib.sha256(content).hexdigest()
         if cid in by_id:
             continue  # уже есть из harvester - дубль отбрасываем
         by_id[cid] = {"candidate_id": cid, "brief_path": brief, "source": "legacy-canon-yaml"}
+        by_path[brief] = cid
     return {"upstream_pending": sorted(by_id.values(), key=lambda r: r["candidate_id"])}
 
 
