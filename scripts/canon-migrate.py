@@ -118,13 +118,21 @@ def _slug_candidates(entry: str) -> list[str]:
 
     Контракт слага (harvest / 4e синка): имя брифа выводится из канон-пути;
     skills/foo/SKILL.md -> skills-foo, migrations/sync-from-canon.prompt.md ->
-    migrations-sync-from-canon (все суффиксы срезаются, не только последний),
-    rules/bar.md -> rules-bar либо bar. Директорийный вариант идет ПЕРВЫМ:
+    migrations-sync-from-canon, rules/bar.md -> rules-bar либо bar. Срезаются
+    только известные расширения (.md/.py/.yaml/...) плюс суффикс .prompt -
+    точка внутри имени не разделитель: rules/python3.12-policy.md ->
+    python3.12-policy, а не python3. Директорийный вариант идет ПЕРВЫМ:
     голый stem может привязать запись к чужому брифу (rules/bar.md и
     agents/bar.md делят bar.md).
     """
     p = PurePosixPath(entry)
-    stem = p.name.split(".")[0]
+    stem = p.name
+    for ext in (".md", ".py", ".yaml", ".yml", ".json"):
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    if stem.endswith(".prompt"):
+        stem = stem[: -len(".prompt")]
     dirs = list(p.parts[:-1])
     if stem == "SKILL" and dirs:
         return ["-".join(dirs)]
@@ -154,10 +162,28 @@ def _legacy_brief_path(root: Path, entry: str) -> str:
     return entry
 
 
+def _read_brief(root: Path, brief: str) -> bytes:
+    """Байты брифа; нет файла / не читается - синтетика из самого пути."""
+    bp = root / brief
+    try:
+        return bp.read_bytes() if bp.is_file() else brief.encode("utf-8")
+    except OSError:
+        return brief.encode("utf-8")
+
+
 def build_ledger(old: dict, root: Path, external: list[dict] | None) -> dict:
     """Свести старый upstream_pending (без candidate-id) и внешний harvester-lifecycle
     в единый ledger. Дедуп по candidate-id: старому присваивается синтетический
-    sha256(<содержимое брифа>); при совпадении с внешним берется внешний id."""
+    sha256(<содержимое брифа>); при совпадении с внешним берется внешний id.
+
+    Слаг-коллизия (несколько legacy-записей резолвятся в один бриф): бриф
+    достается той записи, чей канон-путь упомянут в тексте брифа РАНЬШЕ других
+    (шаблон брифа дублирует целевой путь заголовком в первой строке; чужие
+    пути в rationale стоят позже) - привязка по атрибуции, не по порядку
+    списка; бриф никого не называет - первой по порядку. Остальные записи
+    группы сохраняют исходный канон-путь (кандидат не теряется молча). Если
+    путь брифа занят harvester-записью, выбранная запись считается тем же
+    кандидатом и в ledger не дублируется."""
     external = external or []
     by_id: dict[str, dict] = {}
     by_path: dict[str, str] = {}  # brief_path -> candidate_id (дедуп по пути)
@@ -167,28 +193,52 @@ def build_ledger(old: dict, root: Path, external: list[dict] | None) -> dict:
             by_id[cid] = {"candidate_id": cid, "brief_path": e.get("brief_path"), "source": "harvester"}
             if e.get("brief_path"):
                 by_path[e["brief_path"]] = cid
+
+    # legacy-записи: нормализуем (запись бывает рукой занесенным объектом -
+    # берем из нее brief_path, пустую пропускаем, не роняя миграцию) и
+    # группируем по резолвнутому брифу
+    entries: list[str] = []
     for raw in old.get("upstream_pending") or []:
-        # legacy-запись бывает не строкой (рукой занесенный объект) - берем из
-        # нее brief_path, пустую пропускаем, не роняя миграцию
         if isinstance(raw, dict):
             raw = str(raw.get("brief_path") or "")
             if not raw:
                 continue
-        brief = _legacy_brief_path(root, str(raw))
-        if brief in by_path:
-            if by_id[by_path[brief]]["source"] == "harvester":
-                continue  # тот же кандидат уже в ledger от harvester (пусть и с другим хешем)
-            brief = str(raw)  # бриф уже привязан к другой legacy-записи - не гадаем, оставляем путь
-        bp = (root / brief)
-        try:
-            content = bp.read_bytes() if bp.is_file() else brief.encode("utf-8")
-        except OSError:
-            content = brief.encode("utf-8")
-        cid = hashlib.sha256(content).hexdigest()
+        entries.append(str(raw))
+    groups: dict[str, list[str]] = {}
+    for entry in entries:
+        groups.setdefault(_legacy_brief_path(root, entry), []).append(entry)
+
+    def add_legacy(entry: str, brief: str) -> None:
+        cid = hashlib.sha256(_read_brief(root, brief)).hexdigest()
         if cid in by_id:
-            continue  # уже есть из harvester - дубль отбрасываем
+            return  # уже есть из harvester (тот же контент) - дубль отбрасываем
         by_id[cid] = {"candidate_id": cid, "brief_path": brief, "source": "legacy-canon-yaml"}
         by_path[brief] = cid
+
+    for brief, group in groups.items():
+        content = _read_brief(root, brief)
+        # владелец брифа - запись, чей канон-путь упомянут в брифе РАНЬШЕ
+        # других (шаблон дублирует целевой путь заголовком в первой строке;
+        # упоминание чужого пути в rationale стоит позже, порядок legacy-списка
+        # роли не играет); бриф никого не называет (рукописный, без шаблона) -
+        # первая по порядку
+        mentioned = []
+        for i, e in enumerate(group):
+            pos = content.find(e.encode("utf-8"))
+            if pos != -1:
+                mentioned.append((pos, i))
+        owner_idx = min(mentioned)[1] if mentioned else 0
+        owner = group[owner_idx]
+        rest = group[:owner_idx] + group[owner_idx + 1:]
+        if brief in by_path:
+            # бриф уже привязан (harvester либо более ранняя legacy-группа -
+            # возможно при совпадении fallback-путей): владелец - тот же
+            # кандидат, дубль не плодим; остальные сохраняют канон-путь
+            pass
+        else:
+            add_legacy(owner, brief)
+        for entry in rest:
+            add_legacy(entry, entry)  # бриф чужой - оставляем канон-путь, не гадаем
     return {"upstream_pending": sorted(by_id.values(), key=lambda r: r["candidate_id"])}
 
 
