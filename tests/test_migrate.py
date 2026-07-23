@@ -122,6 +122,40 @@ class MigrateTest(unittest.TestCase):
         # с --force проходит
         self.assertEqual(self._migrate(force=True), 0)
 
+    def test_pending_legacy_canonical_path_resolves_brief(self) -> None:
+        # Legacy-контракт: в upstream_pending лежит КАНОН-путь кандидата, а бриф -
+        # в toolkit-log/upstream-pending/<slug>.md. brief_path в ledger обязан
+        # указывать на файл брифа: иначе schema-aware sync не найдет файла,
+        # сочтет запись осиротевшей и уничтожит ее (регресс на находку ревью).
+        (self.root / ".claude" / "canon.yaml").write_text(
+            OLD_CANON + "upstream_pending:\n  - skills/foo/SKILL.md\n  - rules/bar.md\n",
+            encoding="utf-8")
+        pend = self.root / "toolkit-log" / "upstream-pending"
+        pend.mkdir(parents=True)
+        (pend / "skills-foo.md").write_text("бриф скилла foo\n", encoding="utf-8")
+        (pend / "bar.md").write_text("бриф правила bar\n", encoding="utf-8")
+        self._migrate(force=True)
+        ledger = json.loads((self.root / ".claude" / "canon.ledger.json").read_text())
+        paths = sorted(r["brief_path"] for r in ledger["upstream_pending"])
+        self.assertEqual(paths, [
+            "toolkit-log/upstream-pending/bar.md",
+            "toolkit-log/upstream-pending/skills-foo.md",
+        ])
+        # candidate_id считается от содержимого НАЙДЕННОГО брифа, не от строки пути
+        import hashlib
+        cids = {r["brief_path"]: r["candidate_id"] for r in ledger["upstream_pending"]}
+        self.assertEqual(
+            cids["toolkit-log/upstream-pending/skills-foo.md"],
+            hashlib.sha256("бриф скилла foo\n".encode()).hexdigest())
+
+    def test_pending_legacy_without_brief_keeps_entry(self) -> None:
+        # Брифа на диске нет - строка переносится как есть (путь не выдумываем)
+        (self.root / ".claude" / "canon.yaml").write_text(
+            OLD_CANON + "upstream_pending:\n  - rules/nowhere.md\n", encoding="utf-8")
+        self._migrate(force=True)
+        ledger = json.loads((self.root / ".claude" / "canon.ledger.json").read_text())
+        self.assertEqual(ledger["upstream_pending"][0]["brief_path"], "rules/nowhere.md")
+
     def test_pending_dedup_with_harvester(self) -> None:
         # старый canon.yaml с upstream_pending + внешний harvester-ledger
         (self.root / ".claude" / "canon.yaml").write_text(
