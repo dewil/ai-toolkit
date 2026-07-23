@@ -148,6 +148,72 @@ class MigrateTest(unittest.TestCase):
             cids["toolkit-log/upstream-pending/skills-foo.md"],
             hashlib.sha256("бриф скилла foo\n".encode()).hexdigest())
 
+    def test_pending_legacy_multidot_and_prefix_preference(self) -> None:
+        # .prompt.md: срезаются ВСЕ суффиксы (иначе слаг не совпадет с брифом);
+        # директорийный слаг предпочитается голому stem (bar.md - чужой бриф)
+        (self.root / ".claude" / "canon.yaml").write_text(
+            OLD_CANON + "upstream_pending:\n"
+            "  - migrations/sync-from-canon.prompt.md\n  - rules/bar.md\n",
+            encoding="utf-8")
+        pend = self.root / "toolkit-log" / "upstream-pending"
+        pend.mkdir(parents=True)
+        (pend / "migrations-sync-from-canon.md").write_text("бриф синка\n", encoding="utf-8")
+        (pend / "bar.md").write_text("чужой бриф\n", encoding="utf-8")
+        (pend / "rules-bar.md").write_text("бриф правила\n", encoding="utf-8")
+        self._migrate(force=True)
+        ledger = json.loads((self.root / ".claude" / "canon.ledger.json").read_text())
+        paths = sorted(r["brief_path"] for r in ledger["upstream_pending"])
+        self.assertEqual(paths, [
+            "toolkit-log/upstream-pending/migrations-sync-from-canon.md",
+            "toolkit-log/upstream-pending/rules-bar.md",
+        ])
+
+    def test_pending_two_entries_one_brief_no_silent_loss(self) -> None:
+        # Две legacy-записи схлопываются на один бриф - вторая НЕ исчезает
+        # молча, а сохраняет исходный канон-путь (не гадаем)
+        (self.root / ".claude" / "canon.yaml").write_text(
+            OLD_CANON + "upstream_pending:\n  - rules/bar.md\n  - agents/bar.md\n",
+            encoding="utf-8")
+        pend = self.root / "toolkit-log" / "upstream-pending"
+        pend.mkdir(parents=True)
+        (pend / "bar.md").write_text("единственный бриф\n", encoding="utf-8")
+        self._migrate(force=True)
+        ledger = json.loads((self.root / ".claude" / "canon.ledger.json").read_text())
+        paths = sorted(r["brief_path"] for r in ledger["upstream_pending"])
+        self.assertEqual(len(paths), 2)
+        self.assertIn("toolkit-log/upstream-pending/bar.md", paths)
+        self.assertIn("agents/bar.md", paths)
+
+    def test_pending_harvester_stale_hash_no_path_duplicate(self) -> None:
+        # harvester-запись со старым хешем + legacy-строка на тот же бриф:
+        # дедуп по brief_path, второго объекта на тот же путь не появляется
+        (self.root / ".claude" / "canon.yaml").write_text(
+            OLD_CANON + "upstream_pending:\n  - rules/foo.md\n", encoding="utf-8")
+        pend = self.root / "toolkit-log" / "upstream-pending"
+        pend.mkdir(parents=True)
+        (pend / "foo.md").write_text("обновленный бриф\n", encoding="utf-8")
+        hp = self.root / "harvester.json"
+        hp.write_text(json.dumps({"upstream_pending": [
+            {"candidate_id": "0" * 64,
+             "brief_path": "toolkit-log/upstream-pending/foo.md"}]}), encoding="utf-8")
+        self._migrate(harvester_ledger=str(hp), force=True)
+        ledger = json.loads((self.root / ".claude" / "canon.ledger.json").read_text())
+        self.assertEqual(len(ledger["upstream_pending"]), 1)
+        self.assertEqual(ledger["upstream_pending"][0]["source"], "harvester")
+
+    def test_pending_legacy_dict_entry_survives(self) -> None:
+        # Рукой занесенный объект вместо строки не роняет миграцию
+        (self.root / ".claude" / "canon.yaml").write_text(
+            OLD_CANON + "upstream_pending:\n"
+            "  - brief_path: toolkit-log/upstream-pending/x.md\n", encoding="utf-8")
+        pend = self.root / "toolkit-log" / "upstream-pending"
+        pend.mkdir(parents=True)
+        (pend / "x.md").write_text("бриф x\n", encoding="utf-8")
+        self._migrate(force=True)
+        ledger = json.loads((self.root / ".claude" / "canon.ledger.json").read_text())
+        self.assertEqual(ledger["upstream_pending"][0]["brief_path"],
+                         "toolkit-log/upstream-pending/x.md")
+
     def test_pending_legacy_without_brief_keeps_entry(self) -> None:
         # Брифа на диске нет - строка переносится как есть (путь не выдумываем)
         (self.root / ".claude" / "canon.yaml").write_text(
