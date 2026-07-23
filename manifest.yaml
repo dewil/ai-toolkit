@@ -28,6 +28,7 @@ universal:
   - rules/docs-maintenance.md           # актуальность документации; README - человеческий манифест, CLAUDE.md - агентский
   - rules/compact-results.md            # сжатый вывод: результат, а не пересказ хода мысли
   - rules/addressing.md                 # обращение к пользователю по нику
+  - rules/agent-as-user-voice.md        # голос пользователя, когда агент пишет от его лица третьим лицам
   - rules/secrets-handling.md           # обращение с секретами: не коммитить ключи, on-device конфиги
   - rules/client-umbrella.md            # клиент-зонтик: корень = папка клиента, одна память, ASCII-токен в имени
   - rules/memory-persistence.md         # проактивно сохранять durable-факты в память сразу, не дожидаясь конца сессии; память != контекст задачи
