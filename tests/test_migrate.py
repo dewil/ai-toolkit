@@ -149,7 +149,7 @@ class MigrateTest(unittest.TestCase):
             hashlib.sha256("бриф скилла foo\n".encode()).hexdigest())
 
     def test_pending_legacy_multidot_and_prefix_preference(self) -> None:
-        # .prompt.md: срезаются ВСЕ суффиксы (иначе слаг не совпадет с брифом);
+        # .prompt.md: срезаются известные суффиксы (.prompt.md целиком);
         # директорийный слаг предпочитается голому stem (bar.md - чужой бриф)
         (self.root / ".claude" / "canon.yaml").write_text(
             OLD_CANON + "upstream_pending:\n"
@@ -168,6 +168,20 @@ class MigrateTest(unittest.TestCase):
             "toolkit-log/upstream-pending/rules-bar.md",
         ])
 
+    def test_pending_dotted_name_keeps_inner_dots(self) -> None:
+        # Точка внутри имени - не разделитель суффиксов: rules/python3.12-policy.md
+        # ищет слаг python3.12-policy, а не python3 (r3: split(".")[0] резал лишнее)
+        (self.root / ".claude" / "canon.yaml").write_text(
+            OLD_CANON + "upstream_pending:\n  - rules/python3.12-policy.md\n",
+            encoding="utf-8")
+        pend = self.root / "toolkit-log" / "upstream-pending"
+        pend.mkdir(parents=True)
+        (pend / "rules-python3.12-policy.md").write_text("бриф политики\n", encoding="utf-8")
+        self._migrate(force=True)
+        ledger = json.loads((self.root / ".claude" / "canon.ledger.json").read_text())
+        self.assertEqual(ledger["upstream_pending"][0]["brief_path"],
+                         "toolkit-log/upstream-pending/rules-python3.12-policy.md")
+
     def test_pending_two_entries_one_brief_no_silent_loss(self) -> None:
         # Две legacy-записи схлопываются на один бриф - вторая НЕ исчезает
         # молча, а сохраняет исходный канон-путь (не гадаем)
@@ -183,6 +197,68 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(len(paths), 2)
         self.assertIn("toolkit-log/upstream-pending/bar.md", paths)
         self.assertIn("agents/bar.md", paths)
+
+    def test_pending_harvester_bound_brief_second_legacy_kept(self) -> None:
+        # harvester-путь закрывает ровно одну legacy-запись: вторая, разрешившаяся
+        # в тот же бриф (слаг-коллизия), не глотается, а сохраняет канон-путь (r3 HIGH)
+        (self.root / ".claude" / "canon.yaml").write_text(
+            OLD_CANON + "upstream_pending:\n  - rules/bar.md\n  - agents/bar.md\n",
+            encoding="utf-8")
+        pend = self.root / "toolkit-log" / "upstream-pending"
+        pend.mkdir(parents=True)
+        (pend / "bar.md").write_text("единственный бриф\n", encoding="utf-8")
+        hp = self.root / "harvester.json"
+        hp.write_text(json.dumps({"upstream_pending": [
+            {"candidate_id": "0" * 64,
+             "brief_path": "toolkit-log/upstream-pending/bar.md"}]}), encoding="utf-8")
+        self._migrate(harvester_ledger=str(hp), force=True)
+        ledger = json.loads((self.root / ".claude" / "canon.ledger.json").read_text())
+        paths = sorted(r["brief_path"] for r in ledger["upstream_pending"])
+        self.assertEqual(len(paths), 2)
+        self.assertIn("toolkit-log/upstream-pending/bar.md", paths)  # harvester
+        self.assertIn("agents/bar.md", paths)  # вторая legacy - не потеряна
+
+    def test_pending_harvester_bound_brief_attribution_by_content(self) -> None:
+        # Бриф называет свой целевой путь в тексте: harvester-дедуп поглощает
+        # именно НАЗВАННУЮ запись, а не первую по порядку списка (r3-fixes HIGH)
+        (self.root / ".claude" / "canon.yaml").write_text(
+            OLD_CANON + "upstream_pending:\n  - rules/bar.md\n  - agents/bar.md\n",
+            encoding="utf-8")
+        pend = self.root / "toolkit-log" / "upstream-pending"
+        pend.mkdir(parents=True)
+        (pend / "bar.md").write_text(
+            "# Upstream-кандидат: agents/bar.md\nбриф про агента\n", encoding="utf-8")
+        hp = self.root / "harvester.json"
+        hp.write_text(json.dumps({"upstream_pending": [
+            {"candidate_id": "0" * 64,
+             "brief_path": "toolkit-log/upstream-pending/bar.md"}]}), encoding="utf-8")
+        self._migrate(harvester_ledger=str(hp), force=True)
+        ledger = json.loads((self.root / ".claude" / "canon.ledger.json").read_text())
+        paths = sorted(r["brief_path"] for r in ledger["upstream_pending"])
+        self.assertEqual(len(paths), 2)
+        self.assertIn("toolkit-log/upstream-pending/bar.md", paths)  # harvester = agents/bar.md
+        self.assertIn("rules/bar.md", paths)  # неназванная запись выжила
+
+    def test_pending_attribution_by_mention_position_not_list_order(self) -> None:
+        # Чужой путь, упомянутый в rationale, не перехватывает владение: владелец -
+        # путь из заголовка (упомянут раньше), даже если в legacy-списке он второй
+        (self.root / ".claude" / "canon.yaml").write_text(
+            OLD_CANON + "upstream_pending:\n  - rules/bar.md\n  - agents/bar.md\n",
+            encoding="utf-8")
+        pend = self.root / "toolkit-log" / "upstream-pending"
+        pend.mkdir(parents=True)
+        (pend / "bar.md").write_text(
+            "# Upstream-кандидат: agents/bar.md\n\nrationale: связан с rules/bar.md\n",
+            encoding="utf-8")
+        hp = self.root / "harvester.json"
+        hp.write_text(json.dumps({"upstream_pending": [
+            {"candidate_id": "0" * 64,
+             "brief_path": "toolkit-log/upstream-pending/bar.md"}]}), encoding="utf-8")
+        self._migrate(harvester_ledger=str(hp), force=True)
+        ledger = json.loads((self.root / ".claude" / "canon.ledger.json").read_text())
+        paths = sorted(r["brief_path"] for r in ledger["upstream_pending"])
+        self.assertEqual(len(paths), 2)
+        self.assertIn("rules/bar.md", paths)  # не поглощен упоминанием в rationale
 
     def test_pending_harvester_stale_hash_no_path_duplicate(self) -> None:
         # harvester-запись со старым хешем + legacy-строка на тот же бриф:
