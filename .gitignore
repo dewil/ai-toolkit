@@ -1,5 +1,4 @@
 .claude/settings.local.json
-.claude/agent-memory/
 .DS_Store
 *.tmp
 __pycache__/
