@@ -51,6 +51,7 @@ coding:
   - rules/tests-coverage.md             # покрытие тестами, goal-driven проверка
   - rules/error-exposure.md             # не глотать ошибки - показывать их наверх
   - agents/debugger.md                  # воспроизведение и локализация багов
+  - agents/test-writer.md               # тесты с чистого листа по спеке, без чтения реализации (SDD)
   - agents/implementer.md               # реализация по готовому плану
   - agents/code-reviewer.md             # ревью изменений
   - skills/minimal-code/SKILL.md        # минимальный код: лестница ступеней сложности
