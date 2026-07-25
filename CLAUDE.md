@@ -95,4 +95,5 @@
 @./rules/addressing.md
 @./rules/agent-as-user-voice.md
 @./rules/secrets-handling.md
+@./rules/untrusted-content.md
 @./rules/memory-persistence.md
