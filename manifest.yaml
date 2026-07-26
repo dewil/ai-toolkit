@@ -41,11 +41,13 @@ universal:
   - agents/summarizer.md                # сжатие длинного источника в структурированную заметку
   - skills/codex-audit/SKILL.md         # аудит кода/текста вторым мнением через codex exec
   - skills/web-research/SKILL.md        # веб-исследование с проверкой источников
-  - skills/md-pdf/SKILL.md              # рендер markdown в PDF
+  - skills/md-pdf/SKILL.md              # рендер markdown в PDF (для чтения и рассылки)
+  - skills/md-docx/SKILL.md             # сборка .docx из markdown (когда документ пойдет на правки)
   - skills/harvest-canon/SKILL.md       # оформить переиспользуемый прием проекта в upstream-кандидат канона
   - skills/session-cost/SKILL.md        # подсчет токенов сессии Claude Code из транскрипта (смета, отчет)
   - commands/canon.md                   # /canon = синхронизация проекта с каноном
   - scripts/md-pdf.py                   # движок рендера markdown в PDF (для скилла md-pdf)
+  - scripts/md-docx.py                  # сборка .docx из markdown, stdlib-only; разбор md берет из md-pdf.py
   - scripts/session-cost.py             # движок подсчета токенов сессии (для скилла session-cost)
 
 coding:
