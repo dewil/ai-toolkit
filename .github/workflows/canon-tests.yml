@@ -36,7 +36,7 @@ jobs:
       - name: run tests
         run: |
           set -e
-          for t in build_lock classify wal integration migrate fs_mapping md_pdf telegram_config asana_comments; do
+          for t in build_lock classify wal integration migrate fs_mapping md_pdf md_docx telegram_config asana_comments; do
             echo "::group::test_$t"
             python3 tests/test_$t.py
             echo "::endgroup::"
