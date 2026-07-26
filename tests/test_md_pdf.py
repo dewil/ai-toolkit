@@ -55,11 +55,28 @@ class Tables(unittest.TestCase):
         self.assertNotIn("<table>", h)
         self.assertIn("<p>|x| denotes absolute value.</p>", h)
 
-    def test_ragged_rows_normalized_to_header_width(self):
-        h = body("| A | B |\n|---|---|\n| x |\n| y | z | extra |\n")
+    def test_short_row_padded_to_header_width(self):
+        h = body("| A | B |\n|---|---|\n| x |\n")
         self.assertIn("<tr><td>x</td><td></td></tr>", h)
-        self.assertIn("<tr><td>y</td><td>z</td></tr>", h)
-        self.assertNotIn("extra", h)
+
+    def test_wide_row_keeps_text_in_last_column(self):
+        """Лишние ячейки склеиваются в последнюю колонку, а не отбрасываются.
+
+        Регресс на находку adversarial-ревью (codex, 2026-07-26): строка шире
+        шапки молча теряла хвост, и текст исчезал из документа, ушедшего
+        заказчику. Склейка уродливее, чем ровная таблица, но заметна - в
+        отличие от пропажи.
+        """
+        h = body("| A | B |\n|---|---|\n| y | z | штраф 10% |\n")
+        self.assertIn("<tr><td>y</td><td>z штраф 10%</td></tr>", h)
+        self.assertIn("штраф 10%", h)
+
+    def test_wide_row_does_not_activate_markup_across_cells(self):
+        """Склейка лишних ячеек не должна собирать разметку, разорванную
+        границей ячеек: иначе в документе появится ссылка, которой не было."""
+        h = body("| A | B |\n|---|---|\n| x | [НЕ ССЫЛКА | ](https://evil.example) |\n")
+        self.assertIn("[НЕ ССЫЛКА ](", h)
+        self.assertNotIn('<a href="https://evil.example">НЕ ССЫЛКА', h)
 
     def test_escaped_pipe_in_cell(self):
         h = body("| Expr |\n|---|\n| a \\| b |\n")
@@ -164,6 +181,80 @@ class ModeInteraction(unittest.TestCase):
         self.assertIn("</blockquote>", h)
         self.assertIn("<p>абзац</p>", h)
 
+
+class InlineCode(unittest.TestCase):
+    """Регресс на находку adversarial-ревью (codex, 2026-07-26): содержимое
+    `code` повторно разбиралось как markdown, и "`[x](y)`" теряло скобки с url."""
+
+    def test_link_inside_code_stays_literal(self):
+        h = body("`[literal](https://wrong.example)`\n")
+        self.assertIn("<code>[literal](https://wrong.example)</code>", h)
+        self.assertNotIn("<a href", h)
+
+    def test_bold_inside_code_stays_literal(self):
+        self.assertIn("<code>a **b** c</code>", body("`a **b** c`\n"))
+
+    def test_bare_url_inside_code_not_linked(self):
+        h = body("`см. https://e.com/x`\n")
+        self.assertIn("<code>см. https://e.com/x</code>", h)
+        self.assertNotIn("<a href", h)
+
+    def test_code_glued_to_url_stays_outside_href(self):
+        """Сентинел кода, приклеившийся к URL, не должен попасть внутрь href.
+        Регресс на дефект, внесенный самим stash-механизмом (раунд 2)."""
+        h = body("https://e.test/`path`\n")
+        self.assertIn('<a href="https://e.test/">', h)
+        self.assertIn("<code>path</code>", h)
+        self.assertNotIn("<code>", h[: h.index("</a>")])
+
+    def test_code_in_explicit_link_url_stays_out_of_href(self):
+        """Сентинел кода не должен уезжать в href явной ссылки: там он
+        разворачивался в <code> внутри атрибута, и ссылка вела в никуда
+        (блокер раунда 3). Ссылка не собирается - текст остается буквальным."""
+        h = body("[x](https://e.test/`path`)\n")
+        self.assertNotIn("<code>", h[h.index("<a href") : h.index(">", h.index("<a href"))])
+        self.assertNotIn('href="https://e.test/<code>', h)
+        self.assertIn("<code>path</code>", h)
+
+    def test_code_in_link_text_is_kept(self):
+        """Обратная сторона: в ТЕКСТЕ ссылки код законен и должен работать."""
+        self.assertIn('<a href="https://e.com"><code>код</code></a>', body("[`код`](https://e.com)\n"))
+
+    def test_code_never_lands_in_img_attributes(self):
+        """alt и src - атрибуты, тега в них быть не должно."""
+        for md in ("![`alt`](pic.png)\n", "![alt](pic`x`.png)\n"):
+            h = body(md)
+            self.assertNotIn('alt="<code>', h)
+            self.assertNotIn('src="pic<code>', h)
+
+    def test_plain_image_still_works(self):
+        self.assertIn('<img src="pic.png" alt="схема">', body("![схема](pic.png)\n"))
+
+    def test_url_inside_link_label_keeps_single_target(self):
+        """Вся метка явной ссылки ведет на один заданный адрес: autolink не
+        должен создавать вложенный <a> внутри уже собранной ссылки."""
+        h = body("[документ https://old.example конец](https://new.example)\n")
+        self.assertEqual(h.count("<a href"), 1)
+        self.assertIn('<a href="https://new.example">документ https://old.example конец</a>', h)
+
+    def test_code_and_link_side_by_side(self):
+        h = body("`код` и [ссылка](https://e.com)\n")
+        self.assertIn("<code>код</code>", h)
+        self.assertIn('<a href="https://e.com">ссылка</a>', h)
+
+    def test_sentinel_injection_from_source(self):
+        """Сентинелы подмены, пришедшие из исходника, не должны ни подставлять
+        чужой фрагмент, ни ронять скрипт (IndexError). Регресс на регрессию,
+        внесенную фиксом самого stash-механизма."""
+        self.assertEqual(body("\x021\x03 без кода\n"), "<p>1 без кода</p>")
+        h = body("текст \x020\x03 и `код`\n")
+        self.assertEqual(h.count("<code>"), 1)
+        self.assertIn("<code>код</code>", h)
+
+    def test_sentinel_chars_do_not_leak(self):
+        h = body("`код` текст\n")
+        self.assertNotIn("\x02", h)
+        self.assertNotIn("\x03", h)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
