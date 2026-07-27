@@ -13,10 +13,13 @@ telegram-send.py (скрипты самодостаточны). Поэтому �
 """
 from __future__ import annotations
 
+import ast
+import asyncio
 import contextlib
 import importlib.util
 import io
 import json
+import sqlite3
 import sys
 import tempfile
 import types
@@ -293,6 +296,290 @@ class AtomicWrite(unittest.TestCase):
                 SNAPSHOT.atomic_write_json(path, {"bad": object()})
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"old": True})
             self.assertEqual([f.name for f in Path(tmp).iterdir()], ["result.json"])
+
+
+LOCKED = "database is locked"
+
+
+class FakeClient:
+    """Клиент, у которого connect/start падают первые `fail` раз."""
+
+    def __init__(
+        self,
+        fail: int,
+        error: BaseException | None = None,
+        disconnect_error: BaseException | None = None,
+    ):
+        self.fail = fail
+        self.error = error or sqlite3.OperationalError(LOCKED)
+        # cleanup у telethon сам пишет в сессию, то есть на живом локе падает
+        self.disconnect_error = disconnect_error
+        self.calls: list[str] = []
+
+    async def _attempt(self, kind: str):
+        self.calls.append(kind)
+        if self.fail > 0:
+            self.fail -= 1
+            raise self.error
+        return f"{kind}-ok"
+
+    async def connect(self):
+        return await self._attempt("connect")
+
+    async def start(self):
+        return await self._attempt("start")
+
+    async def disconnect(self):
+        self.calls.append("disconnect")
+        if self.disconnect_error is not None:
+            raise self.disconnect_error
+
+
+@contextlib.contextmanager
+def capture_sleeps():
+    """Подменяет asyncio.sleep, чтобы тест не ждал и видел длину паузы."""
+    calls: list[float] = []
+    original = asyncio.sleep
+
+    async def fake(seconds):
+        calls.append(seconds)
+
+    asyncio.sleep = fake
+    try:
+        yield calls
+    finally:
+        asyncio.sleep = original
+
+
+class SessionRetry(unittest.TestCase):
+    """connect_with_retry: общую .session держит другой процесс - ждем, не чиним.
+
+    Гоняется по обеим копиям хелпера (snapshot и send) - см. шапку файла.
+    """
+
+    def test_retries_until_session_free(self):
+        for label, mod in BOTH:
+            with self.subTest(label):
+                client = FakeClient(fail=2)
+                with capture_sleeps() as sleeps:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        result = asyncio.run(mod.connect_with_retry(client, delay=7))
+                self.assertEqual(result, "connect-ok")
+                self.assertEqual(client.calls.count("connect"), 3)
+                self.assertEqual(sleeps, [7, 7], "между попытками должна быть пауза")
+
+    def test_disconnects_between_attempts(self):
+        """Соединение могло подняться до падения сессии - иначе утечет сокет."""
+        for label, mod in BOTH:
+            with self.subTest(label):
+                client = FakeClient(fail=1)
+                with capture_sleeps():
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        asyncio.run(mod.connect_with_retry(client, delay=0))
+                self.assertEqual(client.calls, ["connect", "disconnect", "connect"])
+
+    def test_exhausted_attempts_raise_original_error(self):
+        for label, mod in BOTH:
+            with self.subTest(label):
+                client = FakeClient(fail=99)
+                with capture_sleeps() as sleeps:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(sqlite3.OperationalError) as caught:
+                            asyncio.run(mod.connect_with_retry(client, attempts=3, delay=0))
+                self.assertIn(LOCKED, str(caught.exception))
+                self.assertEqual(client.calls.count("connect"), 3)
+                self.assertEqual(len(sleeps), 2, "после последней попытки не ждем")
+
+    def test_other_sqlite_error_is_not_retried(self):
+        """Ретрай только на блокировку: "no such table" повтором не лечится."""
+        for label, mod in BOTH:
+            with self.subTest(label):
+                client = FakeClient(
+                    fail=99, error=sqlite3.OperationalError("no such table: sessions")
+                )
+                with capture_sleeps() as sleeps:
+                    with self.assertRaises(sqlite3.OperationalError):
+                        asyncio.run(mod.connect_with_retry(client, delay=0))
+                self.assertEqual(client.calls, ["connect"])
+                self.assertEqual(sleeps, [])
+
+    def test_cleanup_failure_does_not_abort_retry(self):
+        """Блокер: disconnect на живом локе падает тем же locked (telethon пишет
+        состояние в ту же sqlite) - и раньше обрывал ретрай на первой попытке."""
+        for label, mod in BOTH:
+            with self.subTest(label):
+                client = FakeClient(
+                    fail=2, disconnect_error=sqlite3.OperationalError(LOCKED)
+                )
+                with capture_sleeps() as sleeps:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        result = asyncio.run(mod.connect_with_retry(client, delay=0))
+                self.assertEqual(result, "connect-ok")
+                self.assertEqual(client.calls.count("connect"), 3)
+                self.assertEqual(len(sleeps), 2)
+
+    def test_cleanup_failure_does_not_mask_original_error(self):
+        """Наверх идет locked, а не то, чем упал cleanup."""
+        for label, mod in BOTH:
+            with self.subTest(label):
+                client = FakeClient(fail=99, disconnect_error=RuntimeError("cleanup"))
+                with capture_sleeps():
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(sqlite3.OperationalError) as caught:
+                            asyncio.run(mod.connect_with_retry(client, attempts=2, delay=0))
+                self.assertIn(LOCKED, str(caught.exception))
+
+    def test_interactive_uses_start(self):
+        for label, mod in BOTH:
+            with self.subTest(label):
+                client = FakeClient(fail=0)
+                result = asyncio.run(mod.connect_with_retry(client, interactive=True))
+                self.assertEqual(result, "start-ok")
+                self.assertEqual(client.calls, ["start"])
+
+    def test_zero_attempts_still_connects_once(self):
+        """Не отдать молча None вместо подключения: одна попытка - минимум."""
+        for label, mod in BOTH:
+            with self.subTest(label):
+                client = FakeClient(fail=0)
+                result = asyncio.run(mod.connect_with_retry(client, attempts=0))
+                self.assertEqual(result, "connect-ok")
+                self.assertEqual(client.calls, ["connect"])
+
+
+class DisconnectQuietly(unittest.TestCase):
+    """Cleanup не должен рвать вызывающего своей ошибкой, но и молчать не должен."""
+
+    def test_swallows_error_and_reports_it(self):
+        for label, mod in BOTH:
+            with self.subTest(label):
+                client = FakeClient(
+                    fail=0, disconnect_error=sqlite3.OperationalError(LOCKED)
+                )
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    asyncio.run(mod.disconnect_quietly(client))
+                self.assertEqual(client.calls, ["disconnect"])
+                self.assertIn(LOCKED, err.getvalue())
+
+    def test_silent_on_success(self):
+        for label, mod in BOTH:
+            with self.subTest(label):
+                client = FakeClient(fail=0)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    asyncio.run(mod.disconnect_quietly(client))
+                self.assertEqual(err.getvalue(), "")
+
+
+class RetryScopedToConnect(unittest.TestCase):
+    """Ретрай стоит строго на подключении: повтор отправки дал бы дубль.
+
+    Сторожа разбирают AST, а не текст: проверка по подстрокам обходилась лишними
+    скобками, другим отступом, переименованной переменной и переносом строки.
+    """
+
+    CLIENT_SCRIPTS = (
+        "telegram-snapshot.py",
+        "telegram-pull-one.py",
+        "telegram-send.py",
+        "telegram-send-one.py",
+    )
+    SEND_SCRIPTS = ("telegram-send.py", "telegram-send-one.py")
+    CONNECT_METHODS = {"connect", "start"}
+    # неидемпотентные вызовы: повтор после успеха дает получателю дубль
+    SEND_METHODS = {"send_message", "send_file"}
+
+    @staticmethod
+    def _tree(name: str) -> ast.Module:
+        return ast.parse((SCRIPTS / name).read_text(encoding="utf-8"), filename=name)
+
+    @staticmethod
+    def _method_calls(node: ast.AST, methods: set[str]) -> list[ast.Call]:
+        return [
+            n
+            for n in ast.walk(node)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in methods
+        ]
+
+    @staticmethod
+    def _functions(tree: ast.Module):
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                yield node
+
+    @classmethod
+    def _helper_calls(cls, tree: ast.Module, helper: str) -> list[ast.Call]:
+        """Точки ПРИМЕНЕНИЯ хелпера: локальные и через модуль (tgs.<helper>).
+
+        Определение хелпера сюда не попадает - это FunctionDef, а не Call.
+        """
+        return cls._method_calls(tree, {helper}) + [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == helper
+        ]
+
+    def _assert_routed_through(self, helper: str, methods: set[str]) -> None:
+        for name in self.CLIENT_SCRIPTS:
+            tree = self._tree(name)
+            for func in self._functions(tree):
+                for call in self._method_calls(func, methods):
+                    self.assertEqual(
+                        func.name,
+                        helper,
+                        f"{name}:{call.lineno} - {ast.unparse(call)} мимо {helper}",
+                    )
+            # без этой сверки тест зеленел бы и на скрипте, где вызовы исчезли:
+            # запрет "только внутри хелпера" сам по себе выполняется и пустым файлом
+            self.assertGreater(
+                len(self._helper_calls(tree, helper)),
+                0,
+                f"{name}: ни одного вызова {helper}",
+            )
+
+    def test_connect_only_inside_helper(self):
+        """Новая точка подключения мимо хелпера снова начнет падать на локе."""
+        self._assert_routed_through("connect_with_retry", self.CONNECT_METHODS)
+
+    def test_disconnect_only_inside_quiet_helper(self):
+        """Блокер: cleanup на живом локе падает тем же locked - в finally он
+        подменял исходное исключение, а после отправки давал ненулевой exit."""
+        self._assert_routed_through("disconnect_quietly", {"disconnect"})
+
+    def test_helper_wraps_nothing_but_connect(self):
+        """Отправка не должна попасть внутрь вызова connect_with_retry."""
+        for name in self.CLIENT_SCRIPTS:
+            tree = self._tree(name)
+            for call in ast.walk(tree):
+                if not isinstance(call, ast.Call):
+                    continue
+                func = call.func
+                target = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+                if target != "connect_with_retry":
+                    continue
+                for arg in list(call.args) + [kw.value for kw in call.keywords]:
+                    inner = self._method_calls(arg, self.SEND_METHODS)
+                    self.assertEqual(
+                        inner, [], f"{name}:{call.lineno} - отправка под ретраем"
+                    )
+
+    def test_send_calls_are_outside_retry(self):
+        """Сами вызовы отправки существуют и стоят вне хелпера."""
+        for name in self.SEND_SCRIPTS:
+            tree = self._tree(name)
+            found = 0
+            for func in self._functions(tree):
+                for call in self._method_calls(func, self.SEND_METHODS):
+                    found += 1
+                    self.assertNotEqual(
+                        func.name, "connect_with_retry", f"{name}:{call.lineno}"
+                    )
+            self.assertGreater(found, 0, f"{name}: вызовов отправки не найдено")
 
 
 if __name__ == "__main__":
