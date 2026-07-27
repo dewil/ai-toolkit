@@ -27,7 +27,7 @@ python3 scripts/md-pdf.py note.md --css custom.css --title "Отчет"
 python3 scripts/md-pdf.py note.md --author "Имя"     # /Author в метаданные PDF
 ```
 
-Chrome ищется по стандартному пути macOS; иной путь - через переменную окружения `MD_PDF_CHROME`.
+Chrome ищется сам: типовые пути macOS и Linux (включая Chromium и snap), затем PATH. Нестандартная установка - `MD_PDF_CHROME`: он имеет приоритет над поиском и принимает как полный путь, так и имя команды из PATH.
 
 ## Грабли (проверено практикой)
 
