@@ -43,9 +43,9 @@ async def amain(args) -> int:
     session_path = str(tgs.AUTH_DIR / auth["session_name"])
     client = tgs.TelegramClient(session_path, auth["api_id"], auth["api_hash"], **tgs.client_kwargs(auth))
 
-    await client.connect()
+    await tgs.connect_with_retry(client)
     if not await client.is_user_authorized():
-        await client.disconnect()
+        await tgs.disconnect_quietly(client)
         sys.stderr.write(
             f"Сессия не авторизована ({session_path}.session).\n"
             f"Настрой авторизацию - см. скилл telegram-snapshot.\n"
@@ -97,7 +97,7 @@ async def amain(args) -> int:
         print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
-        await client.disconnect()
+        await tgs.disconnect_quietly(client)
 
 
 def main() -> int:

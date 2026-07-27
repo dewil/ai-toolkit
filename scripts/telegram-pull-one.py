@@ -57,7 +57,7 @@ async def amain(
     # disconnect в finally: раньше он стоял на двух путях выхода, и любое
     # исключение между ними (резолв, выкачка) оставляло соединение висеть
     try:
-        await client.start()
+        await tgs.connect_with_retry(client, interactive=True)
 
         # Карта диалогов - авторитетный источник entity (см. resolve_entity в
         # telegram-snapshot.py: get_entity на голый int бывает резолвит чужой чат).
@@ -82,7 +82,7 @@ async def amain(
             client, tgs.PROJECT_ROOT, out_path, chat_id, dialog_entities
         )
     finally:
-        await client.disconnect()
+        await tgs.disconnect_quietly(client)
 
     # Шапку личного чата TG Desktop именует контактом, а не путем-лейблом.
     # process_chat при bootstrap кладет name = title|label; для User title нет,

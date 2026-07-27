@@ -42,6 +42,7 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
@@ -78,6 +79,11 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 AUTH_DIR = Path.home() / ".config" / "telegram-snapshot"
 AUTH_PATH = AUTH_DIR / "auth.json"
+
+# Повтор подключения, когда общую .session держит другой процесс (см.
+# connect_with_retry). Чужой снапшот обычно отпускает сессию за 30-60 секунд.
+LOCK_ATTEMPTS = 5
+LOCK_DELAY = 15
 
 # Вложения качаются в локальный НЕсинкаемый кэш (не в vault/проект - там бывают
 # секреты клиентов, а папки проекта синкаются в облако). result.json остается
@@ -201,6 +207,58 @@ def client_kwargs(auth: dict) -> dict:
         sys.stderr.write(f"Некорректный proxy в {AUTH_PATH}: {proxy!r} (жду scheme://host:port)\n")
         sys.exit(2)
     return {"proxy": (u.scheme, u.hostname, u.port)}
+
+
+async def disconnect_quietly(client) -> None:
+    """Best-effort закрытие клиента: своей ошибкой ничего не рвет.
+
+    telethon при отключении пишет состояние в ту же sqlite-сессию
+    (_save_states_and_entities), поэтому пока сессию держит другой процесс,
+    disconnect падает тем же "database is locked". В cleanup это опаснее самой
+    блокировки: в finally оно подменяет исходное исключение своим, а после
+    успешной отправки превращает доставленное сообщение в ненулевой код возврата.
+    """
+    try:
+        await client.disconnect()
+    except Exception as exc:
+        sys.stderr.write(f"disconnect не отработал ({type(exc).__name__}: {exc})\n")
+
+
+async def connect_with_retry(
+    client, *, interactive: bool = False, attempts: int = LOCK_ATTEMPTS, delay: float = LOCK_DELAY
+):
+    """Подключение с повтором, если общую .session держит другой процесс.
+
+    Авторизация одна на устройство, а .session - это sqlite: пока с ней работает
+    скрипт другого проекта, наш connect()/start() падает изнутри telethon с
+    sqlite3.OperationalError: database is locked. Чужой процесс дорабатывает сам
+    и отпускает сессию, поэтому лечится ожиданием, а не починкой (убивать процесс
+    или удалять .session нельзя - см. скилл telegram-snapshot).
+
+    interactive=True - путь первого логина (client.start() спросит номер и код);
+    иначе client.connect() без интерактива. Повтор в этом режиме переигрывает
+    весь start(), включая логин, - на неавторизованной сессии ввод спросят снова.
+
+    Оборачивать ТОЛЬКО подключение. Отправку сообщения оборачивать нельзя:
+    повтор после успешного send_message даст получателю дубль.
+    """
+    attempts = max(1, attempts)
+    for attempt in range(1, attempts + 1):
+        try:
+            return await (client.start() if interactive else client.connect())
+        except sqlite3.OperationalError as e:
+            if "database is locked" not in str(e).lower() or attempt == attempts:
+                raise
+            # Соединение могло уже подняться (сессия падает при записи после
+            # хендшейка) - иначе следующая попытка оставит сокет висеть.
+            # Закрываем через disconnect_quietly: на живом локе сам disconnect
+            # падает тем же locked и без глушения оборвал бы ретрай
+            await disconnect_quietly(client)
+            sys.stderr.write(
+                f".session занята другим процессом (попытка {attempt}/{attempts}), "
+                f"повтор через {delay:g}с\n"
+            )
+            await asyncio.sleep(delay)
 
 
 def chat_entry(value) -> dict:
@@ -875,7 +933,7 @@ async def amain() -> int:
             # start() внутри try: он же и подключает, а упасть может уже после
             # (например, прерванный интерактивный логин нового аккаунта) -
             # в цикле по аккаунтам это утекло бы соединением
-            await client.start()
+            await connect_with_retry(client, interactive=True)
             if len(by_account) > 1:
                 print(f"\n[аккаунт {account}]")
 
@@ -901,7 +959,7 @@ async def amain() -> int:
                 except Exception as exc:
                     sys.stderr.write(f"!! {label} ({chat_id}): {exc}\n")
         finally:
-            await client.disconnect()
+            await disconnect_quietly(client)
 
     print(f"\nOK: +{total} сообщений всего")
     return 0

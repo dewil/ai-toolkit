@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -59,6 +60,11 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 AUTH_DIR = Path.home() / ".config" / "telegram-snapshot"
 AUTH_PATH = AUTH_DIR / "auth.json"
+
+# Повтор подключения, когда общую .session держит другой процесс (см.
+# connect_with_retry). Копия констант из telegram-snapshot.py.
+LOCK_ATTEMPTS = 5
+LOCK_DELAY = 15
 PROJECT_CONFIG_PATH = PROJECT_ROOT / ".telegram-snapshot.json"
 
 
@@ -162,6 +168,56 @@ def client_kwargs(auth: dict) -> dict:
         sys.stderr.write(f"Некорректный proxy в {AUTH_PATH}: {proxy!r} (жду scheme://host:port)\n")
         sys.exit(2)
     return {"proxy": (u.scheme, u.hostname, u.port)}
+
+
+async def disconnect_quietly(client) -> None:
+    """Best-effort закрытие клиента: своей ошибкой ничего не рвет.
+
+    telethon при отключении пишет состояние в ту же sqlite-сессию
+    (_save_states_and_entities), поэтому пока сессию держит другой процесс,
+    disconnect падает тем же "database is locked". В cleanup это опаснее самой
+    блокировки: в finally оно подменяет исходное исключение своим, а после
+    успешной отправки превращает доставленное сообщение в ненулевой код возврата.
+    Копия хелпера из telegram-snapshot.py: скрипт намеренно самодостаточный.
+    """
+    try:
+        await client.disconnect()
+    except Exception as exc:
+        sys.stderr.write(f"disconnect не отработал ({type(exc).__name__}: {exc})\n")
+
+
+async def connect_with_retry(
+    client, *, interactive: bool = False, attempts: int = LOCK_ATTEMPTS, delay: float = LOCK_DELAY
+):
+    """Подключение с повтором, если общую .session держит другой процесс.
+
+    Авторизация одна на устройство, а .session - это sqlite: пока с ней работает
+    скрипт другого проекта, наш connect() падает изнутри telethon с
+    sqlite3.OperationalError: database is locked. Чужой процесс дорабатывает сам
+    и отпускает сессию, поэтому лечится ожиданием, а не починкой (убивать процесс
+    или удалять .session нельзя - см. скилл telegram-snapshot).
+
+    Оборачивать ТОЛЬКО подключение. Отправку сообщения оборачивать нельзя:
+    повтор после успешного send_message даст получателю дубль.
+    Копия хелпера из telegram-snapshot.py: скрипт намеренно самодостаточный.
+    """
+    attempts = max(1, attempts)
+    for attempt in range(1, attempts + 1):
+        try:
+            return await (client.start() if interactive else client.connect())
+        except sqlite3.OperationalError as e:
+            if "database is locked" not in str(e).lower() or attempt == attempts:
+                raise
+            # Соединение могло уже подняться (сессия падает при записи после
+            # хендшейка) - иначе следующая попытка оставит сокет висеть.
+            # Закрываем через disconnect_quietly: на живом локе сам disconnect
+            # падает тем же locked и без глушения оборвал бы ретрай
+            await disconnect_quietly(client)
+            sys.stderr.write(
+                f".session занята другим процессом (попытка {attempt}/{attempts}), "
+                f"повтор через {delay:g}с\n"
+            )
+            await asyncio.sleep(delay)
 
 
 def chat_entry(value) -> dict:
@@ -307,12 +363,13 @@ async def amain(args) -> int:
     session_path = str(AUTH_DIR / auth["session_name"])
     client = TelegramClient(session_path, auth["api_id"], auth["api_hash"], **client_kwargs(auth))
 
-    # Не client.start(): на неготовой/отозванной сессии он уходит в
-    # интерактивный логин (ввод телефона/кода) и в автоматизации зависает.
+    # Без interactive=True (то есть connect(), не start()): на неготовой или
+    # отозванной сессии start() уходит в интерактивный логин (ввод телефона и
+    # кода) и в автоматизации зависает.
     # Авторизация - предусловие, настраивается скиллом telegram-snapshot.
-    await client.connect()
+    await connect_with_retry(client)
     if not await client.is_user_authorized():
-        await client.disconnect()
+        await disconnect_quietly(client)
         sys.stderr.write(
             f"Сессия не авторизована ({session_path}.session).\n"
             f"Настрой авторизацию - см. скилл telegram-snapshot.\n"
@@ -377,7 +434,7 @@ async def amain(args) -> int:
         print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
-        await client.disconnect()
+        await disconnect_quietly(client)
 
 
 def main() -> int:
