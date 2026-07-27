@@ -49,9 +49,11 @@ JSON-отчет (word_timings / chapters / метаданные) по умолч
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -295,6 +297,53 @@ def download_md(auth: dict, mid: str) -> str:
     return body.decode("utf-8", "replace")
 
 
+TRANSCRIPT_MARKER = "**Транскрипт:**"
+# реплика транскрипта: "0:00:00 **Имя:**" / "12:34 Имя:"
+TIMECODED_LINE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?\s", re.M)
+
+
+def strip_service_blocks(md: str) -> tuple[str, bool]:
+    """Оставить заголовок и транскрипт, отрезав служебную шапку mymeet.
+
+    Сервис кладет перед транскриптом свои выводы (супер краткое содержание,
+    саммари по темам, задачи). Они сделаны на контексте одной встречи и без
+    контекста проекта, поэтому регулярно ошибочны - смысл и задачи мы выводим
+    сами (см. rules/meeting-transcripts.md). Хранить их незачем: они попадают
+    в чтение и тянут за собой чужие выводы.
+
+    Второй элемент - нашлась ли шапка. Не нашлась (сменился формат) - файл
+    сохраняется целиком: молча резать по догадке нельзя, потеряется транскрипт.
+
+    Два условия, оба обязательны, иначе считаем, что структура не распознана:
+    маркер занимает ОТДЕЛЬНУЮ строку (иначе те же слова в реплике участника -
+    "в документе написано **Транскрипт:** пришлет Женя" - отрезали бы все,
+    что сказано до нее), и после него есть реплики с таймкодами (иначе режем
+    шапку ради пустого хвоста).
+    """
+    idx = None
+    pos = 0
+    for line in md.splitlines(keepends=True):
+        if line.strip() == TRANSCRIPT_MARKER:
+            idx = pos
+            break
+        pos += len(line)
+    if idx is None or not TIMECODED_LINE.search(md[idx:]):
+        return md, False
+    if TIMECODED_LINE.search(md[:idx]):
+        # реплики начались ДО маркера - значит это уже транскрипт, а маркер
+        # внутри него отдельной строкой прислал участник. Резать по нему -
+        # выбросить начало разговора
+        return md, False
+
+    head = ""
+    for line in md[:idx].splitlines():
+        # заголовок встречи - первая непустая строка шапки, он полезен
+        if line.strip():
+            head = line.strip() + "\n\n"
+            break
+    return head + md[idx:], True
+
+
 def place_meeting(auth: dict, cfg: dict, meetings_root: Path, index: dict,
                   m: dict) -> str | None:
     """Скачать MD одной встречи и положить по правилам. Возвращает rel-путь
@@ -307,9 +356,39 @@ def place_meeting(auth: dict, cfg: dict, meetings_root: Path, index: dict,
         return None
     dest_sub = build_dest(rule["dest"], dt)
     dest_file = target_file(meetings_root, dest_sub, dt, mid, index)
-    md = download_md(auth, mid)
+    md, found = strip_service_blocks(download_md(auth, mid))
+    if not found:
+        sys.stderr.write(
+            f"  внимание: в {mid} не найден маркер {TRANSCRIPT_MARKER} - "
+            f"файл сохранен целиком, шапку mymeet убрать вручную\n"
+        )
     dest_file.parent.mkdir(parents=True, exist_ok=True)
-    dest_file.write_text(md, encoding="utf-8")
+    if dest_file.exists():
+        # сюда попадает только точечный --pull по известному id: балк известные
+        # пропускает. Перезапись осмысленна (пользователь просил именно эту
+        # встречу), но она необратима и не всегда безопасна: сервис бывает
+        # отдает более короткую версию, а под путем из индекса после ручного
+        # переноса файлов может лежать вообще чужой документ. Поэтому прежнее
+        # содержимое уезжает в .prev.md - тот же прием, что result.prev.json
+        # у telegram-snapshot
+        previous = dest_file.read_text(encoding="utf-8")
+        backup = dest_file.with_suffix(".prev.md")
+        backup.write_text(previous, encoding="utf-8")
+        sys.stderr.write(
+            f"  внимание: перезаписываю {dest_file.relative_to(PROJECT_ROOT)} "
+            f"(встреча {mid} уже была забрана, было {len(previous)} символов, "
+            f"стало {len(md)}); прежнее - в {backup.name}\n"
+        )
+    # временный файл рядом с целевым: прерванная запись не оставит обрубок
+    # вместо полного raw, а os.replace на той же ФС атомарен. Имя от mkstemp -
+    # уникальное и созданное с O_EXCL, чтобы не наткнуться на чужой временный
+    # файл или подсунутый симлинк
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(dest_file.parent), prefix=dest_file.name + ".", suffix=".tmp"
+    )
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(md)
+    os.replace(tmp_name, dest_file)
     rel = str(dest_file.relative_to(PROJECT_ROOT))
     index.setdefault("meetings", {})[mid] = {
         "title": title,
