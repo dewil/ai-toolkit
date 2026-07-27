@@ -156,7 +156,7 @@ file_hashes:          # sha256 канонических байт каждого 
 
 ### 4e. Создай или дополни `CLAUDE.md`
 
-Добавь по `@`-ссылке на каждое правило `rules/*` из секции `universal`, которое раскатал в 4a (агенты и скиллы не импортируются - только правила). На текущий набор это:
+Добавь по `@`-ссылке на каждое правило `rules/*` из секции `universal`, которое раскатал в 4a (агенты и скиллы не импортируются - только правила). **Источник списка - манифест, а не этот блок:** правило, раскатанное в `.claude/rules/`, но не импортированное, в контекст не попадает и не действует. Сверься со своим списком из 4a; на набор манифеста на момент написания это:
 
 ```markdown
 Общие поведенческие правила (применяются всегда):
@@ -166,8 +166,13 @@ file_hashes:          # sha256 канонических байт каждого 
 @.claude/rules/docs-maintenance.md
 @.claude/rules/compact-results.md
 @.claude/rules/addressing.md
+@.claude/rules/agent-as-user-voice.md
+@.claude/rules/outbound-timing.md
 @.claude/rules/secrets-handling.md
+@.claude/rules/untrusted-content.md
+@.claude/rules/document-metadata.md
 @.claude/rules/client-umbrella.md
+@.claude/rules/memory-persistence.md
 
 Человеческий манифест проекта (зачем, как устроено, как работать):
 
