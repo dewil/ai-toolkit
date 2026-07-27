@@ -37,14 +37,52 @@ import html
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 
-CHROME = os.environ.get(
-    "MD_PDF_CHROME",
+# Порядок важен: сначала точные пути (дешевая проверка существования файла),
+# потом PATH - страховка для нестандартных установок (snap, свой префикс).
+# Flatpak сюда не попадает: он экспортирует не chromium, а org.chromium.Chromium
+# через flatpak run - такую установку задают через MD_PDF_CHROME.
+# Первым все равно идет MD_PDF_CHROME - см. find_chrome.
+CHROME_CANDIDATES = (
+    # macOS
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    # Linux
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/opt/google/chrome/chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/snap/bin/chromium",
 )
+CHROME_COMMANDS = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
+
+
+def find_chrome() -> str:
+    """Путь к Chrome: MD_PDF_CHROME -> типовые пути -> PATH. Пусто, если не нашли."""
+    env = os.environ.get("MD_PDF_CHROME")
+    if env:
+        # which() пропускает абсолютный путь как есть, но дает задать
+        # MD_PDF_CHROME=google-chrome именем команды
+        return shutil.which(env) or env
+
+    for path in CHROME_CANDIDATES:
+        if pathlib.Path(path).exists():
+            return path
+
+    for name in CHROME_COMMANDS:
+        found = shutil.which(name)
+        if found:
+            return found
+
+    return ""
+
+
+CHROME = find_chrome()
 
 DEFAULT_CSS = """
 @page { size: A4; margin: 18mm 17mm; }
@@ -354,8 +392,12 @@ def main() -> int:
 
     if not args.src.exists():
         sys.exit(f"нет исходника: {args.src}")
-    if not pathlib.Path(CHROME).exists():
-        sys.exit("не найден Chrome (путь можно задать через MD_PDF_CHROME)")
+    if not CHROME or not pathlib.Path(CHROME).exists():
+        sys.exit(
+            "не найден Chrome. Установите Google Chrome или Chromium, "
+            "либо задайте его через MD_PDF_CHROME - полным путем "
+            "(/путь/к/chrome) или именем команды из PATH"
+        )
 
     out = args.out or args.src.with_suffix(".pdf")
     css = args.css.read_text(encoding="utf-8") if args.css else DEFAULT_CSS

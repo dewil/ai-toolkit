@@ -10,8 +10,13 @@
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import os
+import shutil
+import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 MD_PDF = Path(__file__).resolve().parent.parent / "scripts" / "md-pdf.py"
@@ -255,6 +260,64 @@ class InlineCode(unittest.TestCase):
         h = body("`код` текст\n")
         self.assertNotIn("\x02", h)
         self.assertNotIn("\x03", h)
+
+class FindChrome(unittest.TestCase):
+    """Резолв Chrome: скрипт раскатан и на macOS, и на Linux."""
+
+    @contextlib.contextmanager
+    def resolver(self, *, env=None, candidates=(), on_path=()):
+        """Изолирует find_chrome от реальной машины: env, кандидаты, PATH."""
+        original = (md_pdf.CHROME_CANDIDATES, shutil.which)
+        md_pdf.CHROME_CANDIDATES = tuple(candidates)
+        # резолв обязан вернуть ДРУГУЮ строку, иначе тест на env-имя зеленеет
+        # и без which: имя команды совпало бы с ожидаемым значением
+        shutil.which = lambda name: f"/resolved/{name}" if name in on_path else None
+        patch = {"MD_PDF_CHROME": env} if env else {}
+        with unittest.mock.patch.dict(os.environ, patch, clear=not env):
+            try:
+                yield
+            finally:
+                md_pdf.CHROME_CANDIDATES, shutil.which = original
+
+    def test_env_wins_over_everything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "my-chrome"
+            fake.write_text("", encoding="utf-8")
+            with self.resolver(env=str(fake), candidates=("/usr/bin/google-chrome",)):
+                self.assertEqual(md_pdf.find_chrome(), str(fake))
+
+    def test_env_as_command_name_resolves_through_path(self):
+        """MD_PDF_CHROME=google-chrome раньше давал "не найден Chrome"."""
+        with self.resolver(env="google-chrome", on_path=("google-chrome",)):
+            self.assertEqual(md_pdf.find_chrome(), "/resolved/google-chrome")
+
+    def test_env_kept_verbatim_when_not_in_path(self):
+        """Несуществующий путь из env не подменяется - иначе ошибка соврет."""
+        with self.resolver(env="/nope/chrome"):
+            self.assertEqual(md_pdf.find_chrome(), "/nope/chrome")
+
+    def test_first_existing_candidate_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first, second = Path(tmp) / "first", Path(tmp) / "second"
+            second.write_text("", encoding="utf-8")
+            with self.resolver(candidates=("/nope/chrome", str(first), str(second))):
+                self.assertEqual(md_pdf.find_chrome(), str(second))
+
+    def test_falls_back_to_path(self):
+        """Страховка для snap/flatpak и нестандартного префикса."""
+        with self.resolver(candidates=("/nope/chrome",), on_path=("chromium",)):
+            self.assertEqual(md_pdf.find_chrome(), "/resolved/chromium")
+
+    def test_empty_when_nothing_found(self):
+        with self.resolver(candidates=("/nope/chrome",)):
+            self.assertEqual(md_pdf.find_chrome(), "")
+
+    def test_linux_paths_are_covered(self):
+        """Регресс: до правки в списке был только путь macOS."""
+        self.assertIn("/usr/bin/google-chrome", md_pdf.CHROME_CANDIDATES)
+        self.assertIn("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                      md_pdf.CHROME_CANDIDATES)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
