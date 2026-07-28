@@ -55,6 +55,7 @@ universal:
   - skills/md-pptx/SKILL.md             # сборка презентации .pptx из markdown (H1 - титул, ## - слайд)
   - scripts/md-pptx.py                  # движок markdown -> pptx, stdlib без python-pptx
   - scripts/session-cost.py             # движок подсчета токенов сессии (для скилла session-cost)
+  - skills/pii-mask/SKILL.md            # маскировка ПД перед отправкой текста в облачную LLM и разворот ответа
 
 coding:
   - rules/karpathy-guidelines.md        # снижение типовых LLM-ошибок в коде (простота, хирургичность)
