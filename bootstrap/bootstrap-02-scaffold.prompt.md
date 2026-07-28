@@ -173,6 +173,7 @@ file_hashes:          # sha256 канонических байт каждого 
 @.claude/rules/document-metadata.md
 @.claude/rules/client-umbrella.md
 @.claude/rules/memory-persistence.md
+@.claude/rules/mcp-multi-account.md
 
 Человеческий манифест проекта (зачем, как устроено, как работать):
 
