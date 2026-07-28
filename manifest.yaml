@@ -49,6 +49,10 @@ universal:
   - commands/canon.md                   # /canon = синхронизация проекта с каноном
   - scripts/md-pdf.py                   # движок рендера markdown в PDF (для скилла md-pdf)
   - scripts/md-docx.py                  # сборка .docx из markdown, stdlib-only; разбор md берет из md-pdf.py
+  - skills/csv-xlsx/SKILL.md            # сборка .xlsx из CSV/TSV (файл = лист), stdlib без openpyxl
+  - scripts/csv-xlsx.py                 # движок CSV/TSV -> xlsx: типизация ячеек, шапка, автоширина
+  - skills/md-pptx/SKILL.md             # сборка презентации .pptx из markdown (H1 - титул, ## - слайд)
+  - scripts/md-pptx.py                  # движок markdown -> pptx, stdlib без python-pptx
   - scripts/session-cost.py             # движок подсчета токенов сессии (для скилла session-cost)
 
 coding:
