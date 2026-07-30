@@ -10,8 +10,10 @@
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import io
+import re
 import subprocess
 import sys
 import tempfile
@@ -300,12 +302,139 @@ class ReadRows(unittest.TestCase):
             self.assertEqual(cx.read_rows(p, None)[0][1], "строка, с запятой")
 
 
+class EncodingAndSniffing(unittest.TestCase):
+    """Регресс брифа scripts-csv-xlsx: русский Excel-экспорт (cp1251, ';')."""
+
+    def _rows(self, name, data: bytes, delimiter=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / name
+            p.write_bytes(data)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rows = cx.read_rows(p, delimiter)
+        return rows, err.getvalue()
+
+    def test_cp1251_semicolon_decoded_with_notice(self):
+        rows, err = self._rows(
+            "a.csv", "нода;провайдер;онлайн\nde;Hetzner;412\n".encode("cp1251"))
+        self.assertEqual(rows, [["нода", "провайдер", "онлайн"],
+                                ["de", "Hetzner", "412"]])
+        self.assertIn("cp1251", err)
+
+    def test_utf8_semicolon_sniffed(self):
+        rows, err = self._rows(
+            "a.csv", "нода;провайдер;онлайн\nde;Hetzner;412\n".encode("utf-8"))
+        self.assertEqual(len(rows[0]), 3)
+        self.assertNotIn("cp1251", err)
+
+    def test_utf8_comma_baseline_no_noise(self):
+        rows, err = self._rows("a.csv", "a,b,c\n1,2,3\n".encode("utf-8"))
+        self.assertEqual(rows, [["a", "b", "c"], ["1", "2", "3"]])
+        self.assertEqual(err, "")
+
+    def test_tsv_by_extension_still_works(self):
+        rows, _ = self._rows("a.tsv", "a\tb\tc\n1\t2\t3\n".encode("utf-8"))
+        self.assertEqual(len(rows[0]), 3)
+
+    def test_explicit_delimiter_beats_sniffing(self):
+        rows, _ = self._rows("a.csv", "a;b;c\n1;2;3\n".encode("utf-8"),
+                             delimiter=";")
+        self.assertEqual(len(rows[0]), 3)
+
+    def test_wrong_explicit_delimiter_warns_one_column(self):
+        rows, err = self._rows("a.csv", "a;b;c\n1;2;3\n".encode("utf-8"),
+                               delimiter=",")
+        self.assertEqual(max(len(r) for r in rows), 1)
+        self.assertIn("';'", err)
+        self.assertIn("--delimiter", err)
+
+    def test_undecodable_bytes_exit_without_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "bad.csv"
+            p.write_bytes(b"\xff\x98\xff")  # не utf-8 (0xff) и не cp1251 (0x98)
+            with self.assertRaises(SystemExit) as cm:
+                cx.read_rows(p, None)
+        self.assertIn("UTF-8", str(cm.exception))
+
+    # --- находки adversarial-ревью: многоколоночный разбор не переигрывается
+
+    def test_comma_csv_with_semicolons_in_quotes_not_reparsed(self):
+        data = '1,"foo;a;bar"\n2,"baz;b;qux"\n'.encode("utf-8")
+        rows, err = self._rows("a.csv", data)
+        self.assertEqual(rows, [["1", "foo;a;bar"], ["2", "baz;b;qux"]])
+        self.assertEqual(err, "")
+
+    def test_tsv_with_commas_keeps_tabs(self):
+        data = "name, legal\tcomment, notes\nAlice, A\tgood, well\n".encode("utf-8")
+        rows, err = self._rows("a.tsv", data)
+        self.assertEqual(rows, [["name, legal", "comment, notes"],
+                                ["Alice, A", "good, well"]])
+        self.assertEqual(err, "")
+
+    def test_single_column_consistent_semicolon_reparsed_with_notice(self):
+        # осознанный trade-off: одноколоночный файл с консистентным ';'
+        # переразбирается; несогласному поможет явный --delimiter ","
+        rows, err = self._rows(
+            "a.csv", "comment; details\nalpha; beta\n".encode("utf-8"))
+        self.assertEqual(len(rows[0]), 2)
+        self.assertIn("переразобран", err)
+
+    def test_inconsistent_candidate_width_warns_not_reparsed(self):
+        rows, err = self._rows("a.csv", "a;b\none\n".encode("utf-8"))
+        self.assertEqual(rows, [["a;b"], ["one"]])
+        self.assertIn("';'", err)
+
+    def test_utf16_bom_decoded(self):
+        rows, err = self._rows("a.csv", "нода,онлайн\nde,412\n".encode("utf-16"))
+        self.assertEqual(rows, [["нода", "онлайн"], ["de", "412"]])
+        self.assertNotIn("cp1251", err)
+
+    def test_utf32_bom_not_mistaken_for_utf16(self):
+        rows, err = self._rows("a.csv", "нода,онлайн\n1,2\n".encode("utf-32"))
+        self.assertEqual(rows, [["нода", "онлайн"], ["1", "2"]])
+        self.assertNotIn("cp1251", err)
+
+    def test_semicolon_with_decimal_comma_reparsed(self):
+        # ';'-экспорт русского Excel с десятичной запятой: по ',' разбор рваный
+        # (1-2 колонки), ранняя версия фикса возвращала его молча
+        rows, err = self._rows(
+            "a.csv", "товар;цена\nчай;12,50\nкофе;100,00\n".encode("utf-8"))
+        self.assertEqual(rows, [["товар", "цена"], ["чай", "12,50"],
+                                ["кофе", "100,00"]])
+        self.assertIn("переразобран", err)
+
+    def test_ragged_comma_csv_kept_without_noise(self):
+        rows, err = self._rows("a.csv", "a,b\nc,d,e\n".encode("utf-8"))
+        self.assertEqual(rows, [["a", "b"], ["c", "d", "e"]])
+        self.assertEqual(err, "")
+
+    def test_nul_bytes_after_cp1251_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "bad.csv"
+            p.write_bytes(b"\x61\x00\x62\x00\x63\xff")  # utf-16-подобное без BOM
+            with self.assertRaises(SystemExit) as cm:
+                cx.read_rows(p, None)
+        self.assertIn("нулевые байты", str(cm.exception))
+
+
 class Cli(unittest.TestCase):
     def run_cli(self, *argv):
         return subprocess.run(
             [sys.executable, str(SCRIPTS / "csv-xlsx.py"), *argv],
             capture_output=True, text=True,
         )
+
+    def test_semicolon_csv_three_columns_in_sheet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "полу.csv"
+            p.write_text("нода;провайдер;онлайн\nde;Hetzner;412\n",
+                         encoding="utf-8")
+            r = self.run_cli(str(p))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with zipfile.ZipFile(Path(tmp) / "полу.xlsx") as z:
+                xml = z.read("xl/worksheets/sheet1.xml").decode()
+        cols = set(re.findall(r'<c r="([A-Z]+)\d+"', xml))
+        self.assertEqual(cols, {"A", "B", "C"})
 
     def test_empty_input_exits_with_message(self):
         with tempfile.TemporaryDirectory() as tmp:
