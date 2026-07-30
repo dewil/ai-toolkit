@@ -312,12 +312,86 @@ def check_limits(name: str, rows: list[list[str]], *, formulas: bool = False) ->
                          f"формула длиннее {MAX_FORMULA} символов")
 
 
+# Экспорт из русского Excel приходит в cp1251 и с ";" - расширение об этом молчит.
+# Кодировку определяем по содержимому; разделитель - по расширению, но если разбор
+# дал одну колонку, переигрываем кандидатами (консервативнее csv.Sniffer: тот
+# перехватывал и корректные файлы - ';' в кавычках, запятые в .tsv).
+CANDIDATE_SEPS = ",;\t|"
+
+
+def decode_text(path: pathlib.Path) -> str:
+    """Байты -> текст. utf-16 по BOM (Excel "Unicode Text"), затем utf-8-sig
+    (BOM иначе портит первую ячейку шапки), при провале - cp1251: дефолт
+    русского Excel, на utf-8 падал трейсбеком."""
+    raw = path.read_bytes()
+    if raw[:4] in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
+        # utf-32 проверяется ДО utf-16: его LE-BOM начинается с байтов utf-16 BOM
+        try:
+            return raw.decode("utf-32")
+        except UnicodeDecodeError:
+            sys.exit(f"{path}: BOM utf-32, но текст не декодируется - "
+                     f"пересохраните файл в UTF-8")
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            sys.exit(f"{path}: BOM utf-16, но текст не декодируется - "
+                     f"пересохраните файл в UTF-8")
+    for enc in ("utf-8-sig", "cp1251"):
+        try:
+            text = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        if enc == "cp1251":
+            if "\x00" in text:
+                # cp1251 декодирует почти любые байты; NUL - признак того,
+                # что исходная кодировка на деле другая (utf-16 без BOM и т.п.)
+                sys.exit(f"{path}: похоже на незнакомую кодировку "
+                         f"(нулевые байты) - пересохраните файл в UTF-8")
+            print(f"{path.name}: не utf-8, прочитан как cp1251 - "
+                  f"проверьте кириллицу в результате", file=sys.stderr)
+        return text
+    sys.exit(f"{path}: не читается ни как utf-8, ни как cp1251 - "
+             f"пересохраните файл в UTF-8")
+
+
+def _parse(text: str, sep: str) -> list[list[str]]:
+    return [list(row) for row in csv.reader(io.StringIO(text, newline=""),
+                                            delimiter=sep)]
+
+
 def read_rows(path: pathlib.Path, delimiter: str | None) -> list[list[str]]:
-    """CSV/TSV -> строки. Разделитель: явный флаг, иначе по расширению."""
-    sep = delimiter or ("\t" if path.suffix.lower() == ".tsv" else ",")
-    # utf-8-sig: BOM от Excel-экспортов молча портил бы первую ячейку шапки
-    with path.open(encoding="utf-8-sig", newline="") as fh:
-        return [list(row) for row in csv.reader(fh, delimiter=sep)]
+    """CSV/TSV -> строки. Разделитель: явный флаг, иначе по расширению;
+    неубедительный разбор переигрывается кандидатами по содержимому."""
+    text = decode_text(path)
+    base = delimiter or ("\t" if path.suffix.lower() == ".tsv" else ",")
+    rows = _parse(text, base)
+    base_widths = {len(r) for r in rows if r}
+    if not rows or (len(base_widths) == 1 and base_widths != {1}):
+        return rows  # консистентный многоколоночный разбор не переигрываем
+    if delimiter is None:
+        # Одна колонка или рваная ширина - разбор неубедителен: настоящий
+        # разделитель дает ОДИНАКОВУЮ ширину > 1 во всех непустых строках.
+        # Ловит ';'-экспорт Excel, включая десятичные запятые ("чай;12,50" по
+        # ',' дает рваные 1-2 колонки, по ';' - ровно 2).
+        for cand in (s for s in CANDIDATE_SEPS if s != base):
+            widths = {len(r) for r in _parse(text, cand) if r}
+            if len(widths) == 1 and widths != {1}:
+                print(f"{path.name}: разбор по {base!r} неубедителен - "
+                      f"переразобран по {cand!r}; это не то - задайте "
+                      f"--delimiter {base!r}", file=sys.stderr)
+                return _parse(text, cand)
+    # Переразбор не случился; вся таблица - одна колонка, а другой разделитель
+    # в тексте живет - не молчим: без этого скрипт бодро отдавал xlsx, где вся
+    # строка склеена в A1. (Рваная ширина без кандидата - легальный CSV.)
+    if base_widths == {1}:
+        other = [s for s in CANDIDATE_SEPS if s != base and s in text]
+        if other:
+            names = ", ".join(repr(s) for s in other)
+            print(f"{path.name}: разобран по {base!r} и вышла одна колонка, "
+                  f"хотя в тексте есть {names} - проверьте --delimiter",
+                  file=sys.stderr)
+    return rows
 
 
 def build(sheets: list[tuple[str, list[list[str]]]], author: str, title: str,
