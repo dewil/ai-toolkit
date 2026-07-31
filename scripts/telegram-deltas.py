@@ -37,8 +37,40 @@ def chat_entry(value) -> dict:
         topic = value.get("topic_id")
         # int обязателен: topic_id сравнивается с числовым полем сообщения,
         # и строковый "42" из конфига молча не совпал бы ни с чем
-        return {"id": int(value["id"]), "topic_id": int(topic) if topic is not None else None}
-    return {"id": int(value), "topic_id": None}
+        return {
+            "id": int(value["id"]),
+            "topic_id": int(topic) if topic is not None else None,
+            "dest": str(value["dest"]) if value.get("dest") else None,
+        }
+    return {"id": int(value), "topic_id": None, "dest": None}
+
+
+def resolve_dest(dest: str) -> Path:
+    """dest из конфига -> абсолютный путь, строго внутри проекта (зеркально
+    telegram-snapshot.py: тот же конфиг обязан читаться из той же папки)."""
+    p = Path(dest)
+    if p.is_absolute():
+        sys.exit(f"dest {dest!r}: абсолютный путь не допускается - укажите путь от корня проекта")
+    resolved = (PROJECT_ROOT / p).resolve()
+    if not resolved.is_relative_to(PROJECT_ROOT.resolve()):
+        sys.exit(f"dest {dest!r}: выходит за пределы проекта")
+    return resolved
+
+
+def check_unique_targets(chats: dict, chats_root: Path) -> None:
+    """Дубли целевых папок - невалидный конфиг и здесь тоже (зеркально
+    telegram-snapshot.py): deltas запускается независимо от снапшота, и без
+    своей проверки читал бы одну папку под двумя labels."""
+    targets: dict[str, str] = {}
+    for label, entry in chats.items():
+        tgt = resolve_dest(entry["dest"]) if entry.get("dest") else (chats_root / label).resolve()
+        key = str(tgt).casefold()
+        if key in targets:
+            sys.exit(
+                f"чаты {targets[key]!r} и {label!r} указывают в одну папку "
+                f"{tgt} - разведите dest в .telegram-snapshot.json"
+            )
+        targets[key] = label
 
 
 def load_project_config() -> dict:
@@ -127,8 +159,8 @@ PERSONAL_PREFIX = "1-1/"
 
 
 def emit_chat(label: str, display: str, chats_root, hours: int,
-              topic_id: int | None = None) -> int:
-    chat_dir = chats_root / label
+              topic_id: int | None = None, dest_dir: Path | None = None) -> int:
+    chat_dir = dest_dir if dest_dir is not None else chats_root / label
     cur = load_messages(chat_dir / "result.json")
     prev = load_messages(chat_dir / "result.prev.json")
 
@@ -153,6 +185,7 @@ def main() -> int:
 
     project_cfg = load_project_config()
     chats_root = PROJECT_ROOT / project_cfg["chats_root"]
+    check_unique_targets(project_cfg["chats"], chats_root)
     labels = list(project_cfg["chats"].keys())
     group_labels = [l for l in labels if not l.startswith(PERSONAL_PREFIX)]
     personal_labels = [l for l in labels if l.startswith(PERSONAL_PREFIX)]
@@ -164,14 +197,16 @@ def main() -> int:
     grand_total = 0
     for label in group_labels:
         grand_total += emit_chat(label, label, chats_root, args.hours,
-                                 chats[label].get("topic_id"))
+                                 chats[label].get("topic_id"),
+                                 resolve_dest(chats[label]["dest"]) if chats[label].get("dest") else None)
 
     if personal_labels:
         print("#### 1-1\n")
         for label in personal_labels:
             display = label[len(PERSONAL_PREFIX):]
             grand_total += emit_chat(label, display, chats_root, args.hours,
-                                     chats[label].get("topic_id"))
+                                     chats[label].get("topic_id"),
+                                     resolve_dest(chats[label]["dest"]) if chats[label].get("dest") else None)
 
     if grand_total == 0:
         print("_Изменений нет._")
