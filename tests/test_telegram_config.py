@@ -65,6 +65,7 @@ def load_module(filename: str, name: str):
 SNAPSHOT = load_module("telegram-snapshot.py", "tg_snapshot")
 SEND = load_module("telegram-send.py", "tg_send")
 DELTAS = load_module("telegram-deltas.py", "tg_deltas")
+SENDONE = load_module("telegram-send-one.py", "tg_send_one")
 
 # обе копии хелперов должны вести себя одинаково
 BOTH = (("snapshot", SNAPSHOT), ("send", SEND))
@@ -257,13 +258,167 @@ class DeltasCompat(unittest.TestCase):
 
     def test_deltas_ignores_account_key(self):
         entry = DELTAS.chat_entry({"id": 7, "topic_id": 42, "account": "cv"})
-        self.assertEqual(entry, {"id": 7, "topic_id": 42})
+        self.assertEqual(entry, {"id": 7, "topic_id": 42, "dest": None})
 
     def test_deltas_short_form_unchanged(self):
-        self.assertEqual(DELTAS.chat_entry(7), {"id": 7, "topic_id": None})
+        self.assertEqual(DELTAS.chat_entry(7), {"id": 7, "topic_id": None, "dest": None})
 
     def test_deltas_topic_id_coerced_to_int(self):
         self.assertEqual(DELTAS.chat_entry({"id": 7, "topic_id": "42"})["topic_id"], 42)
+
+
+class PerChatDest(unittest.TestCase):
+    """Ключ dest: зеркало чата подпроекта живет в его папке, не в chats_root."""
+
+    def test_snapshot_and_deltas_parse_dest(self):
+        for name, mod in (("snapshot", SNAPSHOT), ("deltas", DELTAS)):
+            with self.subTest(mod=name):
+                self.assertEqual(
+                    mod.chat_entry({"id": 7, "dest": "проект/чаты/X"})["dest"],
+                    "проект/чаты/X")
+                self.assertIsNone(mod.chat_entry(7)["dest"])
+                self.assertIsNone(mod.chat_entry({"id": 7})["dest"])
+
+    def test_send_chat_entry_survives_dest_key(self):
+        entry = SEND.chat_entry({"id": 7, "dest": "проект/чаты/X"})
+        self.assertEqual(entry["id"], 7)
+
+    def test_resolve_dest_stays_inside_project(self):
+        for name, mod in (("snapshot", SNAPSHOT), ("deltas", DELTAS)):
+            with self.subTest(mod=name):
+                got = mod.resolve_dest("подпроект/чаты/Лариса")
+                self.assertEqual(got, (mod.PROJECT_ROOT / "подпроект/чаты/Лариса").resolve())
+
+    def test_resolve_dest_rejects_absolute(self):
+        for name, mod in (("snapshot", SNAPSHOT), ("deltas", DELTAS)):
+            with self.subTest(mod=name):
+                with self.assertRaises(SystemExit):
+                    mod.resolve_dest("/tmp/чужое")
+
+    def test_resolve_dest_rejects_escape(self):
+        for name, mod in (("snapshot", SNAPSHOT), ("deltas", DELTAS)):
+            with self.subTest(mod=name):
+                with self.assertRaises(SystemExit):
+                    mod.resolve_dest("../соседний-проект/чаты")
+
+    def test_process_chat_accepts_dest_dir(self):
+        import inspect
+        self.assertIn("dest_dir", inspect.signature(SNAPSHOT.process_chat).parameters)
+
+    def test_duplicate_dest_targets_rejected(self):
+        chats = {
+            "A": {"id": 1, "dest": "подпроект/чаты/X"},
+            "B": {"id": 2, "dest": "подпроект/чаты/X"},
+        }
+        with self.assertRaises(SystemExit) as cm:
+            SNAPSHOT.check_unique_targets(chats, SNAPSHOT.PROJECT_ROOT / "чаты")
+        self.assertIn("одну папку", str(cm.exception))
+
+    def test_dest_over_foreign_label_rejected(self):
+        chats = {
+            "B": {"id": 2, "dest": None},
+            "A": {"id": 1, "dest": "чаты/B"},
+        }
+        with self.assertRaises(SystemExit):
+            SNAPSHOT.check_unique_targets(chats, SNAPSHOT.PROJECT_ROOT / "чаты")
+
+    def test_case_insensitive_duplicate_rejected(self):
+        """APFS сложил бы Client/X и Client/x в одну физическую папку."""
+        chats = {
+            "A": {"id": 1, "dest": "Клиент/чаты/X"},
+            "B": {"id": 2, "dest": "Клиент/чаты/x"},
+        }
+        with self.assertRaises(SystemExit):
+            SNAPSHOT.check_unique_targets(chats, SNAPSHOT.PROJECT_ROOT / "чаты")
+
+    def test_deltas_checks_unique_targets_too(self):
+        """deltas запускается независимо от снапшота - дубли ловит сам."""
+        chats = {
+            "A": {"id": 1, "dest": "подпроект/чаты/X"},
+            "B": {"id": 2, "dest": "подпроект/чаты/X"},
+        }
+        with self.assertRaises(SystemExit):
+            DELTAS.check_unique_targets(chats, DELTAS.PROJECT_ROOT / "чаты")
+
+    def test_distinct_targets_pass(self):
+        chats = {
+            "A": {"id": 1, "dest": "подпроект/чаты/A"},
+            "B": {"id": 2, "dest": None},
+        }
+        SNAPSHOT.check_unique_targets(chats, SNAPSHOT.PROJECT_ROOT / "чаты")
+
+    def test_foreign_mirror_id_rejected(self):
+        with self.assertRaises(RuntimeError) as cm:
+            SNAPSHOT.ensure_result_belongs_to(
+                {"id": 111, "messages": []}, 222, Path("x/result.json"))
+        self.assertIn("другого чата", str(cm.exception))
+        SNAPSHOT.ensure_result_belongs_to({"id": 222}, 222, Path("x"))
+        SNAPSHOT.ensure_result_belongs_to({"messages": []}, 222, Path("x"))
+
+    def test_deltas_emit_chat_reads_from_dest_dir(self):
+        """Мутация 'dest_dir игнорируется' обязана уронить этот тест: в
+        chats_root/label лежит пустое зеркало, новое сообщение - только в dest."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chats_root = root / "чаты"
+            (chats_root / "X").mkdir(parents=True)
+            (chats_root / "X" / "result.json").write_text(
+                '{"messages": []}', encoding="utf-8")
+            dest = root / "подпроект" / "чаты" / "X"
+            dest.mkdir(parents=True)
+            (dest / "result.json").write_text(json.dumps({"messages": [
+                {"id": 1, "type": "message", "date": "2026-07-01T10:00:00", "text": "старое"},
+                {"id": 2, "type": "message", "date": "2026-07-02T10:00:00", "text": "новое из dest"},
+            ]}), encoding="utf-8")
+            (dest / "result.prev.json").write_text(json.dumps({"messages": [
+                {"id": 1, "type": "message", "date": "2026-07-01T10:00:00", "text": "старое"},
+            ]}), encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                n = DELTAS.emit_chat("X", "X", chats_root, 24, None, dest)
+        self.assertEqual(n, 1)
+        self.assertIn("новое из dest", out.getvalue())
+
+
+class SendOneFile(unittest.TestCase):
+    """--file в telegram-send-one: гейты отрабатывают до захвата общей сессии."""
+
+    def _run(self, **kw):
+        args = types.SimpleNamespace(
+            chat_id="123", username=None, text="привет", send=False,
+            topic=None, reply_to=None, account="default", html=False, file=None)
+        for k, v in kw.items():
+            setattr(args, k, v)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = asyncio.run(SENDONE.amain(args))
+        return code, err.getvalue()
+
+    def test_missing_file_exits_before_session(self):
+        code, err = self._run(file="/нет/такого/файла.pdf")
+        self.assertEqual(code, 2)
+        self.assertIn("Файл не найден", err)
+
+    def test_caption_over_1024_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "док.pdf"
+            f.write_bytes(b"%PDF-1.4")
+            code, err = self._run(file=str(f), text="х" * 1025)
+        self.assertEqual(code, 2)
+        self.assertIn("1024", err)
+
+    def test_empty_file_flag_rejected_not_degraded_to_text(self):
+        """--file "$VAR" с пустой переменной - заданный файловый режим, а не
+        его отсутствие: молчаливая отправка одним текстом - вранье."""
+        code, err = self._run(file="")
+        self.assertEqual(code, 2)
+        self.assertIn("пустой строкой", err)
+
+    def test_file_check_precedes_auth(self):
+        """Проверка файла стоит в исходнике ДО load_auth - падаем раньше,
+        чем трогаем сессию."""
+        src = (SCRIPTS / "telegram-send-one.py").read_text(encoding="utf-8")
+        self.assertLess(src.index("Файл не найден"), src.index("load_auth"))
 
 
 class AtomicWrite(unittest.TestCase):

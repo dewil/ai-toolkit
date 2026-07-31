@@ -275,6 +275,10 @@ def chat_entry(value) -> dict:
     account - имя аккаунта из auth.json (по умолчанию "default"): чат тянется
     той сессией, которой он принадлежит. Ключ необязательный, поэтому старые
     конфиги читаются без изменений.
+
+    dest - путь папки чата от корня проекта, для чатов подпроектов
+    (клиент-зонтик): зеркало живет в папке подпроекта, а не в общем
+    chats_root/<label>. Без dest поведение прежнее.
     """
     if isinstance(value, dict):
         if "id" not in value:
@@ -286,8 +290,56 @@ def chat_entry(value) -> dict:
             # и строковый "42" из конфига молча не совпал бы ни с чем
             "topic_id": int(topic) if topic is not None else None,
             "account": str(value.get("account") or "default"),
+            "dest": str(value["dest"]) if value.get("dest") else None,
         }
-    return {"id": int(value), "topic_id": None, "account": "default"}
+    return {"id": int(value), "topic_id": None, "account": "default", "dest": None}
+
+
+def resolve_dest(dest: str) -> Path:
+    """dest из конфига -> абсолютный путь, строго внутри проекта.
+
+    Абсолютные пути и выход из корня (`..`) отклоняются: dest задает папку
+    ПРОЕКТА, а опечатка вида "../..." молча писала бы зеркало чата вне
+    рабочего дерева.
+    """
+    p = Path(dest)
+    if p.is_absolute():
+        sys.exit(f"dest {dest!r}: абсолютный путь не допускается - укажите путь от корня проекта")
+    resolved = (PROJECT_ROOT / p).resolve()
+    if not resolved.is_relative_to(PROJECT_ROOT.resolve()):
+        sys.exit(f"dest {dest!r}: выходит за пределы проекта")
+    return resolved
+
+
+def check_unique_targets(chats: dict, chats_root: Path) -> None:
+    """Целевые папки всех чатов обязаны быть разными: два чата в одном
+    result.json (одинаковые dest, или dest поверх chats_root/<чужой label>)
+    молча смешивали бы истории и теряли сообщения по чужому max id.
+
+    Ключ сравнения - casefold: на case-insensitive ФС (APFS) "Client/X" и
+    "Client/x" - одна физическая папка; на case-sensitive такие пути-двойники
+    все равно патология конфига, строгость дешевле детекта ФС."""
+    targets: dict[str, str] = {}
+    for label, entry in chats.items():
+        tgt = resolve_dest(entry["dest"]) if entry.get("dest") else (chats_root / label).resolve()
+        key = str(tgt).casefold()
+        if key in targets:
+            sys.exit(
+                f"чаты {targets[key]!r} и {label!r} указывают в одну папку "
+                f"{tgt} - разведите dest в .telegram-snapshot.json"
+            )
+        targets[key] = label
+
+
+def ensure_result_belongs_to(data: dict, chat_id: int, result_path: Path) -> None:
+    """Зеркало принадлежит одному чату: инкремент от чужого max id молча
+    пропускал бы историю (или дописывал сообщения под чужой шапкой)."""
+    existing_id = data.get("id")
+    if existing_id is not None and int(existing_id) != int(chat_id):
+        raise RuntimeError(
+            f"в {result_path} лежит зеркало другого чата "
+            f"(id {existing_id}, ожидали {chat_id}) - проверьте dest/label"
+        )
 
 
 def load_project_config() -> dict:
@@ -803,8 +855,8 @@ async def resolve_entity(client: TelegramClient, chat_id: int, dialog_entities: 
     return await client.get_entity(chat_id)
 
 
-async def process_chat(client: TelegramClient, chats_root: Path, label: str, chat_id: int, dialog_entities: dict) -> tuple[int, str]:
-    result_path = chats_root / label / "result.json"
+async def process_chat(client: TelegramClient, chats_root: Path, label: str, chat_id: int, dialog_entities: dict, dest_dir: Path | None = None) -> tuple[int, str]:
+    result_path = (dest_dir if dest_dir is not None else chats_root / label) / "result.json"
     entity = await resolve_entity(client, chat_id, dialog_entities)
 
     removed = cleanup_old_media()
@@ -815,6 +867,16 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
     repaired = False
     if result_path.exists():
         data = load_existing(result_path)
+        ensure_result_belongs_to(data, chat_id, result_path)
+        if data.get("id") is None:
+            # legacy-зеркало без id в шапке: принадлежность не проверить -
+            # предупреждаем и дописываем id, чтобы следующая запись сделала
+            # зеркало проверяемым (самолечение)
+            sys.stderr.write(
+                f"  {label}: в шапке {result_path.name} нет id - принадлежность "
+                f"зеркала не проверена, дописываю id {chat_id}\n"
+            )
+            data["id"] = chat_id
         is_bootstrap = False
 
         if "topics" not in data:
@@ -913,6 +975,8 @@ async def amain() -> int:
     project_cfg = load_project_config()
     chats_root = chats_root_path(project_cfg)
 
+    check_unique_targets(project_cfg["chats"], chats_root)
+
     print(f"snapshot {datetime.now(timezone.utc).isoformat()}")
 
     # Чаты группируем по аккаунту и обходим аккаунты ПОСЛЕДОВАТЕЛЬНО, каждый
@@ -953,7 +1017,8 @@ async def amain() -> int:
                 chat_id = entry["id"]
                 try:
                     n, _ = await process_chat(
-                        client, chats_root, label, chat_id, dialog_entities
+                        client, chats_root, label, chat_id, dialog_entities,
+                        dest_dir=resolve_dest(entry["dest"]) if entry.get("dest") else None,
                     )
                     total += n
                 except Exception as exc:
