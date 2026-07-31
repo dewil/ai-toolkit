@@ -111,6 +111,36 @@ a { color: #1a5276; text-decoration: none; }
 img { max-width: 100%; }
 """
 
+# Стили --photo. Дописываются ПОСЛЕ используемого CSS (в том числе после
+# пользовательского --css): флаг работает с чужими стилями без знания про
+# класс, а кто хочет переопределить - пишет более специфичный селектор.
+PHOTO_CSS = """
+img.photo {{
+  float: right;
+  width: {width};
+  height: {height};
+  /* у фото на входе произвольные пропорции - без cover портрет растягивается */
+  object-fit: cover;
+  border-radius: 1.5mm;
+  margin: 0 0 3mm 5mm;
+  shape-outside: margin-box;
+}}
+"""
+
+
+def resolve_photo(photo: pathlib.Path, src_dir: pathlib.Path) -> pathlib.Path:
+    """Путь фото: как задан (абсолютный или от cwd), иначе от каталога исходника.
+    Нет нигде - падаем до запуска Chrome, а не собираем PDF молча без фото."""
+    for cand in (photo, src_dir / photo):
+        if cand.is_file():
+            resolved = cand.resolve()
+            if '"' in str(resolved):
+                # src вставляется в HTML-атрибут без эскейпа (embed_images ищет
+                # src="([^"]+)" буквально) - кавычка в пути дала бы битый <img>
+                sys.exit(f"кавычка в пути фото не поддерживается: {resolved} - переименуйте файл")
+            return resolved
+    sys.exit(f"нет файла фото: {photo} (искали от текущего каталога и рядом с исходником)")
+
 
 def inline(text: str) -> str:
     """Inline-разметка одной строки в HTML.
@@ -388,6 +418,11 @@ def main() -> int:
     ap.add_argument("--css", type=pathlib.Path, default=None, help="заменить дефолтные стили")
     ap.add_argument("--title", default=None, help="иначе - первый H1 или имя файла")
     ap.add_argument("--author", default=None, help="записать /Author в метаданные PDF")
+    ap.add_argument("--photo", type=pathlib.Path, default=None,
+                    help="фото в правом верхнем углу первой страницы (для резюме); "
+                         "markdown-исходник не трогается")
+    ap.add_argument("--photo-width", default="30mm", help="ширина фото (по умолчанию 30mm)")
+    ap.add_argument("--photo-height", default="38mm", help="высота фото (по умолчанию 38mm, пропорция 3x4)")
     args = ap.parse_args()
 
     if not args.src.exists():
@@ -402,6 +437,12 @@ def main() -> int:
     out = args.out or args.src.with_suffix(".pdf")
     css = args.css.read_text(encoding="utf-8") if args.css else DEFAULT_CSS
     title, body = md_to_html(args.src.read_text(encoding="utf-8"))
+    if args.photo:
+        photo_path = resolve_photo(args.photo, args.src.parent)
+        # абсолютный src без эскейпа: embed_images ищет src="([^"]+)" буквально
+        # и заменит его на data-URI (существование файла уже проверено)
+        body = f'<img class="photo" src="{photo_path}">' + body
+        css += PHOTO_CSS.format(width=args.photo_width, height=args.photo_height)
     body = embed_images(body, args.src.parent)
     title = args.title or title or args.src.stem
     doc = (

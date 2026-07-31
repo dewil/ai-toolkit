@@ -25,7 +25,10 @@ python3 scripts/md-pdf.py note.md                    # note.pdf рядом с и
 python3 scripts/md-pdf.py note.md --out /path/x.pdf  # свой путь
 python3 scripts/md-pdf.py note.md --css custom.css --title "Отчет"
 python3 scripts/md-pdf.py note.md --author "Имя"     # /Author в метаданные PDF
+python3 scripts/md-pdf.py cv.md --photo фото.jpg --author "Имя Фамилия"  # резюме с фото
 ```
+
+`--photo` кладет фотографию в правый верхний угол первой страницы с обтеканием текстом (стандарт резюме на российском рынке). Фото не кладется в markdown-исходник - тот остается чистым для Obsidian и сборки docx, раскладка живет в параметрах сборки. Размер - `--photo-width`/`--photo-height` (по умолчанию 30x38 мм, пропорция 3x4; произвольные пропорции входного фото кадрируются, не растягиваются). Стили фото дописываются после `--css`, так что флаг работает и с пользовательскими стилями.
 
 Chrome ищется сам: типовые пути macOS и Linux (включая Chromium и snap), затем PATH. Нестандартная установка - `MD_PDF_CHROME`: он имеет приоритет над поиском и принимает как полный путь, так и имя команды из PATH.
 
