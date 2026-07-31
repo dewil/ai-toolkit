@@ -319,5 +319,57 @@ class FindChrome(unittest.TestCase):
                       md_pdf.CHROME_CANDIDATES)
 
 
+class Photo(unittest.TestCase):
+    """--photo: фото в углу первой страницы без правки markdown-исходника."""
+
+    def test_resolve_photo_next_to_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src_dir = Path(tmp) / "cv"
+            src_dir.mkdir()
+            (src_dir / "фото.jpg").write_bytes(b"\xff\xd8\xff")
+            got = md_pdf.resolve_photo(Path("фото.jpg"), src_dir)
+        self.assertEqual(got, (src_dir / "фото.jpg").resolve())
+
+    def test_resolve_photo_as_given_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "фото.jpg"
+            p.write_bytes(b"\xff\xd8\xff")
+            got = md_pdf.resolve_photo(p, Path(tmp) / "нет-такой")
+        self.assertEqual(got, p.resolve())
+
+    def test_resolve_photo_missing_exits_before_chrome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit) as cm:
+                md_pdf.resolve_photo(Path("нет.jpg"), Path(tmp))
+        self.assertIn("нет файла фото", str(cm.exception))
+
+    def test_quote_in_photo_path_rejected(self):
+        """src вставляется в атрибут без эскейпа - кавычка дала бы битый <img>."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / 'фо"то.jpg'
+            p.write_bytes(b"\xff\xd8\xff")
+            with self.assertRaises(SystemExit) as cm:
+                md_pdf.resolve_photo(p, Path(tmp))
+        self.assertIn("кавычка", str(cm.exception))
+
+    def test_photo_css_appends_dimensions(self):
+        css = md_pdf.PHOTO_CSS.format(width="30mm", height="38mm")
+        self.assertIn("width: 30mm", css)
+        self.assertIn("height: 38mm", css)
+        self.assertIn("object-fit: cover", css)
+        self.assertIn("float: right", css)
+
+    def test_absolute_photo_src_embedded_regardless_of_base(self):
+        """Ключевое свойство вставки: абсолютный src втягивается в data-URI,
+        даже когда base (каталог исходника) - другая папка."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = (Path(tmp) / "фото.jpg").resolve()
+            p.write_bytes(b"\xff\xd8\xff")
+            body = f'<img class="photo" src="{p}"><h1>CV</h1>'
+            out = md_pdf.embed_images(body, Path(tmp) / "совсем-другая")
+        self.assertIn("data:image/jpeg;base64,", out)
+        self.assertNotIn(str(p), out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
