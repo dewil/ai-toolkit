@@ -68,6 +68,7 @@ coding:
   - rules/karpathy-guidelines.md        # снижение типовых LLM-ошибок в коде (простота, хирургичность)
   - rules/tests-coverage.md             # покрытие тестами, goal-driven проверка
   - rules/error-exposure.md             # не глотать ошибки - показывать их наверх
+  - rules/format-dimensions.md          # единый формат величин с размерностью: одна функция на размерность, постоянная точность, явные пороги единиц
   - agents/debugger.md                  # воспроизведение и локализация багов
   - agents/test-writer.md               # тесты с чистого листа по спеке, без чтения реализации (SDD)
   - agents/implementer.md               # реализация по готовому плану
