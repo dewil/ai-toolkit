@@ -58,6 +58,8 @@ universal:
   - scripts/session-cost.py             # движок подсчета токенов сессии (для скилла session-cost)
   - skills/pii-mask/SKILL.md            # маскировка ПД перед отправкой текста в облачную LLM и разворот ответа
   - skills/repo-publication/SKILL.md    # аудит приватного репозитория (секреты, ПД, NDA, история) и публикация с проверкой снаружи
+  - skills/local-transcription/SKILL.md # локальная (offline) транскрипция записи встречи/лекции: выбор ASR, token-free диаризация, очередь прогонов, грабли
+  - skills/local-transcription/transcribe_meeting.py # эталонная реализация движка (ставится на машину один раз, не раскатывается по проектам)
   - skills/agent-browser/SKILL.md       # развернуть на устройстве браузер по требованию: обратный туннель, управляющий канал с forced command, бэкап сессий
   - skills/agent-browser/runbook-mac.md # пошаговая установка схемы на macOS
   - scripts/chrome-cookies.py           # бэкап/восстановление кук браузерной сессии через CDP (дамп - секрет, см. secrets-handling)
@@ -104,7 +106,6 @@ management:
   - skills/telegram-send/SKILL.md       # настройка/починка отправки сообщений в Telegram
   - skills/redmine-snapshot/SKILL.md    # настройка/починка зеркала открытых задач Redmine
   - skills/mymeet-snapshot/SKILL.md     # настройка/починка зеркала расшифровок встреч из mymeet.ai
-  - skills/local-transcription/SKILL.md # локальная (offline) транскрипция записи встречи/лекции: выбор ASR, token-free диаризация, грабли
   - skills/estimate-calibration/SKILL.md # калибровочная оценка трудоемкости: якоря -> рубрика архетипов -> модификаторы -> калибровка по факту
   - skills/asana-comments/SKILL.md      # чтение ленты комментариев задачи Asana в обход потолка MCP в 50 штук
   - scripts/asana-comments.py           # постраничное чтение stories задачи Asana через REST (для скилла asana-comments)
@@ -125,4 +126,3 @@ education:
   - rules/course-structure.md           # структура курса
   - agents/note-taker.md                # конспектирование лекций и учебных материалов
   - skills/tutor/SKILL.md               # режим репетитора: объяснение и проверка понимания
-  - skills/local-transcription/SKILL.md # локальная (offline) транскрипция записи встречи/лекции: выбор ASR, token-free диаризация, грабли
