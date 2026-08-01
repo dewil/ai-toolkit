@@ -36,6 +36,7 @@ universal:
   - rules/client-umbrella.md            # клиент-зонтик: корень = папка клиента, одна память, ASCII-токен в имени
   - rules/memory-persistence.md         # проактивно сохранять durable-факты в память сразу, не дожидаясь конца сессии; память != контекст задачи
   - rules/mcp-multi-account.md          # несколько аккаунтов одного сервиса: второй OAuth-сервер под своим scope, авторизация в инкогнито, проверка привязки перед записью
+  - rules/agent-browser.md              # две браузерные площадки агента (серверная headless и пользовательская через туннель): как выбрать, как поднять и погасить, гигиена общего браузера
   - agents/architect.md                 # read-only проектирование: выбор подхода, trade-off, структура
   - agents/explorer.md                  # read-only разбор структуры и связей модулей
   - agents/searcher.md                  # поиск файлов/символов/паттернов (grep/glob)
@@ -57,6 +58,9 @@ universal:
   - scripts/session-cost.py             # движок подсчета токенов сессии (для скилла session-cost)
   - skills/pii-mask/SKILL.md            # маскировка ПД перед отправкой текста в облачную LLM и разворот ответа
   - skills/repo-publication/SKILL.md    # аудит приватного репозитория (секреты, ПД, NDA, история) и публикация с проверкой снаружи
+  - skills/agent-browser/SKILL.md       # развернуть на устройстве браузер по требованию: обратный туннель, управляющий канал с forced command, бэкап сессий
+  - skills/agent-browser/runbook-mac.md # пошаговая установка схемы на macOS
+  - scripts/chrome-cookies.py           # бэкап/восстановление кук браузерной сессии через CDP (дамп - секрет, см. secrets-handling)
 
 coding:
   - rules/karpathy-guidelines.md        # снижение типовых LLM-ошибок в коде (простота, хирургичность)
