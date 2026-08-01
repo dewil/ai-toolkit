@@ -170,6 +170,15 @@ def client_kwargs(auth: dict) -> dict:
     return {"proxy": (u.scheme, u.hostname, u.port)}
 
 
+def external_cancel() -> bool:
+    """True, если отменяют саму текущую таску (Ctrl+C через Runner и т.п.) -
+    такую отмену глотать нельзя. Отличается по task.cancelling() (py3.11+);
+    на py<3.11, где cancelling нет, консервативно считаем отмену внешней.
+    Копия хелпера из telegram-snapshot.py: скрипт намеренно самодостаточный."""
+    task = asyncio.current_task()
+    return task is None or not hasattr(task, "cancelling") or bool(task.cancelling())
+
+
 async def disconnect_quietly(client) -> None:
     """Best-effort закрытие клиента: своей ошибкой ничего не рвет.
 
@@ -182,6 +191,13 @@ async def disconnect_quietly(client) -> None:
     """
     try:
         await client.disconnect()
+    except asyncio.CancelledError:
+        # CancelledError - BaseException: без этой ветки отмена футур telethon
+        # в cleanup рвала бы finally и глушила итог прогона.
+        # Внешнюю отмену самой таски (Ctrl+C) не глотаем.
+        if external_cancel():
+            raise
+        sys.stderr.write("disconnect не отработал (CancelledError)\n")
     except Exception as exc:
         sys.stderr.write(f"disconnect не отработал ({type(exc).__name__}: {exc})\n")
 

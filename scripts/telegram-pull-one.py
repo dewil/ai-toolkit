@@ -48,7 +48,8 @@ def display_name(entity) -> str:
 
 
 async def amain(
-    chat_id: int, out_path: str, expected_username: str | None, account: str = "default"
+    chat_id: int, out_path: str, expected_username: str | None, account: str = "default",
+    download_media: bool = True,
 ) -> int:
     auth = tgs.load_auth(account)
     session_path = str(tgs.AUTH_DIR / auth["session_name"])
@@ -79,7 +80,8 @@ async def amain(
             return 2
 
         n, last_date = await tgs.process_chat(
-            client, tgs.PROJECT_ROOT, out_path, chat_id, dialog_entities
+            client, tgs.PROJECT_ROOT, out_path, chat_id, dialog_entities,
+            download_media=download_media,
         )
     finally:
         await tgs.disconnect_quietly(client)
@@ -120,8 +122,15 @@ def main() -> int:
         "--account", default="default",
         help="имя аккаунта из auth.json (по умолчанию default)",
     )
+    parser.add_argument(
+        "--no-media", action="store_true",
+        help="не скачивать вложения (только текст и метаданные)",
+    )
     args = parser.parse_args()
-    return asyncio.run(amain(args.chat_id, args.out_path, args.username, args.account))
+    return asyncio.run(amain(
+        args.chat_id, args.out_path, args.username, args.account,
+        download_media=not args.no_media,
+    ))
 
 
 if __name__ == "__main__":
