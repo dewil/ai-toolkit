@@ -42,7 +42,7 @@
 
 ШАГ 2. Целевое состояние.
 
-A. Канонический набор documentation = секция `documentation` в `manifest.yaml` (агенты специализации). Источник истины списка - **только манифест**; здесь файлы поименно не перечисляем. На ШАГ 4 фетчнешь манифест и раскатаешь секцию `documentation` по generic-маппингу: `rules/<name>.md` -> `.claude/rules/<name>.md` (+ @-импорт в CLAUDE.md); `agents/<name>.md` -> `.claude/agents/<name>.md`; `scripts/<name>` -> `<name>` в корне + `chmod +x`.
+A. Канонический набор documentation = секция `documentation` в `manifest.yaml` (агенты специализации). Источник истины списка - **только манифест**; здесь файлы поименно не перечисляем. На ШАГ 4 фетчнешь манифест и раскатаешь секцию `documentation` по generic-маппингу: `rules/<name>.md` -> `.claude/rules/<name>.md` (+ @-импорт в CLAUDE.md); `agents/<name>.md` -> `.claude/agents/<name>.md`; `scripts/<name>` -> `scripts/<name>` в корне + `chmod +x`.
 
 B. CLAUDE.md содержит `@`-ссылку на каждое правило `rules/*` из секции `documentation` (если правила в секции есть). Дополнительно содержит ссылку `@.claude/rules/style-guide.md` (шаблон, добавляется отдельно на шаге 4b).
 

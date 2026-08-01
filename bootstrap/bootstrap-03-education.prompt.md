@@ -39,7 +39,7 @@
 
 ШАГ 2. Целевое состояние.
 
-A. Канонический набор education = секция `education` в `manifest.yaml` (правила + агенты + скиллы специализации). Источник истины списка - **только манифест**; здесь файлы поименно не перечисляем. На ШАГ 4 фетчнешь манифест и раскатаешь секцию `education` по generic-маппингу: `rules/<name>.md` -> `.claude/rules/<name>.md` (+ @-импорт); `agents/<name>.md` -> `.claude/agents/<name>.md`; `skills/<name>/...` -> `.claude/skills/<name>/...` (скилл - папка, копируются все ее файлы из секции); `scripts/<name>` -> `<name>` в корне + `chmod +x`.
+A. Канонический набор education = секция `education` в `manifest.yaml` (правила + агенты + скиллы специализации). Источник истины списка - **только манифест**; здесь файлы поименно не перечисляем. На ШАГ 4 фетчнешь манифест и раскатаешь секцию `education` по generic-маппингу: `rules/<name>.md` -> `.claude/rules/<name>.md` (+ @-импорт); `agents/<name>.md` -> `.claude/agents/<name>.md`; `skills/<name>/...` -> `.claude/skills/<name>/...` (скилл - папка, копируются все ее файлы из секции); `scripts/<name>` -> `scripts/<name>` в корне + `chmod +x`.
 
 B. CLAUDE.md содержит `@`-ссылку на каждое правило `rules/*` из секции `education`.
 

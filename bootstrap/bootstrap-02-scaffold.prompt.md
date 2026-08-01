@@ -47,7 +47,7 @@
 - `agents/<name>.md` -> `.claude/agents/<name>.md`;
 - `skills/<name>/...` -> `.claude/skills/<name>/...` (скилл - это папка; копируются все ее файлы, перечисленные в секции);
 - `commands/<name>.md` -> `.claude/commands/<name>.md` (слэш-команда - живет в `.claude/`, как правила/агенты, без `chmod`; вызывается как `/<name>`);
-- `scripts/<name>` -> `<name>` в корне проекта, затем `chmod +x` (в `universal` скриптов сейчас нет, но маппинг общий для bootstrap-03).
+- `scripts/<name>` -> `scripts/<name>` в корне проекта (путь сохраняется - сами скрипты ищут `PROJECT_ROOT` от него), затем `chmod +x`. Тот же маппинг у sync и bootstrap-03.
 
 `project-structure.md` в набор НЕ входит: это не правило, а справочная карта структуры. Создается отдельным файлом в **корне проекта** (не в `.claude/rules/`) из шаблона с TODO - см. ШАГ 4c. `karpathy-guidelines.md` тоже не в `universal` - он специфичен для кодинга (тесты, рефакторинг, "LLM coding mistakes") и лежит в секции `coding` манифеста (накатывается `bootstrap-03-coding`).
 
