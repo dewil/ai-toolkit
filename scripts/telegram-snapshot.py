@@ -209,6 +209,14 @@ def client_kwargs(auth: dict) -> dict:
     return {"proxy": (u.scheme, u.hostname, u.port)}
 
 
+def external_cancel() -> bool:
+    """True, если отменяют саму текущую таску (Ctrl+C через Runner и т.п.) -
+    такую отмену глотать нельзя. Отличается по task.cancelling() (py3.11+);
+    на py<3.11, где cancelling нет, консервативно считаем отмену внешней."""
+    task = asyncio.current_task()
+    return task is None or not hasattr(task, "cancelling") or bool(task.cancelling())
+
+
 async def disconnect_quietly(client) -> None:
     """Best-effort закрытие клиента: своей ошибкой ничего не рвет.
 
@@ -220,6 +228,13 @@ async def disconnect_quietly(client) -> None:
     """
     try:
         await client.disconnect()
+    except asyncio.CancelledError:
+        # CancelledError - BaseException: без этой ветки отмена футур telethon
+        # в cleanup рвала бы finally и глушила итог прогона (ЧАСТИЧНО/OK).
+        # Внешнюю отмену самой таски (Ctrl+C) не глотаем - см. amain.
+        if external_cancel():
+            raise
+        sys.stderr.write("disconnect не отработал (CancelledError)\n")
     except Exception as exc:
         sys.stderr.write(f"disconnect не отработал ({type(exc).__name__}: {exc})\n")
 
@@ -279,11 +294,21 @@ def chat_entry(value) -> dict:
     dest - путь папки чата от корня проекта, для чатов подпроектов
     (клиент-зонтик): зеркало живет в папке подпроекта, а не в общем
     chats_root/<label>. Без dest поведение прежнее.
+
+    media=false - тянуть чат без вложений (только текст и метаданные). Нужно
+    для чатов с потоком картинок (мем-флудилки, новостные каналы): полезной
+    нагрузки в них нет, а скачивание тысяч файлов роняет прогон. По умолчанию
+    true - старые конфиги читаются без изменений.
     """
     if isinstance(value, dict):
         if "id" not in value:
             raise ValueError("в расширенной записи чата нет поля id")
         topic = value.get("topic_id")
+        media = value.get("media", True)
+        if not isinstance(media, bool):
+            # Строго bool: truthiness превращал бы "false" из JSON в True -
+            # защита от потока вложений молча не работала бы.
+            raise ValueError(f"поле media должно быть true/false, получено {media!r}")
         return {
             "id": int(value["id"]),
             # int обязателен: topic_id сравнивается с числовым полем сообщения,
@@ -291,8 +316,9 @@ def chat_entry(value) -> dict:
             "topic_id": int(topic) if topic is not None else None,
             "account": str(value.get("account") or "default"),
             "dest": str(value["dest"]) if value.get("dest") else None,
+            "media": media,
         }
-    return {"id": int(value), "topic_id": None, "account": "default", "dest": None}
+    return {"id": int(value), "topic_id": None, "account": "default", "dest": None, "media": True}
 
 
 def resolve_dest(dest: str) -> Path:
@@ -741,12 +767,16 @@ def cleanup_old_media(ttl_hours: int = MEDIA_TTL_HOURS) -> int:
     return removed
 
 
-async def fetch_new(client: TelegramClient, entity, min_id: int) -> tuple[list[dict], list[dict], dict, list[str]]:
+async def fetch_new(client: TelegramClient, entity, min_id: int,
+                    download_media: bool = True) -> tuple[list[dict], list[dict], dict, list[str]]:
     """Тянет новые сообщения с id > min_id.
 
     Возвращает (messages, new_topics, topic_edits, downloaded_media) - сообщения
     в формате TG Desktop, свежесозданные темы, накопленные правки названий
     (root_id -> new_title) и имена скачанных в кэш вложений.
+
+    download_media=False пропускает скачивание вложений (media=false в записи
+    чата): метаданные файлов в сообщениях остаются, самих файлов в кэше нет.
     """
     out: list[dict] = []
     new_topics: list[dict] = []
@@ -768,7 +798,7 @@ async def fetch_new(client: TelegramClient, entity, min_id: int) -> tuple[list[d
         record = await message_to_record(client, msg)
         if record:
             out.append(record)
-            name = await download_message_media(client, msg, chat_media_dir)
+            name = await download_message_media(client, msg, chat_media_dir) if download_media else None
             if name:
                 downloaded.append(name)
     return out, new_topics, topic_edits, downloaded
@@ -855,7 +885,7 @@ async def resolve_entity(client: TelegramClient, chat_id: int, dialog_entities: 
     return await client.get_entity(chat_id)
 
 
-async def process_chat(client: TelegramClient, chats_root: Path, label: str, chat_id: int, dialog_entities: dict, dest_dir: Path | None = None) -> tuple[int, str]:
+async def process_chat(client: TelegramClient, chats_root: Path, label: str, chat_id: int, dialog_entities: dict, dest_dir: Path | None = None, download_media: bool = True) -> tuple[int, str]:
     result_path = (dest_dir if dest_dir is not None else chats_root / label) / "result.json"
     entity = await resolve_entity(client, chat_id, dialog_entities)
 
@@ -885,11 +915,12 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
             try:
                 data, stats = migrate_legacy(data)
             except Exception as exc:
-                sys.stderr.write(
-                    f"!! {label}: миграция legacy формата упала ({exc}). "
-                    f"Файл не изменен, бэкап в {pre_path.name}, чат пропущен.\n"
-                )
-                return 0, ""
+                # Наверх, а не return 0: молчаливый успешный возврат маскировал
+                # пропущенный чат под обработанный - прогон печатал OK: и код 0.
+                raise RuntimeError(
+                    f"миграция legacy формата упала ({exc}); "
+                    f"файл не изменен, бэкап в {pre_path.name}"
+                ) from exc
             migrated = True
             print(
                 f"  {label}: миграция legacy -> new "
@@ -932,7 +963,7 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
     data.setdefault("topics", [])
     topics_by_id = {t["id"]: t for t in data["topics"]}
 
-    new_msgs, new_topics, topic_edits, downloaded_media = await fetch_new(client, entity, min_id)
+    new_msgs, new_topics, topic_edits, downloaded_media = await fetch_new(client, entity, min_id, download_media)
 
     for t in new_topics:
         topics_by_id[t["id"]] = t
@@ -987,6 +1018,7 @@ async def amain() -> int:
         by_account.setdefault(entry["account"], []).append((label, entry))
 
     total = 0
+    failed: list[str] = []
     for account in sorted(by_account):
         auth = load_auth(account)
         session_path = str(AUTH_DIR / auth["session_name"])
@@ -1013,19 +1045,66 @@ async def amain() -> int:
                 if eid is not None:
                     dialog_entities[eid] = d.entity
 
-            for label, entry in by_account[account]:
+            entries = by_account[account]
+            for i, (label, entry) in enumerate(entries):
                 chat_id = entry["id"]
                 try:
                     n, _ = await process_chat(
                         client, chats_root, label, chat_id, dialog_entities,
                         dest_dir=resolve_dest(entry["dest"]) if entry.get("dest") else None,
+                        download_media=entry.get("media", True),
                     )
                     total += n
+                except asyncio.CancelledError:
+                    # CancelledError - BaseException, мимо except Exception ниже.
+                    # Telethon отменяет свои футуры при разрыве соединения под
+                    # нагрузкой скачивания - это локальная беда одного чата, а не
+                    # команда остановить прогон. Но внешнюю отмену (Ctrl+C через
+                    # Runner в py3.11+) глушить нельзя - см. external_cancel().
+                    if external_cancel():
+                        raise
+                    failed.append(label)
+                    sys.stderr.write(
+                        f"!! {label} ({chat_id}): прерван (CancelledError - обычно "
+                        f"разрыв соединения при скачивании), чат пропущен\n"
+                    )
+                    # Отмена обычно значит, что соединение умерло. Без реконнекта
+                    # остаток чатов аккаунта посыпался бы каскадом ConnectionError.
+                    # Пересоздаем соединение БЕЗУСЛОВНО: is_connected() у telethon
+                    # отражает "пользователь просил связь", а не живость транспорта,
+                    # и после разрыва спокойно отдает True.
+                    reconnect_exc: BaseException | None = None
+                    try:
+                        await disconnect_quietly(client)
+                        await connect_with_retry(client)
+                    except asyncio.CancelledError as exc2:
+                        # нестабильная сессия отменяет и сам реконнект - это
+                        # коррелированный отказ, а не внешняя отмена
+                        if external_cancel():
+                            raise
+                        reconnect_exc = exc2
+                    except Exception as exc2:
+                        reconnect_exc = exc2
+                    if reconnect_exc is not None:
+                        rest = [l for l, _ in entries[i + 1:]]
+                        failed.extend(rest)
+                        sys.stderr.write(
+                            f"!! аккаунт {account}: реконнект не удался "
+                            f"({type(reconnect_exc).__name__}: {reconnect_exc}); "
+                            f"пропущены чаты: {', '.join(rest) or '-'}\n"
+                        )
+                        break
                 except Exception as exc:
-                    sys.stderr.write(f"!! {label} ({chat_id}): {exc}\n")
+                    failed.append(label)
+                    sys.stderr.write(f"!! {label} ({chat_id}): {exc} - чат пропущен\n")
         finally:
             await disconnect_quietly(client)
 
+    if failed:
+        # Не "OK:": этот маркер закреплен за полностью штатным завершением
+        # (см. скилл telegram-snapshot, раздел про лок и завершение).
+        print(f"\nЧАСТИЧНО: +{total} сообщений; провалено чатов: {len(failed)} ({', '.join(failed)})")
+        return 1
     print(f"\nOK: +{total} сообщений всего")
     return 0
 

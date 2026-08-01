@@ -380,6 +380,315 @@ class PerChatDest(unittest.TestCase):
         self.assertIn("новое из dest", out.getvalue())
 
 
+class MediaFlag(unittest.TestCase):
+    """Ключ media: чат без вложений (мем-флудилка роняла прогон скачиванием)."""
+
+    def test_default_true_both_forms(self):
+        self.assertTrue(SNAPSHOT.chat_entry(7)["media"])
+        self.assertTrue(SNAPSHOT.chat_entry({"id": 7})["media"])
+
+    def test_false_parsed(self):
+        self.assertFalse(SNAPSHOT.chat_entry({"id": 7, "media": False})["media"])
+
+    def test_non_bool_media_rejected(self):
+        """"false" строкой из JSON через truthiness давал True - защита от
+        потока вложений молча не работала бы. Только настоящий bool."""
+        for bad in ("false", "true", 0, 1, None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    SNAPSHOT.chat_entry({"id": 7, "media": bad})
+
+    def test_deltas_ignores_media_key(self):
+        """deltas работает с готовым JSON - выкачки нет, ключ просто переживает."""
+        self.assertEqual(
+            DELTAS.chat_entry({"id": 7, "media": False}),
+            {"id": 7, "topic_id": None, "dest": None})
+
+    def test_send_survives_media_key(self):
+        self.assertEqual(SEND.chat_entry({"id": 7, "media": False})["id"], 7)
+
+    def test_fetch_new_plumbing(self):
+        """download_media=False - download_message_media не вызывается вовсе;
+        с дефолтом True - вызывается. Мутация 'флаг игнорируется' роняет тест."""
+        calls: list[int] = []
+
+        async def fake_download(client, msg, chat_media_dir):
+            calls.append(msg.id)
+            return "f.jpg"
+
+        async def fake_record(client, msg):
+            return {"id": msg.id}
+
+        def make_client():
+            msg = types.SimpleNamespace(id=5, action=None, reply_to=None)
+
+            class Client:
+                def iter_messages(self, entity, min_id=0, reverse=True):
+                    async def gen():
+                        yield msg
+                    return gen()
+
+            return Client()
+
+        entity = types.SimpleNamespace(id=1)
+        orig_dl = SNAPSHOT.download_message_media
+        orig_rec = SNAPSHOT.message_to_record
+        SNAPSHOT.download_message_media = fake_download
+        SNAPSHOT.message_to_record = fake_record
+        try:
+            out, _, _, downloaded = asyncio.run(
+                SNAPSHOT.fetch_new(make_client(), entity, 0, download_media=False))
+            self.assertEqual([m["id"] for m in out], [5])
+            self.assertEqual(calls, [])
+            self.assertEqual(downloaded, [])
+            _, _, _, downloaded = asyncio.run(
+                SNAPSHOT.fetch_new(make_client(), entity, 0))
+            self.assertEqual(calls, [5])
+            self.assertEqual(downloaded, ["f.jpg"])
+        finally:
+            SNAPSHOT.download_message_media = orig_dl
+            SNAPSHOT.message_to_record = orig_rec
+
+
+class PartialFailure(unittest.TestCase):
+    """Отказ одного чата не роняет прогон (в т.ч. CancelledError от разрыва
+    соединения - он BaseException и мимо except Exception), но виден в коде
+    возврата. Внешняя отмена (Ctrl+C) при этом не глушится."""
+
+    @contextlib.contextmanager
+    def _patched_amain(self, effects: dict):
+        """Подменяет тяжелые зависимости amain; effects: label -> число новых
+        сообщений или исключение, которое кидает process_chat этого чата."""
+        cfg = {
+            "chats": {label: SNAPSHOT.chat_entry(i + 1)
+                      for i, label in enumerate(effects)},
+            "chats_root": "чаты",
+        }
+        calls: list[str] = []
+
+        async def fake_process_chat(client, chats_root, label, chat_id,
+                                    dialog_entities, dest_dir=None,
+                                    download_media=True):
+            calls.append(label)
+            eff = effects[label]
+            if isinstance(eff, BaseException):
+                raise eff
+            return eff, "2026-08-01T00:00:00"
+
+        class Client:
+            def __init__(self, *a, **k):
+                pass
+
+            def is_connected(self):
+                return True
+
+            def iter_dialogs(self):
+                async def gen():
+                    return
+                    yield
+                return gen()
+
+        async def fake_connect(client, interactive=True):
+            pass
+
+        async def fake_disconnect(client):
+            pass
+
+        patches = {
+            "load_project_config": lambda: cfg,
+            "load_auth": lambda account="default": {
+                "session_name": "s", "api_id": 1, "api_hash": "h"},
+            "client_kwargs": lambda auth: {},
+            "TelegramClient": Client,
+            "connect_with_retry": fake_connect,
+            "disconnect_quietly": fake_disconnect,
+            "process_chat": fake_process_chat,
+        }
+        originals = {k: getattr(SNAPSHOT, k) for k in patches}
+        for k, v in patches.items():
+            setattr(SNAPSHOT, k, v)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                yield calls, out, err
+        finally:
+            for k, v in originals.items():
+                setattr(SNAPSHOT, k, v)
+
+    def test_all_ok_returns_zero(self):
+        with self._patched_amain({"A": 2, "B": 3}) as (calls, out, _):
+            code = asyncio.run(SNAPSHOT.amain())
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ["A", "B"])
+        self.assertIn("OK: +5", out.getvalue())
+
+    def test_media_flag_reaches_process_chat(self):
+        """media: false из записи чата доезжает до process_chat как
+        download_media=False; у остальных остается True."""
+        seen: dict[str, bool] = {}
+
+        async def recording_process_chat(client, chats_root, label, chat_id,
+                                         dialog_entities, dest_dir=None,
+                                         download_media=True):
+            seen[label] = download_media
+            return 0, "d"
+
+        with self._patched_amain({"мемы": 0, "рабочий": 0}):
+            SNAPSHOT.load_project_config = lambda: {
+                "chats": {
+                    "мемы": SNAPSHOT.chat_entry({"id": 1, "media": False}),
+                    "рабочий": SNAPSHOT.chat_entry(2),
+                },
+                "chats_root": "чаты",
+            }
+            SNAPSHOT.process_chat = recording_process_chat
+            code = asyncio.run(SNAPSHOT.amain())
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, {"мемы": False, "рабочий": True})
+
+    def test_exception_isolated_and_exit_nonzero(self):
+        with self._patched_amain({"A": RuntimeError("boom"), "B": 3}) as (calls, out, err):
+            code = asyncio.run(SNAPSHOT.amain())
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, ["A", "B"])
+        self.assertIn("!! A", err.getvalue())
+        self.assertIn("ЧАСТИЧНО", out.getvalue())
+        self.assertNotIn("OK:", out.getvalue())
+
+    def test_cancelled_error_isolated(self):
+        """Инцидент 2026-08-01: CancelledError из download_media ронял ВЕСЬ
+        прогон - следующие чаты не обновлялись."""
+        with self._patched_amain(
+                {"мемы": asyncio.CancelledError(), "рабочий": 4}) as (calls, _, err):
+            code = asyncio.run(SNAPSHOT.amain())
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, ["мемы", "рабочий"])
+        self.assertIn("!! мемы", err.getvalue())
+
+    def test_external_cancel_reraised(self):
+        """Ctrl+C (отмена самой таски) не глушится изоляцией по чатам."""
+        async def cancelling_effect_runner():
+            task = asyncio.ensure_future(SNAPSHOT.amain())
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(task.cancelled())
+
+        effects = {"A": asyncio.CancelledError(), "B": 1}
+
+        # process_chat чата A отменяет свою же таску перед CancelledError -
+        # как это делает Runner на SIGINT
+        async def fake_process_chat(client, chats_root, label, chat_id,
+                                    dialog_entities, dest_dir=None,
+                                    download_media=True):
+            calls.append(label)
+            eff = effects[label]
+            if isinstance(eff, BaseException):
+                asyncio.current_task().cancel()
+                raise eff
+            return eff, "d"
+
+        calls: list[str] = []
+        with self._patched_amain(effects) as (_, __, ___):
+            SNAPSHOT.process_chat = fake_process_chat
+            asyncio.run(cancelling_effect_runner())
+        self.assertEqual(calls, ["A"])  # B не обрабатывался - отмена прошла наверх
+
+    def test_dead_client_fails_fast_not_cascade(self):
+        """CancelledError от мертвого соединения: реконнект не удался - остаток
+        чатов аккаунта помечается провалом сразу, а не сыплется каскадом.
+        Клиент при этом УТВЕРЖДАЕТ is_connected()=True (телетоновский
+        _user_connected живости транспорта не отражает) - реконнект обязан
+        идти безусловно, не доверяя этому флагу."""
+        effects = {"A": asyncio.CancelledError(), "B": 1, "C": 2}
+        with self._patched_amain(effects) as (calls, out, err):
+            async def connect(client, *, interactive=False, **kw):
+                if not interactive:
+                    raise ConnectionError("нет сети")
+            SNAPSHOT.connect_with_retry = connect
+            code = asyncio.run(SNAPSHOT.amain())
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, ["A"])
+        self.assertIn("реконнект не удался", err.getvalue())
+        # пропущенные чаты входят в итоговый счетчик провалов, не только в stderr
+        self.assertIn("провалено чатов: 3 (A, B, C)", out.getvalue())
+
+    def test_reconnect_cancelled_isolated_too(self):
+        """Отмена самого реконнекта (коррелированный отказ нестабильной сессии) -
+        тоже провал остатка аккаунта с ЧАСТИЧНО, а не тихий выход из amain."""
+        effects = {"A": asyncio.CancelledError(), "B": 1}
+        with self._patched_amain(effects) as (calls, out, err):
+            async def connect(client, *, interactive=False, **kw):
+                if not interactive:
+                    raise asyncio.CancelledError()
+            SNAPSHOT.connect_with_retry = connect
+            code = asyncio.run(SNAPSHOT.amain())
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, ["A"])
+        self.assertIn("ЧАСТИЧНО", out.getvalue())
+
+    def test_dead_client_reconnects_and_continues(self):
+        effects = {"A": asyncio.CancelledError(), "B": 3}
+        reconnects = []
+        with self._patched_amain(effects) as (calls, _, __):
+            async def connect(client, *, interactive=False, **kw):
+                if not interactive:
+                    reconnects.append(1)
+            SNAPSHOT.connect_with_retry = connect
+            code = asyncio.run(SNAPSHOT.amain())
+        self.assertEqual(code, 1)  # чат A все равно провален
+        self.assertEqual(calls, ["A", "B"])
+        self.assertEqual(reconnects, [1])
+
+
+class MigrationFailure(unittest.TestCase):
+    """Провал legacy-миграции - провал чата, а не молчаливый успех: раньше
+    process_chat возвращал (0, "") и прогон печатал OK:/код 0 при пропущенном
+    чате (находка adversarial-ревью)."""
+
+    def test_migration_failure_raises_and_keeps_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chat_dir = root / "X"
+            chat_dir.mkdir()
+            payload = {"id": 1, "messages": [
+                {"id": 5, "type": "message", "date": "2026-08-01T00:00:00"}]}
+            (chat_dir / "result.json").write_text(
+                json.dumps(payload), encoding="utf-8")
+
+            def boom(data):
+                raise ValueError("boom")
+
+            orig_cleanup = SNAPSHOT.cleanup_old_media
+            orig_migrate = SNAPSHOT.migrate_legacy
+            SNAPSHOT.cleanup_old_media = lambda: 0
+            SNAPSHOT.migrate_legacy = boom
+            try:
+                entity = types.SimpleNamespace(id=1, title="X")
+                with self.assertRaises(RuntimeError) as cm:
+                    asyncio.run(SNAPSHOT.process_chat(
+                        None, root, "X", 1, {1: entity}))
+                self.assertIn("миграция", str(cm.exception))
+                got = json.loads(
+                    (chat_dir / "result.json").read_text(encoding="utf-8"))
+                self.assertEqual(got, payload)
+            finally:
+                SNAPSHOT.cleanup_old_media = orig_cleanup
+                SNAPSHOT.migrate_legacy = orig_migrate
+
+
+class PullOneNoMedia(unittest.TestCase):
+    """--no-media у telegram-pull-one: у него нет конфига с записями чатов,
+    выключатель вложений - только флагом."""
+
+    def test_amain_accepts_download_media(self):
+        import inspect
+        pull_one = load_module("telegram-pull-one.py", "tg_pull_one")
+        self.assertIn("download_media", inspect.signature(pull_one.amain).parameters)
+        src = (SCRIPTS / "telegram-pull-one.py").read_text(encoding="utf-8")
+        self.assertIn("--no-media", src)
+        self.assertIn("not args.no_media", src)
+
+
 class SendOneFile(unittest.TestCase):
     """--file в telegram-send-one: гейты отрабатывают до захвата общей сессии."""
 
@@ -419,6 +728,20 @@ class SendOneFile(unittest.TestCase):
         чем трогаем сессию."""
         src = (SCRIPTS / "telegram-send-one.py").read_text(encoding="utf-8")
         self.assertLess(src.index("Файл не найден"), src.index("load_auth"))
+
+
+class DisconnectSwallowsCancel(unittest.TestCase):
+    """CancelledError в cleanup: без перехвата отмена футур telethon в finally
+    глушила бы итог прогона (ЧАСТИЧНО/OK). Обе копии хелпера."""
+
+    def test_cancelled_error_swallowed_with_warning(self):
+        for name, mod in BOTH:
+            with self.subTest(mod=name):
+                client = FakeClient(0, disconnect_error=asyncio.CancelledError())
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    asyncio.run(mod.disconnect_quietly(client))
+                self.assertIn("CancelledError", err.getvalue())
 
 
 class AtomicWrite(unittest.TestCase):
