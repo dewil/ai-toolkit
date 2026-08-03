@@ -689,13 +689,55 @@ class PullOneNoMedia(unittest.TestCase):
         self.assertIn("not args.no_media", src)
 
 
+class SilentFlag(unittest.TestCase):
+    """--silent: беззвучная отправка (rules/outbound-timing.md - средний путь
+    между "отправить" и "отложить"). Проверяем три вещи: флаг объявлен в обоих
+    скриптах, доезжает до send_message И send_file (вложение будит так же, как
+    текст), и виден в dry-run - гейт показывает пользователю, что уйдет."""
+
+    def test_flag_declared_in_both(self):
+        for name in ("telegram-send.py", "telegram-send-one.py"):
+            with self.subTest(script=name):
+                src = (SCRIPTS / name).read_text(encoding="utf-8")
+                self.assertIn('"--silent"', src)
+
+    def test_reaches_both_send_calls(self):
+        """Мутация 'silent не пробросили' обязана уронить тест - иначе флаг
+        молча ничего не делает, а пользователь уверен, что отправил тихо."""
+        for name in ("telegram-send.py", "telegram-send-one.py"):
+            with self.subTest(script=name):
+                src = (SCRIPTS / name).read_text(encoding="utf-8")
+                tree = ast.parse(src)
+                calls = {}
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    fn = node.func
+                    if isinstance(fn, ast.Attribute) and fn.attr in ("send_message", "send_file"):
+                        kw = {k.arg for k in node.keywords}
+                        calls.setdefault(fn.attr, []).append(kw)
+                self.assertEqual(set(calls), {"send_message", "send_file"},
+                                 f"{name}: ожидались оба вызова отправки")
+                for meth, variants in calls.items():
+                    for kw in variants:
+                        self.assertIn("silent", kw, f"{name}: {meth} без silent")
+
+    def test_dry_run_shows_sound(self):
+        for name in ("telegram-send.py", "telegram-send-one.py"):
+            with self.subTest(script=name):
+                src = (SCRIPTS / name).read_text(encoding="utf-8")
+                self.assertIn("звук:", src)
+                self.assertIn("args.silent", src)
+
+
 class SendOneFile(unittest.TestCase):
     """--file в telegram-send-one: гейты отрабатывают до захвата общей сессии."""
 
     def _run(self, **kw):
         args = types.SimpleNamespace(
             chat_id="123", username=None, text="привет", send=False,
-            topic=None, reply_to=None, account="default", html=False, file=None)
+            topic=None, reply_to=None, account="default", html=False, file=None,
+            silent=False)
         for k, v in kw.items():
             setattr(args, k, v)
         err = io.StringIO()

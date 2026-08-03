@@ -107,7 +107,7 @@ async def amain(args) -> int:
         if not args.send:
             print("DRY-RUN (без --send отправка не сделана)")
             print(f"  -> \"{title}\" (@{actual_username or '?'}, {kind}, id={chat_id})")
-            print(f"  ответ на: {args.reply_to if args.reply_to is not None else '-'}   формат: {'html' if args.html else 'сырой текст'}   аккаунт: {args.account}")
+            print(f"  ответ на: {args.reply_to if args.reply_to is not None else '-'}   формат: {'html' if args.html else 'сырой текст'}   аккаунт: {args.account}   звук: {'нет' if args.silent else 'да'}")
             if file_path:
                 # полный резолвленный путь и точный размер: dry-run - это
                 # предохранитель "тот ли файл", по одному имени его не проверить
@@ -126,10 +126,12 @@ async def amain(args) -> int:
             # файл с подписью-текстом; force_document - имя и расширение как есть
             sent = await client.send_file(
                 entity, str(file_path), caption=text, reply_to=reply_to,
-                force_document=True, parse_mode=parse_mode,
+                force_document=True, parse_mode=parse_mode, silent=args.silent,
             )
         else:
-            sent = await client.send_message(entity, text, reply_to=reply_to, parse_mode=parse_mode)
+            sent = await client.send_message(
+                entity, text, reply_to=reply_to, parse_mode=parse_mode, silent=args.silent,
+            )
         print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
@@ -152,6 +154,11 @@ def main() -> int:
                         help="id сообщения, на которое отвечаем")
     parser.add_argument("--account", default="default",
                         help="имя аккаунта из auth.json (по умолчанию default)")
+    parser.add_argument("--silent", action="store_true",
+                        help="отправить без звука (получателю придет беззвучное уведомление). "
+                             "Нужно, когда отправляем вне рабочего окна получателя - см. "
+                             "rules/outbound-timing.md: звук ночью выдает автомат, но метка "
+                             "времени остается видимой, поэтому это не обход правила")
     parser.add_argument("--html", action="store_true",
                         help="слать как HTML (жирный/код/ссылки). Без флага - сырой текст. "
                              "HTML, а не MarkdownV2: тот требует экранировать точки/дефисы/скобки, "

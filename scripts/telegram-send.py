@@ -425,7 +425,7 @@ async def amain(args) -> int:
             # от какого аккаунта уйдет - часть гейта: при нескольких номерах
             # ошибиться отправителем так же легко, как чатом
             print(f"  от аккаунта: {entry['account']}")
-            print(f"  тема: {topic_id if topic_id is not None else '-'}   ответ на: {reply_id if reply_id is not None else '-'}")
+            print(f"  тема: {topic_id if topic_id is not None else '-'}   ответ на: {reply_id if reply_id is not None else '-'}   звук: {'нет' if args.silent else 'да'}")
             if file_path:
                 # полный резолвленный путь и точный размер: dry-run - это
                 # предохранитель "тот ли файл", по одному имени его не проверить
@@ -443,10 +443,12 @@ async def amain(args) -> int:
             # файл с подписью-текстом; force_document - имя и расширение как есть
             sent = await client.send_file(
                 entity, str(file_path), caption=text, reply_to=reply_to,
-                force_document=True, parse_mode=None,
+                force_document=True, parse_mode=None, silent=args.silent,
             )
         else:
-            sent = await client.send_message(entity, text, reply_to=reply_to, parse_mode=None)
+            sent = await client.send_message(
+                entity, text, reply_to=reply_to, parse_mode=None, silent=args.silent,
+            )
         print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
@@ -463,6 +465,11 @@ def main() -> int:
     parser.add_argument("--send", action="store_true", help="реально отправить (без флага - dry-run)")
     parser.add_argument("--topic", type=int, help="id корня форумной темы (по умолчанию - из конфига, если задан)")
     parser.add_argument("--reply-to", type=int, dest="reply_to", help="id сообщения, на которое отвечаем")
+    parser.add_argument("--silent", action="store_true",
+                        help="отправить без звука (получателю придет беззвучное уведомление). "
+                             "Нужно, когда отправляем вне рабочего окна получателя - см. "
+                             "rules/outbound-timing.md: звук ночью выдает автомат, но метка "
+                             "времени остается видимой, поэтому это не обход правила")
     args = parser.parse_args()
     return asyncio.run(amain(args))
 
