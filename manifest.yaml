@@ -69,6 +69,7 @@ coding:
   - rules/tests-coverage.md             # покрытие тестами, goal-driven проверка
   - rules/error-exposure.md             # не глотать ошибки - показывать их наверх
   - rules/format-dimensions.md          # единый формат величин с размерностью: одна функция на размерность, постоянная точность, явные пороги единиц
+  - rules/requirements-traceability.md  # трассируемость требование-код-тест через теги тестов вместо ручной матрицы, rot-guard
   - agents/debugger.md                  # воспроизведение и локализация багов
   - agents/test-writer.md               # тесты с чистого листа по спеке, без чтения реализации (SDD)
   - agents/implementer.md               # реализация по готовому плану
@@ -78,6 +79,7 @@ coding:
   - skills/qa-browser/SKILL.md          # report-only QA-проход по веб-UI через браузер (chrome-devtools MCP)
 
 documentation:
+  - rules/doc-style-guide.md            # стиль страницы документации: каркас, регистр заголовков, роли выделений, ссылки, глоссарий
   - agents/copy-editor.md               # вычитка и редактура текстов
 
 wiki:
