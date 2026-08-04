@@ -198,7 +198,12 @@ class DocxBody(html.parser.HTMLParser):
         self.sink = self.body      # куда падают готовые параграфы
         self.runs: list[str] = []  # runs текущего параграфа
         self.style = "Normal"
-        self.numid = 0             # 1 - bullet, 2 - decimal, 0 - не список
+        self.numid = 0             # нумерация ТЕКУЩЕГО абзаца (сбрасывается в flush)
+        self.list_num = 0          # какой список открыт: 1 - bullet, 2 - decimal, 0 - нет.
+                                   # Отдельно от numid: numid обнуляется на каждом
+                                   # flush(), и без этого поля маркер получал только
+                                   # первый <li> - остальные шли со стилем списка,
+                                   # но без <w:numPr> (визуально похоже, маркера нет)
         self.fmt: list[str] = []   # активные inline-стили: b, i, code
         self.links: list[str] = []  # стек rId открытых гиперссылок
         self.in_pre = False
@@ -311,7 +316,7 @@ class DocxBody(html.parser.HTMLParser):
             self.in_quote = True
         elif tag in ("ul", "ol"):
             self.flush()
-            self.numid = 1 if tag == "ul" else 2
+            self.list_num = 1 if tag == "ul" else 2
         elif tag == "table":
             self.flush()
             self.rows, self.width = [], 0
@@ -336,6 +341,7 @@ class DocxBody(html.parser.HTMLParser):
                 self.style = f"Heading{tag[1]}"
             elif tag == "li":
                 self.style = "ListParagraph"
+                self.numid = self.list_num   # нумерация нужна КАЖДОМУ пункту
             elif tag == "p":
                 self.style = "Quote" if self.in_quote else "Normal"
 
@@ -353,7 +359,7 @@ class DocxBody(html.parser.HTMLParser):
             self.in_quote = False
         elif tag in ("ul", "ol"):
             self.flush()
-            self.numid = 0
+            self.list_num = 0
         elif tag == "a":
             if self.links:
                 self.links.pop()

@@ -143,6 +143,48 @@ class Blocks(unittest.TestCase):
         numids = sorted({n.get(W + "val") for n in doc.iter(W + "numId")})
         self.assertEqual(numids, ["1", "2"])  # 1 - bullet, 2 - decimal
 
+    def _list_paragraphs(self, doc):
+        """Абзацы со стилем списка -> [(numId или None)] в порядке документа."""
+        out = []
+        for para in doc.iter(W + "p"):
+            style = para.find(f"{W}pPr/{W}pStyle")
+            if style is not None and style.get(W + "val") == "ListParagraph":
+                num = para.find(f"{W}pPr/{W}numPr/{W}numId")
+                out.append(num.get(W + "val") if num is not None else None)
+        return out
+
+    def test_every_bullet_item_numbered(self):
+        """Дефект, доживший до Word: numId обнулялся в flush() после первого
+        пункта, и маркер получал только он. Стиль оставался списочным, поэтому
+        отступы выглядели правильно - проверять надо каждый пункт, а не наличие
+        numId в документе."""
+        doc = document("- один\n- два\n- три\n")
+        self.assertEqual(self._list_paragraphs(doc), ["1", "1", "1"])
+
+    def test_every_ordered_item_numbered(self):
+        doc = document("1. первый\n2. второй\n3. третий\n")
+        self.assertEqual(self._list_paragraphs(doc), ["2", "2", "2"])
+
+    def test_list_type_switches_between_blocks(self):
+        """Маркированный -> абзац -> нумерованный -> маркированный: тип списка
+        не залипает и не протекает через промежуточный абзац."""
+        doc = document("- а\n- б\n\nтекст\n\n1. раз\n2. два\n\n- в\n- г\n")
+        self.assertEqual(self._list_paragraphs(doc), ["1", "1", "2", "2", "1", "1"])
+
+    def test_numbering_does_not_leak_outside_lists(self):
+        """Обратная сторона починки: нумерация не должна протекать в абзацы,
+        цитаты, заголовки и ячейки таблицы после списка."""
+        md = ("- пункт\n- еще\n\nобычный абзац\n\n> цитата\n\n"
+              "## заголовок\n\n| a | b |\n| - | - |\n| 1 | 2 |\n")
+        doc = document(md)
+        for para in doc.iter(W + "p"):
+            style = para.find(f"{W}pPr/{W}pStyle")
+            name = style.get(W + "val") if style is not None else None
+            if name == "ListParagraph":
+                continue
+            self.assertIsNone(para.find(f"{W}pPr/{W}numPr"),
+                              f"нумерация протекла в абзац стиля {name}")
+
     def test_quote_style(self):
         doc = document("> цитата\n")
         styles = [p.find(f"{W}pPr/{W}pStyle").get(W + "val") for p in doc.iter(W + "p")]
