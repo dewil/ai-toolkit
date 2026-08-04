@@ -111,6 +111,24 @@ a { color: #1a5276; text-decoration: none; }
 img { max-width: 100%; }
 """
 
+# Стили --separators. Как и PHOTO_CSS, дописываются ПОСЛЕ используемого CSS.
+# Черта под заголовком секции и тонкая черта над должностью: в многостраничном
+# документе они держат ритм страницы лучше, чем одни отступы.
+SEPARATORS_CSS = """
+h2 {
+  color: #1a5276;
+  border-bottom: 1.2px solid #1a5276;
+  padding-bottom: .8mm;
+}
+h4 {
+  padding-top: 2mm;
+  border-top: 1px solid #c9d4dc;
+}
+/* первый h4 сразу после h3 - без черты, иначе две линии подряд */
+h3 + h4 { border-top: none; padding-top: 0; }
+"""
+
+
 # Стили --photo. Дописываются ПОСЛЕ используемого CSS (в том числе после
 # пользовательского --css): флаг работает с чужими стилями без знания про
 # класс, а кто хочет переопределить - пишет более специфичный селектор.
@@ -423,6 +441,8 @@ def main() -> int:
                          "markdown-исходник не трогается")
     ap.add_argument("--photo-width", default="30mm", help="ширина фото (по умолчанию 30mm)")
     ap.add_argument("--photo-height", default="38mm", help="высота фото (по умолчанию 38mm, пропорция 3x4)")
+    ap.add_argument("--separators", action="store_true",
+                    help="горизонтальные разделители: черта под H2 и тонкая черта над H4")
     args = ap.parse_args()
 
     if not args.src.exists():
@@ -443,6 +463,8 @@ def main() -> int:
         # и заменит его на data-URI (существование файла уже проверено)
         body = f'<img class="photo" src="{photo_path}">' + body
         css += PHOTO_CSS.format(width=args.photo_width, height=args.photo_height)
+    if args.separators:
+        css += SEPARATORS_CSS
     body = embed_images(body, args.src.parent)
     title = args.title or title or args.src.stem
     doc = (

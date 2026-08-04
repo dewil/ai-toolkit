@@ -14,7 +14,9 @@
 """
 from __future__ import annotations
 
+import base64
 import importlib.util
+import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 import zipfile
@@ -197,9 +199,10 @@ class Blocks(unittest.TestCase):
         self.assertIn("строка один", code)
         self.assertIn("строка два", code)
 
-    def test_image_becomes_alt_text(self):
-        # картинки в docx не поддержаны: молча терять подпись нельзя
-        self.assertIn("[схема]", text_of(document("![схема](x.png)\n")))
+    def test_missing_image_falls_back_to_alt(self):
+        # файла нет - документ собирается, но получатель видит, что тут была
+        # картинка; молчание было бы хуже отсутствия
+        self.assertIn("[схема]", text_of(document("![схема](нет-такого.png)\n")))
 
 
 class Tables(unittest.TestCase):
@@ -445,6 +448,131 @@ class TitleForProperties(unittest.TestCase):
         self.assertEqual(md_docx.plain_title("**API** get_user_by_id"), "API get_user_by_id")
 
 
+# минимальный валидный PNG 1x1 (сигнатура + IHDR + IDAT + IEND)
+PNG_1x1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+def pack_with(md: str, tmpdir: Path, **kw) -> zipfile.ZipFile:
+    """md -> .docx с указанием каталога источника (для картинок) и опций."""
+    body_html = md_pdf.md_to_html(md)[1]
+    return zipfile.ZipFile(BytesIO(
+        md_docx.build(body_html, "tester", "T", src_dir=tmpdir, **kw)))
+
+
+class Images(unittest.TestCase):
+    """Класс ошибок здесь - "Word молча объявляет файл поврежденным", поэтому
+    проверки структурные: части пакета, объявленные типы, уникальность id."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "pic.png").write_bytes(PNG_1x1)
+
+    def test_image_embedded_as_part(self):
+        z = pack_with("![схема](pic.png)\n", self.tmp)
+        media = [n for n in z.namelist() if n.startswith("word/media/")]
+        self.assertEqual(len(media), 1, z.namelist())
+        self.assertEqual(z.read(media[0]), PNG_1x1)
+
+    def test_extension_declared_in_content_types(self):
+        """Без Default для расширения Word не откроет пакет вовсе."""
+        z = pack_with("![схема](pic.png)\n", self.tmp)
+        ct = z.read("[Content_Types].xml").decode()
+        self.assertIn('Extension="png"', ct)
+
+    def test_rids_unique_across_images_and_links(self):
+        """Пойманный дефект: у картинок и гиперссылок общий rels-файл, а
+        счетчики были раздельные - картинка и ссылка получили один rId."""
+        z = pack_with("![схема](pic.png)\n\n[ссылка](https://example.com)\n", self.tmp)
+        rels = ET.fromstring(z.read("word/_rels/document.xml.rels"))
+        ids = [r.get("Id") for r in rels]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        self.assertGreaterEqual(len(ids), 2)
+
+    def test_docpr_ids_unique(self):
+        z = pack_with("![a](pic.png)\n\n![b](pic.png)\n\n![c](pic.png)\n", self.tmp)
+        doc = z.read("word/document.xml").decode()
+        import re as _re
+        ids = _re.findall(r'<wp:docPr id="(\d+)"', doc)
+        self.assertEqual(len(ids), len(set(ids)), ids)
+
+    def test_same_file_stored_once(self):
+        z = pack_with("![a](pic.png)\n\n![b](pic.png)\n", self.tmp)
+        media = [n for n in z.namelist() if n.startswith("word/media/")]
+        self.assertEqual(len(media), 1, media)
+
+    def test_remote_image_falls_back_to_alt(self):
+        z = pack_with("![внешняя](https://example.com/x.png)\n", self.tmp)
+        doc = ET.fromstring(z.read("word/document.xml"))
+        self.assertIn("[внешняя]", text_of(doc))
+        self.assertFalse([n for n in z.namelist() if n.startswith("word/media/")])
+
+    def test_unknown_format_falls_back_to_alt(self):
+        (self.tmp / "fake.png").write_bytes(b"not an image at all")
+        z = pack_with("![битая](fake.png)\n", self.tmp)
+        doc = ET.fromstring(z.read("word/document.xml"))
+        self.assertIn("[битая]", text_of(doc))
+
+    def test_jpeg_declared_by_own_extension(self):
+        """Бриф просит Default на КАЖДОЕ расширение: у png и jpg разные типы,
+        и Word спотыкается на несовпадении объявленного типа с содержимым."""
+        # минимальный валидный JPEG: SOI + APP0 + SOF0(1x1) + EOI - размеры
+        # лежат в SOF0, огрызок без него image_size() честно не распознает
+        jpeg = base64.b64decode("/9j/4AAQSkZJRgABAQAAAQABAAD/wAALCAABAAEBAREA/9k=")
+        (self.tmp / "photo.jpg").write_bytes(jpeg)
+        z = pack_with("![фото](photo.jpg)\n", self.tmp)
+        ct = z.read("[Content_Types].xml").decode()
+        # расширение части - по СИГНАТУРЕ файла (jpeg), а не по имени исходника
+        # (.jpg): Word спотыкается на несовпадении объявленного типа с содержимым,
+        # а ".jpg с PNG внутри" - обычное дело после пересохранения
+        self.assertIn('Extension="jpeg" ContentType="image/jpeg"', ct)
+        self.assertTrue([n for n in z.namelist() if n.endswith(".jpeg")], z.namelist())
+
+    def test_all_parts_valid_xml_with_image(self):
+        z = pack_with("![схема](pic.png)\n", self.tmp)
+        for name in z.namelist():
+            if name.endswith(".xml") or name.endswith(".rels"):
+                ET.fromstring(z.read(name))
+
+
+class Separators(unittest.TestCase):
+    def test_flag_adds_borders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            z = pack_with("## секция\n", Path(tmp), separators=True)
+            self.assertIn("w:pBdr", z.read("word/styles.xml").decode())
+
+    def test_default_has_no_heading_borders(self):
+        """По умолчанию выключено: черта под каждым H2 уместна в резюме,
+        но не в ТЗ и не в протоколе встречи."""
+        with tempfile.TemporaryDirectory() as tmp:
+            styles = pack_with("## секция\n", Path(tmp)).read("word/styles.xml").decode()
+        heading2 = styles.split('w:styleId="Heading2"')[1].split("</w:style>")[0]
+        self.assertNotIn("w:pBdr", heading2)
+
+
+class Photo(unittest.TestCase):
+    def test_photo_anchored_with_requested_box(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            (tmpdir / "me.png").write_bytes(PNG_1x1)
+            z = pack_with("# Имя\n\nтекст\n", tmpdir, photo=tmpdir / "me.png")
+            doc = z.read("word/document.xml").decode()
+        self.assertIn("wp:anchor", doc)
+        # 30mm x 38mm в EMU (36000 на мм)
+        self.assertIn(f'cx="{30 * 36000}" cy="{38 * 36000}"', doc)
+
+    def test_photo_crops_instead_of_squeezing(self):
+        """Квадратная картинка в рамку 30x38 - кадрируется srcRect, а не
+        вписывается с искажением пропорций (иначе docx и PDF разъезжаются)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            (tmpdir / "me.png").write_bytes(PNG_1x1)
+            z = pack_with("# Имя\n", tmpdir, photo=tmpdir / "me.png")
+            doc = z.read("word/document.xml").decode()
+        # тег целиком с атрибутами: подстрока "a:srcRect" совпала бы
+        # и с опечаткой в имени тега
+        self.assertRegex(doc, r"<a:srcRect [^>]*(?:t|b|l|r)=\"\d+\"")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
