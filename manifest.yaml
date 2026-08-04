@@ -47,6 +47,7 @@ universal:
   - skills/md-pdf/SKILL.md              # рендер markdown в PDF (для чтения и рассылки)
   - skills/md-docx/SKILL.md             # сборка .docx из markdown (когда документ пойдет на правки)
   - skills/harvest-canon/SKILL.md       # оформить переиспользуемый прием проекта в upstream-кандидат канона
+  - skills/memory-compact/SKILL.md      # свертка разросшейся автопамяти: слить записи об одном сюжете, снять отработавшее, пересобрать индекс
   - skills/session-cost/SKILL.md        # подсчет токенов сессии Claude Code из транскрипта (смета, отчет)
   - commands/canon.md                   # /canon = синхронизация проекта с каноном
   - scripts/md-pdf.py                   # движок рендера markdown в PDF (для скилла md-pdf)
