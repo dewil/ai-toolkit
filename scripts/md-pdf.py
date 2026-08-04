@@ -2,7 +2,7 @@
 """Конвертация markdown -> PDF через Chrome headless. Без зависимостей.
 
 Пайплайн: md -> HTML (встроенный мини-конвертер + дефолтные стили) ->
-Chrome headless print-to-pdf. Нужен только установленный Google Chrome.
+Chrome headless + CDP (Page.printToPDF). Нужен только установленный Google Chrome.
 
 Использование:
     python3 scripts/md-pdf.py note.md                  # рядом появится note.pdf
@@ -33,14 +33,19 @@ GFM-таблицы. Контракт строгий: КАЖДАЯ строка �
 
 import argparse
 import base64
+import datetime
 import html
+import json
 import os
 import pathlib
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.request
 
 # Порядок важен: сначала точные пути (дешевая проверка существования файла),
 # потом PATH - страховка для нестандартных установок (snap, свой префикс).
@@ -429,6 +434,272 @@ def add_author(pdf: bytes, author: str) -> bytes:
     return out
 
 
+# --- Печать через CDP -------------------------------------------------------
+# Раньше печатали CLI-флагом --print-to-pdf. Он не умеет колонтитулы вовсе:
+# кастомный header/footer есть только у Page.printToPDF, а CSS-обходов нет -
+# Chrome не поддерживает margin-боксы @page (@bottom-center и counters).
+# Мини-клиент CDP - тот же, что в chrome-cookies.py (websocket RFC 6455 на
+# голых сокетах, без внешних зависимостей); скрипты канона самодостаточны.
+
+def _ws_connect(url: str, timeout: float = 300.0) -> socket.socket:
+    m = re.match(r"ws://([^:/]+):(\d+)(/.*)", url)
+    if not m:
+        raise RuntimeError(f"неожиданный ws-url: {url}")
+    host, port, path = m.group(1), int(m.group(2)), m.group(3)
+    s = socket.create_connection((host, port), timeout=timeout)
+    key = base64.b64encode(os.urandom(16)).decode()
+    s.sendall(
+        (
+            f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        ).encode()
+    )
+    resp = b""
+    while b"\r\n\r\n" not in resp:
+        chunk = s.recv(4096)
+        if not chunk:
+            raise RuntimeError("ws handshake: соединение закрыто")
+        resp += chunk
+    if b" 101 " not in resp.split(b"\r\n", 1)[0]:
+        raise RuntimeError("ws handshake: upgrade отклонен")
+    return s
+
+
+def _ws_send(s: socket.socket, payload: bytes, opcode: int = 0x1) -> None:
+    mask = os.urandom(4)
+    ln = len(payload)
+    hdr = bytes([0x80 | opcode])
+    if ln < 126:
+        hdr += bytes([0x80 | ln])
+    elif ln < 65536:
+        hdr += bytes([0x80 | 126]) + ln.to_bytes(2, "big")
+    else:
+        hdr += bytes([0x80 | 127]) + ln.to_bytes(8, "big")
+    s.sendall(hdr + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+
+def _ws_recv_exact(s: socket.socket, n: int) -> bytes:
+    # список + join, а не buf += chunk: PDF приезжает одним кадром в десятки
+    # мегабайт, и конкатенация в цикле дает квадратичное копирование
+    parts, got = [], 0
+    while got < n:
+        chunk = s.recv(min(1 << 20, n - got))
+        if not chunk:
+            raise RuntimeError("ws: соединение закрыто")
+        parts.append(chunk)
+        got += len(chunk)
+    return b"".join(parts)
+
+
+def _ws_recv_msg(s: socket.socket) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        h = _ws_recv_exact(s, 2)
+        fin, opcode = h[0] & 0x80, h[0] & 0x0F
+        ln = h[1] & 0x7F
+        if ln == 126:
+            ln = int.from_bytes(_ws_recv_exact(s, 2), "big")
+        elif ln == 127:
+            ln = int.from_bytes(_ws_recv_exact(s, 8), "big")
+        if h[1] & 0x80:
+            mask = _ws_recv_exact(s, 4)
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(_ws_recv_exact(s, ln)))
+        else:
+            payload = _ws_recv_exact(s, ln)
+        if opcode == 0x9:
+            _ws_send(s, payload, opcode=0xA)
+            continue
+        if opcode == 0xA:
+            # unsolicited Pong разрешен RFC 6455 и приходить может в любой
+            # момент, в том числе между фрагментами. Без этой ветки он попадал
+            # бы в данные и ронял json.loads (и обрывал сборку фрагментов).
+            continue
+        if opcode == 0x8:
+            raise RuntimeError("ws: закрыто со стороны Chrome")
+        chunks.append(payload)
+        if fin:
+            return b"".join(chunks)
+
+
+def _cdp(s: socket.socket, msg_id: int, method: str, params: dict | None = None) -> dict:
+    _ws_send(s, json.dumps({"id": msg_id, "method": method, "params": params or {}}).encode())
+    while True:
+        msg = json.loads(_ws_recv_msg(s))
+        if msg.get("id") == msg_id:
+            if "error" in msg:
+                raise RuntimeError(f"CDP {method}: {msg['error']}")
+            return msg.get("result", {})
+
+
+LOAD_TIMEOUT = 30.0    # сколько ждем полной загрузки документа перед печатью
+PRINT_TIMEOUT = 300.0  # сколько ждем сам PDF: на длинном документе это минуты
+
+FOOTER_STYLE = ("font-size:8px;color:#7a7a7a;width:100%;padding:0 15mm;"
+                # box-sizing обязателен: стили страницы в шаблон колонтитула не
+                # наследуются, и при content-box ширина стала бы 100%+30mm,
+                # а "центр" уехал бы вправо на половину падинга
+                "box-sizing:border-box;"
+                "font-family:-apple-system,Helvetica,Arial,sans-serif;")
+
+
+def expand_placeholders(tpl: str, today: str) -> str:
+    """{page}/{pages}/{date} -> подстановки Chrome и текущая дата.
+
+    Chrome подставляет номера сам, но только в спаны с классами pageNumber и
+    totalPages; писать их руками - лишняя церемония для вызывающего.
+
+    Пользовательский текст экранируется ДО подстановки: колонтитул объявлен
+    текстом, а не разметкой, и "<b>черновик</b>" должен напечататься как есть,
+    а не сломать оболочку шаблона.
+    """
+    return (html.escape(tpl)
+            .replace("{page}", '<span class="pageNumber"></span>')
+            .replace("{pages}", '<span class="totalPages"></span>')
+            .replace("{date}", html.escape(today)))
+
+
+def print_params(header: str = "", footer: str = "") -> dict:
+    """Параметры Page.printToPDF. Вынесено отдельно, чтобы проверять на входах,
+    а не грепом по исходнику.
+
+    Поля и размер берем из @page используемого CSS (preferCSSPageSize): без
+    флагов PDF обязан остаться таким же, каким был на прежней CLI-печати.
+    Бриф предлагал задавать marginTop/marginBottom числами - тогда результат
+    разошелся бы с текущими документами, а колонтитул и так рисуется внутри
+    поля страницы (18 мм по умолчанию, запаса хватает).
+    """
+    params = {
+        "printBackground": True,
+        "preferCSSPageSize": True,
+        "displayHeaderFooter": bool(header or footer),
+    }
+    if params["displayHeaderFooter"]:
+        # пустой шаблон Chrome подменяет своим дефолтом (URL документа и
+        # системная дата), поэтому отсутствующую половину гасим пустым спаном
+        params["headerTemplate"] = _tpl(header)
+        params["footerTemplate"] = _tpl(footer)
+    return params
+
+
+def _tpl(text: str) -> str:
+    return (f'<div style="{FOOTER_STYLE}text-align:center">{text}</div>'
+            if text else "<span></span>")
+
+
+def cdp_print(chrome: str, html_path: pathlib.Path,
+              header: str = "", footer: str = "") -> bytes:
+    """html -> байты PDF через headless Chrome и Page.printToPDF."""
+    with tempfile.TemporaryDirectory() as profile:
+        # stderr в файл, а не в PIPE: трубу никто не вычитывает во время
+        # ожидания, и болтливый Chrome (verbose-логи, ошибки D-Bus) забил бы
+        # ее буфер и встал бы намертво. Из файла причину падения читаем так же
+        err_path = pathlib.Path(profile) / "chrome-stderr.log"
+        err_file = err_path.open("wb")
+        proc = subprocess.Popen(
+            [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+             "--remote-debugging-port=0", f"--user-data-dir={profile}",
+             "--no-first-run", html_path.as_uri()],
+            stdout=subprocess.DEVNULL, stderr=err_file,
+        )
+        try:
+            # порт Chrome пишет в файл профиля; --remote-debugging-port=0 просит
+            # свободный порт, поэтому заранее он неизвестен
+            port_file = pathlib.Path(profile) / "DevToolsActivePort"
+            for _ in range(100):
+                if port_file.exists() and port_file.read_text().strip():
+                    break
+                if proc.poll() is not None:
+                    # Chrome упал сразу (sandbox, policy, неизвестный флаг) -
+                    # ждать 10 секунд и жаловаться на отсутствие файла порта
+                    # значит прятать настоящую причину
+                    err_file.flush()
+                    err = err_path.read_bytes().decode(errors="replace").strip()
+                    raise RuntimeError(
+                        f"Chrome завершился сразу (код {proc.returncode}): "
+                        f"{err[-500:] or 'без вывода'}")
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Chrome не открыл DevToolsActivePort за 10 с")
+            port = int(port_file.read_text().splitlines()[0])
+
+            page = None
+            for _ in range(50):
+                # свой opener без прокси: системный HTTP_PROXY увел бы запрос
+                # к 127.0.0.1 в прокси, и discovery падал бы в корпоративной сети
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                try:
+                    with opener.open(f"http://127.0.0.1:{port}/json/list", timeout=5) as r:
+                        targets = json.load(r)
+                except (OSError, ValueError):
+                    # порт уже записан, но слушатель еще не поднялся - это
+                    # штатная гонка старта, а не отказ: пробуем снова
+                    time.sleep(0.1)
+                    continue
+                page = next((x for x in targets if x.get("type") == "page"
+                             and x.get("url", "").startswith("file:")), None)
+                if page:
+                    break
+                time.sleep(0.1)
+            if not page:
+                raise RuntimeError("CDP: вкладка с документом не найдена")
+
+            s = _ws_connect(page["webSocketDebuggerUrl"])
+            try:
+                # Ждем полной загрузки (шрифты, картинки) И непустой верстки.
+                # Молча печатать по истечении ожидания нельзя: недогруженный
+                # документ дает пустой PDF, а вызывающий видит бодрое "ok" -
+                # поймано на длинном документе, где 5 секунд не хватало.
+                # Дедлайн по часам: считать итерации нельзя - каждая делает
+                # сетевой вызов неизвестной длительности, и "300 раз по 0.1 с"
+                # не равно 30 секундам.
+                deadline = time.monotonic() + LOAD_TIMEOUT
+                # На время ожидания ставим сокету КОРОТКИЙ таймаут: с общим
+                # (300 с, он нужен самой печати) один зависший Runtime.evaluate
+                # висел бы впятеро дольше заявленного дедлайна, а проверка
+                # времени делается только между вызовами
+                s.settimeout(5.0)
+                i = 0
+                while True:
+                    # fonts.ready обязателен: на лениво загружаемом @font-face
+                    # печать по одному readyState уходит на fallback-шрифте, а
+                    # это другие метрики, переносы и разбиение на страницы
+                    r = _cdp(s, 100 + i, "Runtime.evaluate", {
+                        # fonts.ready, а не fonts.status: статус означает лишь
+                        # "сейчас ничего не грузится" и бывает loaded после
+                        # ошибки, а promise разрешается после перерасчета верстки
+                        "expression": "(document.fonts ? document.fonts.ready : Promise.resolve())"
+                                      ".then(() => 'loaded|' + document.readyState + '|' +"
+                                      " (document.body ? document.body.scrollHeight : 0))",
+                        "awaitPromise": True,
+                        "returnByValue": True})
+                    fonts, state, height = (
+                        str(r.get("result", {}).get("value", "")).split("|") + ["", "", ""])[:3]
+                    if (fonts == "loaded" and state == "complete"
+                            and height.isdigit() and int(height) > 0):
+                        break
+                    if time.monotonic() > deadline:
+                        raise RuntimeError(
+                            f"документ не загрузился за {LOAD_TIMEOUT:.0f} с "
+                            f"(readyState={state!r}, шрифты={fonts!r}) - печать "
+                            f"отменена, чтобы не выдать пустой PDF за готовый")
+                    i += 1
+                    time.sleep(0.1)
+                s.settimeout(PRINT_TIMEOUT)   # печать большого документа - минуты
+                res = _cdp(s, 1, "Page.printToPDF", print_params(header, footer))
+            finally:
+                s.close()
+            return base64.b64decode(res["data"])
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()      # без reap остается zombie в долгоживущем процессе
+            err_file.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="markdown -> PDF через Chrome headless")
     ap.add_argument("src", type=pathlib.Path)
@@ -441,6 +712,10 @@ def main() -> int:
                          "markdown-исходник не трогается")
     ap.add_argument("--photo-width", default="30mm", help="ширина фото (по умолчанию 30mm)")
     ap.add_argument("--photo-height", default="38mm", help="высота фото (по умолчанию 38mm, пропорция 3x4)")
+    ap.add_argument("--footer", default=None,
+                    help="нижний колонтитул; плейсхолдеры {page}, {pages}, {date}. "
+                         "Типовой случай: --footer \"стр. {page}/{pages}\"")
+    ap.add_argument("--header", default=None, help="верхний колонтитул, те же плейсхолдеры")
     ap.add_argument("--separators", action="store_true",
                     help="горизонтальные разделители: черта под H2 и тонкая черта над H4")
     args = ap.parse_args()
@@ -473,25 +748,20 @@ def main() -> int:
         f"<body>{body}</body></html>"
     )
 
+    today = datetime.date.today().strftime("%d.%m.%Y")
+    footer = expand_placeholders(args.footer, today) if args.footer else ""
+    header = expand_placeholders(args.header, today) if args.header else ""
+
     with tempfile.TemporaryDirectory() as tmp:
         html_path = pathlib.Path(tmp) / "doc.html"
-        pdf_path = pathlib.Path(tmp) / "doc.pdf"
         html_path.write_text(doc, encoding="utf-8")
-        subprocess.run(
-            [
-                CHROME,
-                "--headless=new",
-                "--disable-gpu",
-                "--hide-scrollbars",
-                "--no-pdf-header-footer",
-                f"--print-to-pdf={pdf_path}",
-                html_path.as_uri(),
-            ],
-            check=True,
-            capture_output=True,
-        )
+        try:
+            data = cdp_print(CHROME, html_path, header=header, footer=footer)
+        except RuntimeError as exc:
+            # остальной скрипт сообщает об ошибках человеческой строкой,
+            # трейсбек из печати выбивался бы из этого стиля
+            sys.exit(f"печать не удалась: {exc}")
         out.parent.mkdir(parents=True, exist_ok=True)
-        data = pdf_path.read_bytes()
         if args.author:
             data = add_author(data, args.author)
         out.write_bytes(data)

@@ -371,5 +371,123 @@ class Photo(unittest.TestCase):
         self.assertNotIn(str(p), out)
 
 
+class Footer(unittest.TestCase):
+    """Колонтитул через CDP. Chrome не поддерживает margin-боксы @page, поэтому
+    номер страницы нельзя сверстать в HTML - только Page.printToPDF."""
+
+    def test_placeholders_expand_to_chrome_spans(self):
+        got = md_pdf.expand_placeholders("стр. {page}/{pages} от {date}", "04.08.2026")
+        self.assertIn('<span class="pageNumber"></span>', got)
+        self.assertIn('<span class="totalPages"></span>', got)
+        self.assertIn("04.08.2026", got)
+        self.assertNotIn("{", got)
+
+    def test_text_without_placeholders_kept(self):
+        self.assertEqual(md_pdf.expand_placeholders("Конфиденциально", "x"), "Конфиденциально")
+
+    def test_no_footer_means_no_header_footer_at_all(self):
+        """Без флагов Chrome не должен рисовать НИЧЕГО - в том числе свой
+        дефолтный колонтитул с URL файла и системной датой."""
+        p = md_pdf.print_params()
+        self.assertFalse(p["displayHeaderFooter"])
+        self.assertNotIn("headerTemplate", p)
+        self.assertNotIn("footerTemplate", p)
+
+    def test_only_footer_blanks_the_header(self):
+        """Задана одна половина - вторую гасим пустым спаном: пустой шаблон
+        Chrome подменяет своим дефолтом."""
+        p = md_pdf.print_params(footer="стр. 1")
+        self.assertTrue(p["displayHeaderFooter"])
+        self.assertEqual(p["headerTemplate"], "<span></span>")
+        self.assertIn("стр. 1", p["footerTemplate"])
+
+    def test_only_header_blanks_the_footer(self):
+        p = md_pdf.print_params(header="Конфиденциально")
+        self.assertEqual(p["footerTemplate"], "<span></span>")
+        self.assertIn("Конфиденциально", p["headerTemplate"])
+
+    def test_page_size_taken_from_css(self):
+        """Совместимость: без флагов PDF обязан остаться прежним, поэтому поля
+        и размер берутся из @page используемого CSS, а не задаются числами."""
+        for p in (md_pdf.print_params(), md_pdf.print_params(footer="x")):
+            self.assertTrue(p["preferCSSPageSize"])
+            self.assertNotIn("marginTop", p)
+            self.assertNotIn("paperWidth", p)
+
+    def test_footer_text_is_literal_not_html(self):
+        """Колонтитул объявлен текстом: разметка в нем печатается как есть и не
+        ломает оболочку шаблона."""
+        got = md_pdf.expand_placeholders("формат <b>черновик</b>", "04.08.2026")
+        self.assertIn("&lt;b&gt;", got)
+        self.assertNotIn("<b>", got)
+
+    def test_escaping_does_not_break_placeholders(self):
+        """Экранирование идет ДО подстановки, поэтому спаны Chrome остаются
+        настоящими тегами, а не текстом."""
+        got = md_pdf.expand_placeholders("<i>стр.</i> {page}/{pages}", "x")
+        self.assertIn('<span class="pageNumber"></span>', got)
+        self.assertIn("&lt;i&gt;", got)
+
+    def test_footer_box_sizing_set(self):
+        """width:100% с падингом без border-box уводит центр вправо на 15мм."""
+        self.assertIn("box-sizing:border-box", md_pdf.FOOTER_STYLE)
+
+    def test_fragmented_frame_assembled(self):
+        """Поведенческий тест сборки кадров: PDF приезжает большим сообщением,
+        которое Chrome вправе разбить на фрагменты, а между ними прислать ping."""
+        import io as _io
+
+        class FakeSock:
+            def __init__(self, data):
+                self.buf = _io.BytesIO(data)
+            def recv(self, n):
+                return self.buf.read(n)
+            def sendall(self, data):
+                pass
+
+        def frame(payload, opcode, fin):
+            head = bytes([(0x80 if fin else 0) | opcode])
+            if len(payload) < 126:
+                head += bytes([len(payload)])
+            else:
+                head += bytes([126]) + len(payload).to_bytes(2, "big")
+            return head + payload
+
+        big = b"x" * 500
+        stream = (frame("нача".encode(), 0x1, False)  # первый фрагмент
+                  + frame(b"\x01\x02", 0x9, True)     # ping между фрагментами
+                  + frame(big, 0x0, True))            # продолжение и финал
+        got = md_pdf._ws_recv_msg(FakeSock(stream))
+        self.assertEqual(got, "нача".encode() + big)
+
+    def test_footer_flags_declared(self):
+        src = MD_PDF.read_text(encoding="utf-8")
+        self.assertIn('"--footer"', src)
+        self.assertIn('"--header"', src)
+
+    def test_wait_and_print_timeouts_differ(self):
+        """Структурная страховка (поведение требует живого Chrome): у ожидания
+        загрузки короткий таймаут, у самой печати - длинный. С одним общим
+        зависший Runtime.evaluate висел бы впятеро дольше дедлайна загрузки."""
+        src = MD_PDF.read_text(encoding="utf-8")
+        self.assertIn("s.settimeout(5.0)", src)
+        self.assertIn("s.settimeout(PRINT_TIMEOUT)", src)
+        self.assertGreater(md_pdf.PRINT_TIMEOUT, md_pdf.LOAD_TIMEOUT)
+
+    def test_waits_for_fonts_ready(self):
+        """Тоже структурная: fonts.status бывает loaded после ошибки шрифта,
+        promise ready разрешается после перерасчета верстки."""
+        src = MD_PDF.read_text(encoding="utf-8")
+        self.assertIn("document.fonts.ready", src)
+        self.assertIn('"awaitPromise": True', src)
+
+    def test_load_wait_is_strict(self):
+        """Молчаливая печать недогруженного документа давала пустой PDF с
+        бодрым "ok" - ожидание обязано заканчиваться ошибкой, а не печатью."""
+        src = MD_PDF.read_text(encoding="utf-8")
+        self.assertIn("документ не загрузился", src)
+        self.assertIn("scrollHeight", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
