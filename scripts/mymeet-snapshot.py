@@ -48,12 +48,15 @@ JSON-отчет (word_timings / chapters / метаданные) по умолч
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -499,10 +502,312 @@ USAGE = """mymeet-snapshot - забор расшифровок встреч из
 """
 
 
+# --- Загрузка записи на транскрибацию ---------------------------------------
+# Протокол разобран по эталонному test_api.py вендора и проверен на живом API.
+#
+# Про localTime. 2026-07-28 финализация БЕЗ этого поля отдавала голый 500 от
+# nginx (text/html, не JSON; error_format=json на него не действовал) - в
+# проекте-источнике это восемь дней считали поломкой сервиса. При проверке
+# 2026-08-04 сервер принял финализацию и без поля: вендор, похоже, починил
+# молча. Поле все равно шлем всегда - его шлет эталонная реализация вендора, а
+# в OpenAPI 1.1.0 оно не помечено обязательным, то есть контракт на него не
+# распространяется и вернуться сломанным может так же тихо, как починился.
+
+TEMPLATES = (
+    "default-meeting", "sales-meeting", "sales-coaching", "hr-interview",
+    "research-interview", "team-sync", "article", "lecture-notes",
+    "one-to-one", "protocol", "medicine",
+)
+CHUNK_SIZE = 8 * 1024 * 1024        # компромисс: меньше запросов против памяти
+# Флагом не выносим: бриф предлагал, но менять его вызывающему незачем - размер
+# не влияет на результат, а лишний флаг это лишний способ ошибиться. Понадобится
+# тюнинг под медленную сеть - тогда и добавить, с поводом.
+UPLOAD_TIMEOUT = 600
+WAIT_TIMEOUT = 3600     # потолок ожидания обработки при --wait
+
+UPLOAD_ERRORS = {
+    402: "кончились минуты на аккаунте",
+    414: "файл больше 3 ГБ",
+    415: "формат файла не поддерживается",
+    422: "загрузка битая или вытеснена более новой попыткой",
+    426: "не хватает минут для файла такой длины",
+    432: "файл больше 1 ГБ - нужен тариф Pro/Ultra",
+    433: "запись короче 30 секунд",
+}
+
+
+def _safe_filename(name: str) -> str:
+    """Имя файла для заголовка multipart. Кавычка и перевод строки внутри
+    quoted-string рвут заголовок части (а CRLF позволяет подставить свой),
+    поэтому чистим - сервису важно расширение, а не точное имя."""
+    return re.sub(r'[\r\n"\\]', "_", name).strip() or "upload.bin"
+
+
+def _multipart(fields: dict, filename: str, blob: bytes) -> tuple[bytes, str]:
+    """Тело multipart/form-data. Собираем руками: stdlib этого не умеет, а
+    тащить requests ради одного запроса нельзя - скрипты канона stdlib-only."""
+    boundary = "----mymeet" + uuid.uuid4().hex
+    out = bytearray()
+    for name, value in fields.items():
+        out += f"--{boundary}\r\n".encode()
+        out += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        out += str(value).encode() + b"\r\n"
+    # поле file обязательно даже у финализирующего маркера: без него 400
+    out += f"--{boundary}\r\n".encode()
+    out += (f'Content-Disposition: form-data; name="file"; '
+            f'filename="{_safe_filename(filename)}"\r\n').encode()
+    out += b"Content-Type: application/octet-stream\r\n\r\n"
+    out += blob + b"\r\n"
+    out += f"--{boundary}--\r\n".encode()
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Запрет редиректов для запросов с ключом.
+
+    urllib по умолчанию идет за 301/302/303 и тащит ВСЕ заголовки, включая
+    X-API-KEY, даже на другой origin - то есть редирект с API на посторонний
+    домен раскрывает ключ. Плюс POST при этом превращается в GET, и чужой 200
+    можно принять за успешную загрузку. curl-путь не подвержен: -L не задан.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code,
+            f"редирект на {newurl} не выполнен: с ключом в заголовке ходить "
+            f"за редиректом нельзя", headers, fp)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def api_post_multipart(auth: dict, path: str, fields: dict,
+                       filename: str, blob: bytes) -> tuple[int, bytes]:
+    """POST multipart. Возвращает (код, тело); тело может быть НЕ json - на 500
+    приходит html от nginx, и разбирать его как json нельзя."""
+    body, ctype = _multipart(fields, filename, blob)
+    url = _build_url(auth, path, None)
+    if auth.get("use_curl"):
+        # тот же обход, что у GET: Python.framework на macOS без CA-бандла
+        fd, tmp = tempfile.mkstemp(prefix="mymeet-upload-")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(body)
+            r = subprocess.run(
+                ["curl", "-sS", "-w", "\n%{http_code}", "-X", "POST",
+                 "-A", "mymeet-snapshot", "-H", f"Content-Type: {ctype}",
+                 "--data-binary", f"@{tmp}", "-K", "-", url],
+                input=f'header = "X-API-KEY: {auth["api_key"]}"\n'.encode(),
+                capture_output=True, timeout=UPLOAD_TIMEOUT,
+            )
+        finally:
+            os.unlink(tmp)
+        raw, _, code = r.stdout.rpartition(b"\n")
+        if r.returncode != 0:
+            # без этого DNS/TLS/connect-ошибка приезжает как "HTTP 0" без
+            # причины, а на финализации это худший случай: непонятно, приняли
+            # платную операцию или нет
+            err = r.stderr.decode(errors="replace").strip()[:300]
+            raise RuntimeError(f"curl не смог выполнить запрос (код {r.returncode}): {err}")
+        return int(code or 0), raw
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"X-API-KEY": auth["api_key"], "User-Agent": "mymeet-snapshot",
+                 "Content-Type": ctype},
+    )
+    try:
+        with _OPENER.open(req, timeout=UPLOAD_TIMEOUT) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+
+
+def meeting_status(auth: dict, meeting_id: str) -> str:
+    """Статус встречи: new / queued / processing / processed / failed.
+    Ответ приходит plain text, не JSON."""
+    url = _build_url(auth, "/api/meeting/status", {"meeting_id": meeting_id})
+    if auth.get("use_curl"):
+        return _curl_bytes(auth, url, 60).decode(errors="replace").strip().strip('"')
+    req = urllib.request.Request(
+        url, headers={"X-API-KEY": auth["api_key"], "User-Agent": "mymeet-snapshot"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return resp.read().decode(errors="replace").strip().strip('"')
+
+
+def upload_fields(session_id: str, upload_id: str, n: int, total: int,
+                  filename: str, template: str, last: bool, name: str,
+                  speakers: int | None, digest: str | None, size: int | None) -> dict:
+    """Поля одного чанка. Вынесено отдельно, чтобы проверять на входах:
+    отсутствие localTime на финализации - тот самый молчаливый 500."""
+    fields = {
+        "id": session_id,
+        "upload_session_id": upload_id,
+        "chunk_number": n,
+        "chunk_total": total,
+        "filename": filename,
+        "template_name": template,
+        "error_format": "json",
+    }
+    if last:
+        # localTime нужен ровно на финализации - там создается встреча.
+        # ISO 8601 с таймзоной. Про историю поля - см. комментарий к секции
+        # выше: 2026-07-28 без него приходил 500, 2026-08-04 сервер принял и
+        # без него; шлем всегда, потому что контракт его не защищает.
+        fields["localTime"] = datetime.now().astimezone().replace(microsecond=0).isoformat()
+        fields["meeting_name"] = name
+        if speakers is not None:
+            fields["speakers_number"] = speakers
+        if digest:
+            fields["expected_sha256"] = digest
+            fields["expected_file_size"] = size
+    return fields
+
+
+def cmd_upload(auth: dict, cfg_loader, path: Path, template: str, title: str | None,
+               speakers: int | None, wait: bool) -> int:
+    if not path.is_file():
+        sys.stderr.write(f"нет файла: {path}\n")
+        return 2
+    if template not in TEMPLATES:
+        sys.stderr.write(f"неизвестный шаблон {template!r}; допустимые: {', '.join(TEMPLATES)}\n")
+        return 2
+
+    if wait:
+        # Конфиг нужен на последнем шаге, но проверяем ДО загрузки: иначе
+        # отсутствующий конфиг обнаружится после списанных минут и часа ожидания
+        cfg_loader()
+
+    size = path.stat().st_size
+    total = max(1, -(-size // CHUNK_SIZE))
+    session_id, upload_id = str(uuid.uuid4()), str(uuid.uuid4())
+    name = title or path.stem
+    # Хеш считаем на лету по уже прочитанным блокам - второй проход по файлу не
+    # нужен. Это дает контроль целостности и многочанковым: без него укоротить
+    # файл во время загрузки значило бы оплатить транскрибацию огрызка.
+    sha = hashlib.sha256()
+    read_total = 0
+
+    print(f"загрузка {path.name} ({size // 1024} КБ, чанков: {total}, шаблон: {template})")
+    meeting_id = None
+    with path.open("rb") as fh:            # потоково: файл бывает гигабайтным
+        for n in range(total):
+            blob = fh.read(CHUNK_SIZE)
+            sha.update(blob)
+            read_total += len(blob)
+            last = n == total - 1
+            if last and read_total != size:
+                # файл подменили/обрезали/дописали, пока шла загрузка: молча
+                # финализировать - значит оплатить транскрибацию не того
+                sys.stderr.write(
+                    f"файл изменился во время загрузки: ожидали {size} байт, "
+                    f"прочитали {read_total}. Загрузка прервана до финализации.\n")
+                return 1
+            fields = upload_fields(session_id, upload_id, n, total, path.name,
+                                   template, last, name, speakers,
+                                   sha.hexdigest() if last else None,
+                                   size if last else None)
+            code, raw = api_post_multipart(auth, "/api/video", fields, path.name, blob)
+            if code != 200:
+                hint = UPLOAD_ERRORS.get(code, "")
+                body = raw.decode(errors="replace").strip()[:300]
+                sys.stderr.write(f"чанк {n + 1}/{total}: HTTP {code}"
+                                 + (f" - {hint}" if hint else "") + f"\n{body}\n")
+                return 1
+            if last:
+                try:
+                    meeting_id = (json.loads(raw) or {}).get("meeting_id")
+                except ValueError:
+                    meeting_id = None
+            print(f"  чанк {n + 1}/{total} ok")
+
+    if not meeting_id:
+        # Сервер мог создать встречу и списать минуты, а ответ потеряться.
+        # Слепой повтор командой сделает ДУБЛЬ (новые id генерируются заново),
+        # поэтому явно говорим проверить workspace, а не запускать снова.
+        sys.stderr.write(
+            "сервер принял финализацию, но meeting_id не пришел. Возможно, "
+            "встреча уже создана и минуты списаны.\n"
+            f"ПРОВЕРЬТЕ workspace перед повтором (upload_session_id {upload_id}): "
+            "повторный --upload создаст вторую встречу и спишет минуты еще раз.\n")
+        return 1
+    print(f"OK: загружено, meeting_id {meeting_id}")
+
+    if not wait:
+        print(f"статус: python3 scripts/mymeet-snapshot.py --status {meeting_id}")
+        return 0
+
+    status = "?"
+    # Дедлайн по часам, а не по числу итераций: каждая итерация это сон плюс
+    # запрос до минуты, и "360 раз по 10 секунд" на деле растянулось бы на часы.
+    deadline = time.monotonic() + WAIT_TIMEOUT
+    while time.monotonic() < deadline:
+        time.sleep(10)
+        try:
+            status = meeting_status(auth, meeting_id)
+        except Exception as exc:
+            # единичная сетевая ошибка при поллинге - не повод бросать уже
+            # оплаченную встречу: пробуем дальше до дедлайна
+            print(f"  статус недоступен ({type(exc).__name__}), пробую снова")
+            continue
+        if status in ("processed", "failed"):
+            break
+        print(f"  статус: {status}")
+    else:
+        sys.stderr.write(
+            f"не дождались обработки за {WAIT_TIMEOUT // 60} мин; "
+            f"забрать позже: --pull {meeting_id}\n")
+        return 1
+    if status == "failed":
+        sys.stderr.write(f"сервис не смог обработать запись (meeting_id {meeting_id})\n")
+        return 1
+    print("статус: processed, забираю расшифровку")
+    return cmd_pull(auth, cfg_loader(), meeting_id)
+
+
 def main(argv: list[str]) -> int:
     list_only = "--list" in argv
     all_mode = "--all" in argv
     auth = load_auth()
+
+    if "--upload" in argv:
+        i = argv.index("--upload")
+        if i + 1 >= len(argv):
+            sys.stderr.write("Укажи файл записи: --upload <файл> [--template X] "
+                             "[--title Y] [--speakers N] [--wait]\n")
+            return 2
+
+        def opt(name, cast=str, default=None):
+            if name not in argv:
+                return default
+            i = argv.index(name)
+            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
+                # "--title --wait" молча брал бы "--wait" за название встречи,
+                # а платная загрузка уже пошла бы
+                sys.exit(f"{name}: нужно значение")
+            try:
+                return cast(argv[i + 1])
+            except ValueError:
+                sys.exit(f"{name}: некорректное значение {argv[i + 1]!r}")
+
+        # конфиг проекта грузим лениво: он нужен только для --wait (раскладка
+        # скачанного). Требовать его на самой загрузке значит запрещать заливку
+        # из проекта, который зеркало встреч не ведет
+        return cmd_upload(
+            auth, load_project_config, Path(argv[i + 1]).expanduser(),
+            template=opt("--template", str, "default-meeting"),
+            title=opt("--title"),
+            speakers=opt("--speakers", int),
+            wait="--wait" in argv,
+        )
+
+    if "--status" in argv:
+        i = argv.index("--status")
+        if i + 1 >= len(argv):
+            sys.stderr.write("Укажи meeting_id или URL встречи: --status <ID|URL>\n")
+            return 2
+        print(meeting_status(auth, extract_meeting_id(argv[i + 1])))
+        return 0
+
     cfg = load_project_config()
 
     if "--seed" in argv:

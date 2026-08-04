@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import urllib.error
+import urllib.request
 import io
 import tempfile
 import unittest
@@ -229,6 +231,162 @@ class PlaceMeetingWrite(unittest.TestCase):
             self.assertEqual(
                 (dest / "2026-07-27.md").read_text(encoding="utf-8"), "чужой документ"
             )
+
+
+class UploadFields(unittest.TestCase):
+    """Поля чанков загрузки. Отдельно - localTime на финализации: 2026-07-28 без
+    него приходил голый 500, 2026-08-04 сервер принял и без него (вендор починил
+    молча). Поле шлем всегда: в OpenAPI оно не обязательное, значит контракт его
+    не защищает и сломаться может так же тихо."""
+
+    def _fields(self, n=0, total=1, last=True, **kw):
+        base = dict(session_id="s", upload_id="u", n=n, total=total,
+                    filename="rec.mp3", template="default-meeting", last=last,
+                    name="Встреча", speakers=None, digest=None, size=None)
+        base.update(kw)
+        return mymeet.upload_fields(**base)
+
+    def test_finalizing_chunk_carries_local_time(self):
+        f = self._fields()
+        self.assertIn("localTime", f)
+        # ISO 8601 со смещением - иначе сервер отвечает 500
+        self.assertRegex(f["localTime"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$")
+
+    def test_data_chunks_without_local_time(self):
+        """Нефинализирующим чанкам поле не нужно - встреча создается на финале."""
+        self.assertNotIn("localTime", self._fields(n=0, total=3, last=False))
+
+    def test_meeting_name_only_on_finalize(self):
+        self.assertEqual(self._fields()["meeting_name"], "Встреча")
+        self.assertNotIn("meeting_name", self._fields(last=False, total=2))
+
+    def test_required_protocol_fields_present(self):
+        f = self._fields(n=1, total=3, last=False)
+        for key in ("id", "chunk_number", "chunk_total", "filename", "template_name"):
+            self.assertIn(key, f)
+
+    def test_checksum_only_when_given(self):
+        self.assertNotIn("expected_sha256", self._fields())
+        f = self._fields(digest="abc", size=10)
+        self.assertEqual(f["expected_sha256"], "abc")
+        self.assertEqual(f["expected_file_size"], 10)
+
+
+class Multipart(unittest.TestCase):
+    def test_file_part_present_even_when_empty(self):
+        """Финализирующий маркер несет пустое поле file; без самого поля - 400."""
+        body, ctype = mymeet._multipart({"id": "x"}, "rec.mp3", b"")
+        self.assertIn(b'name="file"; filename="rec.mp3"', body)
+        self.assertIn("boundary=", ctype)
+
+    def test_fields_and_body_separated_by_boundary(self):
+        body, ctype = mymeet._multipart({"a": 1, "b": "два"}, "f.bin", b"\x00\x01")
+        boundary = ctype.split("boundary=")[1]
+        self.assertEqual(body.count(f"--{boundary}\r\n".encode()), 3)  # 2 поля + file
+        self.assertTrue(body.endswith(f"--{boundary}--\r\n".encode()))
+        self.assertIn("два".encode(), body)
+        self.assertIn(b"\x00\x01", body)
+
+
+class UploadGates(unittest.TestCase):
+    def test_unknown_template_rejected_before_network(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with tempfile.NamedTemporaryFile(suffix=".mp3") as fh:
+                code = mymeet.cmd_upload({}, None, Path(fh.name), "нет-такого",
+                                         None, None, False)
+        self.assertEqual(code, 2)
+        self.assertIn("неизвестный шаблон", err.getvalue())
+
+    def test_missing_file_rejected(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = mymeet.cmd_upload({}, None, Path("/нет/такого.mp3"),
+                                     "default-meeting", None, None, False)
+        self.assertEqual(code, 2)
+        self.assertIn("нет файла", err.getvalue())
+
+
+class UploadSafety(unittest.TestCase):
+    """Регрессы на находки состязательного ревью: утечка ключа через редирект,
+    оплата транскрибации огрызка, дубль встречи при потерянном ответе."""
+
+    def test_filename_cannot_break_headers(self):
+        body, _ = mymeet._multipart({}, 'q"uote\r\nX-Evil: 1.mp3', b"x")
+        head = body.split(b"\r\n\r\n")[0].decode()
+        # опасен не текст "X-Evil", а РАЗРЫВ строки, который делает его
+        # отдельным заголовком части, и лишняя кавычка, закрывающая filename
+        disposition = [ln for ln in head.split("\r\n") if "Content-Disposition" in ln][0]
+        self.assertIn("X-Evil", disposition)          # осталось текстом внутри имени
+        self.assertEqual(disposition.count('"'), 4)   # name="file" + filename="..."
+
+    def test_empty_filename_replaced(self):
+        self.assertEqual(mymeet._safe_filename("   "), "upload.bin")
+
+    def test_opener_actually_uses_no_redirect(self):
+        """Мало иметь обработчик - им должен пользоваться реальный opener,
+        через который уходит запрос с ключом."""
+        self.assertTrue(any(isinstance(h, mymeet._NoRedirect)
+                            for h in mymeet._OPENER.handlers),
+                        [type(h).__name__ for h in mymeet._OPENER.handlers])
+
+    def test_redirect_handler_refuses(self):
+        """С ключом в заголовке идти за редиректом нельзя: urllib утащил бы
+        X-API-KEY на чужой origin."""
+        h = mymeet._NoRedirect()
+        req = urllib.request.Request("https://api.example/api/video")
+        with self.assertRaises(urllib.error.HTTPError):
+            h.redirect_request(req, io.BytesIO(b""), 302, "Found", {},
+                               "https://evil.example/")
+
+    def test_short_read_aborts_before_finalize(self):
+        """Файл обрезали во время загрузки - финализировать нельзя: оплатили бы
+        транскрибацию куска как полной записи."""
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "rec.mp3"
+            # размер заведомо больше буфера чтения (8 КБ): на мелком файле
+            # обрезку не увидеть - Python отдал бы остаток из буфера
+            f.write_bytes(b"x" * 300_000)
+            orig_chunk, orig_post = mymeet.CHUNK_SIZE, mymeet.api_post_multipart
+
+            def cut_after_first(auth, path, fields, filename, blob):
+                if fields["chunk_number"] == 0:
+                    f.write_bytes(b"x" * 50_000)   # кто-то обрезал файл
+                return 200, b"{}"
+
+            mymeet.CHUNK_SIZE, mymeet.api_post_multipart = 50_000, cut_after_first
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    code = mymeet.cmd_upload({}, None, f, "default-meeting", None, None, False)
+            finally:
+                mymeet.CHUNK_SIZE, mymeet.api_post_multipart = orig_chunk, orig_post
+        self.assertEqual(code, 1)
+        self.assertIn("изменился во время загрузки", err.getvalue())
+
+    def test_lost_meeting_id_warns_about_duplicate(self):
+        """Ответ финализации потерян: повтор создаст вторую платную встречу -
+        предупреждение обязано это назвать."""
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "rec.mp3"
+            f.write_bytes(b"x" * 100)
+            orig = mymeet.api_post_multipart
+            mymeet.api_post_multipart = lambda *a, **k: (200, b"{}")   # без meeting_id
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    code = mymeet.cmd_upload({}, None, f, "default-meeting", None, None, False)
+            finally:
+                mymeet.api_post_multipart = orig
+        self.assertEqual(code, 1)
+        self.assertIn("ПРОВЕРЬТЕ workspace", err.getvalue())
+        self.assertIn("спишет минуты еще раз", err.getvalue())
+
+    def test_checksum_covers_multichunk(self):
+        """Хеш считается по прочитанным блокам, а не только для одночанковых."""
+        src = MYMEET.read_text(encoding="utf-8")
+        self.assertIn("sha.update(blob)", src)
+        self.assertIn("read_total != size", src)
 
 
 if __name__ == "__main__":
