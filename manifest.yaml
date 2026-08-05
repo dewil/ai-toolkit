@@ -57,6 +57,7 @@ universal:
   - skills/md-pptx/SKILL.md             # сборка презентации .pptx из markdown (H1 - титул, ## - слайд)
   - scripts/md-pptx.py                  # движок markdown -> pptx, stdlib без python-pptx
   - scripts/session-cost.py             # движок подсчета токенов сессии (для скилла session-cost)
+  - skills/office-md/SKILL.md           # прочитать офисный файл (docx/xlsx/pptx/odf/rtf/epub) как markdown через anydoc; PDF - штатным чтением
   - skills/pii-mask/SKILL.md            # маскировка ПД перед отправкой текста в облачную LLM и разворот ответа
   - skills/repo-publication/SKILL.md    # аудит приватного репозитория (секреты, ПД, NDA, история) и публикация с проверкой снаружи
   - skills/local-transcription/SKILL.md # локальная (offline) транскрипция записи встречи/лекции: выбор ASR, token-free диаризация, очередь прогонов, грабли
