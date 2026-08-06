@@ -100,6 +100,7 @@ wiki:
 management:
   - rules/meetings.md                   # формат заметок встреч
   - rules/tasks-tracking.md             # формат задач и планов
+  - rules/calendar-tasks.md             # задача с дедлайном - блоком в календарь исполнителя, префикс типа в названии
   - rules/artifacts-structure.md        # структура папок управленческого проекта
   - rules/meeting-transcripts.md        # двойной формат транскрипций (KTalk + mymeet) и .summary.md
   - rules/name-cross-check.md           # сверка имен из транскрипций по справочнику команды
