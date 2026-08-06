@@ -436,6 +436,26 @@ class Cli(unittest.TestCase):
         cols = set(re.findall(r'<c r="([A-Z]+)\d+"', xml))
         self.assertEqual(cols, {"A", "B", "C"})
 
+    def test_multiline_cell_gets_wrap_style(self):
+        """Перенос внутри ячейки Excel показывает только при wrapText в стиле:
+        без него две строки слипаются в одну (найдено живой проверкой в Excel
+        на Mac, 2026-08-06)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "перенос.csv"
+            p.write_text('шапка\n"первая\nвторая"\n', encoding="utf-8")
+            r = self.run_cli(str(p))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with zipfile.ZipFile(Path(tmp) / "перенос.xlsx") as z:
+                sheet = z.read("xl/worksheets/sheet1.xml").decode()
+                styles = z.read("xl/styles.xml").decode()
+        cell = re.search(r'<c r="A2"[^>]*>', sheet).group(0)
+        self.assertIn('s="', cell, "ячейке с переносом не назначен стиль")
+        idx = int(re.search(r's="(\d+)"', cell).group(1))
+        xfs = re.search(r"<cellXfs[^>]*>(.*?)</cellXfs>", styles, re.S).group(1)
+        entries = re.findall(r"<xf .*?(?:/>|</xf>)", xfs, re.S)
+        self.assertIn('wrapText="1"', entries[idx],
+                      "стиль ячейки с переносом без wrapText")
+
     def test_empty_input_exits_with_message(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "пусто.csv"
