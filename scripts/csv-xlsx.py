@@ -121,7 +121,7 @@ def date_serial(value: str) -> int | None:
 
 
 # индексы стилей в styles.xml (порядок cellXfs ниже)
-XF_PLAIN, XF_BOLD, XF_DATE = 0, 1, 2
+XF_PLAIN, XF_BOLD, XF_DATE, XF_WRAP, XF_BOLD_WRAP = 0, 1, 2, 3, 4
 
 
 def cell_xml(ref: str, raw: str, *, bold: bool, formulas: bool) -> str:
@@ -142,6 +142,10 @@ def cell_xml(ref: str, raw: str, *, bold: bool, formulas: bool) -> str:
             return f'<c r="{ref}" s="{XF_DATE}"><v>{serial}</v></c>'
     if value == "":
         return ""
+    # перенос строки внутри ячейки Excel показывает ТОЛЬКО при wrapText в стиле:
+    # сам "\n" в тексте он иначе съедает, и две строки слипаются в одну
+    if "\n" in value:
+        style = f' s="{XF_BOLD_WRAP if bold else XF_WRAP}"'
     # inline string: без sharedStrings проще и достаточно
     space = ' xml:space="preserve"' if value != value.strip() else ""
     return f'<c r="{ref}" t="inlineStr"{style}><is><t{space}>{clean(value)}</t></is></c>'
@@ -196,10 +200,14 @@ STYLES = (
     '<fill><patternFill patternType="gray125"/></fill></fills>'
     '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
     '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-    "<cellXfs count=\"3\">"
+    "<cellXfs count=\"5\">"
     '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
     '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
     '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1">'
+    '<alignment wrapText="1" vertical="top"/></xf>'
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">'
+    '<alignment wrapText="1" vertical="top"/></xf>'
     "</cellXfs>"
     '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
     "</styleSheet>"

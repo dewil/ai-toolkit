@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import re
 import subprocess
 import sys
 import tempfile
@@ -262,6 +263,24 @@ class Cli(unittest.TestCase):
             self.assertTrue(out.exists())
             self.assertIn("слайдов: 2", r.stdout)
             self.assertIn("Т. Тестов", part(out.read_bytes(), "docProps/core.xml"))
+
+    def test_markdown_table_becomes_real_table(self):
+        """Таблица markdown должна стать таблицей pptx, а не строками с трубами
+        (найдено живой проверкой в PowerPoint на Mac, 2026-08-06)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "т.md"
+            src.write_text(
+                "## Слайд\n\n| A | B |\n|---|---|\n| 1 | ё |\n| 2 | ✓ |\n",
+                encoding="utf-8")
+            r = self.run_cli(str(src))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            xml = part((Path(tmp) / "т.pptx").read_bytes(), "ppt/slides/slide1.xml")
+        self.assertIn("<a:tbl>", xml, "таблица не собрана как таблица")
+        self.assertEqual(len(re.findall(r"<a:tr ", xml)), 3, "строк не три")
+        self.assertEqual(len(re.findall(r"<a:gridCol", xml)), 2, "колонок не две")
+        self.assertNotIn("| A | B |", xml, "строка таблицы утекла текстом")
+        # разделитель |---| не должен стать строкой данных
+        self.assertNotIn("---", xml)
 
     def test_empty_source_exits_with_message(self):
         with tempfile.TemporaryDirectory() as tmp:

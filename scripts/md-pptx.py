@@ -112,6 +112,8 @@ def runs_of(text: str) -> list[tuple[str, str]]:
 
 
 BULLET_RE = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$")
+# строка markdown-таблицы: начинается и заканчивается трубой, внутри есть еще одна
+TABLE_ROW_RE = re.compile(r"^\|.*\|$")
 
 
 def parse_md(text: str) -> tuple[str | None, list[dict]]:
@@ -175,6 +177,20 @@ def parse_md(text: str) -> tuple[str | None, list[dict]]:
         if re.fullmatch(r"(-{3,}|\*{3,}|_{3,})", stripped):
             ensure(None)
             continue
+        if TABLE_ROW_RE.match(stripped):
+            if current is None:
+                ensure(None)
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            # строка-разделитель (|---|---|) только помечает шапку, в тело не идет
+            if all(re.fullmatch(r":?-{1,}:?", c) for c in cells if c):
+                if current["paras"] and current["paras"][-1][0] == "table":
+                    current["paras"][-1][1]["header"] = True
+                continue
+            if current["paras"] and current["paras"][-1][0] == "table":
+                current["paras"][-1][1]["rows"].append(cells)
+            else:
+                current["paras"].append(("table", {"rows": [cells], "header": False}))
+            continue
         m = BULLET_RE.match(line)
         if current is None:
             ensure(None)
@@ -224,6 +240,60 @@ def textbox(shape_id: int, name: str, x: int, y: int, cx: int, cy: int,
     )
 
 
+ROW_H = 370000          # высота строки таблицы, EMU (~0.4 см при 14pt)
+PARA_H = 330000         # оценка высоты текстовой строки 18pt с интервалом
+TABLE_FONT = 1400
+
+
+def table_xml(shape_id: int, spec: dict, x: int, y: int, cx: int) -> tuple[str, int]:
+    """graphicFrame с таблицей. Возвращает (xml, занятая высота).
+
+    Границы и заливка шапки задаются в каждой ячейке явно (`a:tcPr`), а не
+    через `tableStyleId`: тема таблиц - отдельная часть пакета, без нее
+    PowerPoint показал бы таблицу вообще без линий.
+    """
+    rows = spec["rows"]
+    ncols = max(len(r) for r in rows)
+    colw = cx // ncols
+    grid = "".join(f'<a:gridCol w="{colw}"/>' for _ in range(ncols))
+    line = ('<a:lnL w="12700" cap="flat"><a:solidFill><a:srgbClr val="9E9E9E"/>'
+            '</a:solidFill></a:lnL>')
+    borders = line + line.replace("lnL", "lnR") + line.replace("lnL", "lnT") \
+        + line.replace("lnL", "lnB")
+    trs = []
+    for i, row in enumerate(rows):
+        head = spec["header"] and i == 0
+        cells = list(row) + [""] * (ncols - len(row))
+        tcs = []
+        for text in cells:
+            runs = runs_of(text)
+            if head:
+                runs = [(t, "b") for t, _ in runs] or [("", "b")]
+            para = ('<a:p><a:pPr><a:buNone/></a:pPr>'
+                    + ("".join(run_xml(t, s, TABLE_FONT) for t, s in runs)
+                       or "<a:endParaRPr/>") + "</a:p>")
+            fill = ('<a:solidFill><a:srgbClr val="EFEFEF"/></a:solidFill>'
+                    if head else "")
+            tcs.append(
+                f'<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>{para}</a:txBody>'
+                f'<a:tcPr marL="45720" marR="45720" anchor="ctr">{borders}{fill}</a:tcPr></a:tc>'
+            )
+        trs.append(f'<a:tr h="{ROW_H}">{"".join(tcs)}</a:tr>')
+    height = ROW_H * len(rows)
+    xml = (
+        "<p:graphicFrame>"
+        f'<p:nvGraphicFramePr><p:cNvPr id="{shape_id}" name="Table {shape_id}"/>'
+        '<p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr>'
+        "<p:nvPr/></p:nvGraphicFramePr>"
+        f'<p:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{height}"/></p:xfrm>'
+        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">'
+        f'<a:tbl><a:tblPr firstRow="{1 if spec["header"] else 0}"/>'
+        f"<a:tblGrid>{grid}</a:tblGrid>{''.join(trs)}</a:tbl>"
+        "</a:graphicData></a:graphic></p:graphicFrame>"
+    )
+    return xml, height
+
+
 def slide_xml(slide: dict) -> str:
     shapes = []
     if slide.get("is_title"):
@@ -252,10 +322,33 @@ def slide_xml(slide: dict) -> str:
             ))
         else:
             body_top = EMU_H // 10
-        paras = "".join(para_xml(lvl, runs, 1800) for lvl, runs in slide["paras"])
-        if paras:
-            shapes.append(textbox(4, "Body", EMU_W // 20, body_top,
-                                  EMU_W * 9 // 10, EMU_H - body_top - EMU_H // 20, paras))
+        # текст и таблицы идут сверху вниз в порядке исходника: копим текстовые
+        # абзацы, а на каждой таблице сбрасываем накопленное отдельным блоком
+        left, width = EMU_W // 20, EMU_W * 9 // 10
+        bottom = EMU_H - EMU_H // 20
+        cursor, shape_id, buf = body_top, 4, []
+
+        def flush_text(height: int) -> None:
+            nonlocal cursor, shape_id, buf
+            if not buf:
+                return
+            shapes.append(textbox(shape_id, f"Body {shape_id}", left, cursor,
+                                  width, max(height, ROW_H), "".join(buf)))
+            cursor += height
+            shape_id += 1
+            buf = []
+
+        for lvl, payload in slide["paras"]:
+            if lvl == "table":
+                flush_text(len(buf) * PARA_H)
+                xml, used = table_xml(shape_id, payload, left, cursor, width)
+                shapes.append(xml)
+                cursor += used + PARA_H // 2   # воздух под таблицей
+                shape_id += 1
+            else:
+                buf.append(para_xml(lvl, payload, 1800))
+        # хвост текста забирает остаток слайда - ему и переносить при переполнении
+        flush_text(max(bottom - cursor, PARA_H))
 
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
