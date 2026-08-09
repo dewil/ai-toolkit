@@ -3,7 +3,7 @@ name: test-writer
 description: Writes tests from the spec with a clean context, never looking at the implementation. Use in SDD/TDD flows for substantive features - brief it with the spec and public contract only.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
-effort: high
+effort: medium
 color: red
 ---
 
