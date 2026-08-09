@@ -179,6 +179,24 @@ def domain_matches(cookie_domain: str, wanted: str) -> bool:
     return d == w or d.endswith("." + w)
 
 
+def dump_target_conflict(existing, profile: str | None) -> str | None:
+    """Сообщение, если дамп ложится поверх дампа ДРУГОГО профиля.
+
+    Зеркало проверки в restore: там отказ защищает чужой браузер от нашей
+    сессии, здесь - наш бэкап от перезаписи чужим. Типовой случай: машин
+    несколько, у каждой свой порт CDP, а `--port` забыт: дефолтные 9222
+    уводят дамп к первой машине, и общий файл по домену теряет содержимое.
+
+    None - записывать можно (файла нет, формат старый или профиль тот же).
+    """
+    if not isinstance(existing, dict):
+        return None
+    want = (existing.get("source") or {}).get("profile")
+    if want and profile and want != profile:
+        return f"файл уже содержит дамп профиля {want}, а сейчас снимается {profile}"
+    return None
+
+
 def cmd_dump(args) -> int:
     version = browser_version(args.port)
     s = _ws_connect(version["webSocketDebuggerUrl"])
@@ -201,6 +219,17 @@ def cmd_dump(args) -> int:
         print(f"внимание: {len(opaque)} куки с opaque partitionKey - при restore "
               f"будут пропущены: {', '.join(filter(None, opaque[:5]))}")
     out = pathlib.Path(args.out) if args.out else DEFAULT_STORE / f"{args.domain or 'all'}.json"
+    if out.exists() and not args.force:
+        try:
+            existing = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = None
+        conflict = dump_target_conflict(existing, profile)
+        if conflict:
+            print(f"отказ: {conflict}. Проверьте --port (сейчас {args.port}): "
+                  f"при нескольких машинах у каждой своя пара портов. "
+                  f"Другой файл - --out, осознанная перезапись - --force")
+            return 1
     if args.out:
         out.parent.mkdir(parents=True, exist_ok=True)
     else:
@@ -285,6 +314,8 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     d = sub.add_parser("dump", help="снять куки из живого браузера")
+    d.add_argument("--force", action="store_true",
+                   help="перезаписать файл, даже если в нем дамп другого профиля")
     d.add_argument("--domain", help="фильтр по домену, например linkedin.com")
     d.add_argument("--out", help="путь файла (по умолчанию ~/.config/browser-sessions/<domain>.json)")
     d.set_defaults(func=cmd_dump)

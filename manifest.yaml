@@ -64,6 +64,7 @@ universal:
   - skills/local-transcription/transcribe_meeting.py # эталонная реализация движка (ставится на машину один раз, не раскатывается по проектам)
   - skills/agent-browser/SKILL.md       # развернуть на устройстве браузер по требованию: обратный туннель, управляющий канал с forced command, бэкап сессий
   - skills/agent-browser/runbook-mac.md # пошаговая установка схемы на macOS
+  - skills/agent-browser/runbook-linux.md # пошаговая установка схемы на Linux (systemd, проверено на Ubuntu 24.04)
   - scripts/chrome-cookies.py           # бэкап/восстановление кук браузерной сессии через CDP (дамп - секрет, см. secrets-handling)
 
 coding:
