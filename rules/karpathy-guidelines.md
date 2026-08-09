@@ -13,10 +13,12 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
 
 Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
+- State your assumptions explicitly - in a line, not a preamble.
+- Make routine judgment calls yourself. Surface a choice only when different readings of the request would lead to materially different work; otherwise pick the sensible default and name it.
 - If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
+- If something is genuinely unclear and no assumption is safe, stop. Name what's confusing. Ask.
+
+The threshold matters in both directions: asking about every fork stalls work that a careful colleague would just do, and picking silently on a real fork delivers the wrong thing.
 
 ## 2. Simplicity First
 
@@ -65,6 +67,8 @@ For multi-step tasks, state a brief plan:
 3. [Step] -> verify: [check]
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+**Verification means an artifact, not a re-read.** A test that runs, a command whose exit code you check, a diff compared against the spec - that is verification. Re-reading your own output to double-check it, or handing work you just finished to a subagent for review, is not: the model already verifies itself, and a second pass of the same kind burns tokens without changing the outcome. If you cannot name the artifact that proves a step is done, the criterion is still weak - fix the criterion instead of adding a review step.
 
 ---
 
