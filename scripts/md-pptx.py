@@ -116,22 +116,72 @@ BULLET_RE = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$")
 TABLE_ROW_RE = re.compile(r"^\|.*\|$")
 
 
+COMMENT_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+
+
 def strip_html_comments(text: str) -> tuple[str, int]:
-    """Вырезает HTML-комментарии вне fenced-блоков. Возвращает (текст, счетчик).
+    """Вырезает HTML-комментарии вне кода. Возвращает (текст, счетчик).
 
     Дубль такой же функции из md-pdf.py, и это осознанно: парсер здесь свой
     (слайды, а не поток), зависимости от md-pdf.py у этого скрипта нет, и
-    заводить ее ради четырех строк регулярки хуже, чем повторить их. Разойтись
-    им нечем - поведение задано форматом комментария, а не нашими решениями.
+    заводить ее ради одной функции хуже, чем повторить. Расхождением это не
+    грозит: границы кода обе версии берут из своего парсера, а они здесь и
+    там одинаковые (оба вида забора, отступ по `.strip()`, inline-бэктики).
     """
-    parts = re.split(r"(^```[\s\S]*?^```)", text, flags=re.M)
+    out: list[str] = []
     total = 0
-    for i, part in enumerate(parts):
-        if part.startswith("```"):
+    fence: str | None = None
+    in_comment = False
+
+    for line in text.split("\n"):
+        stripped = line.strip()
+        m = COMMENT_FENCE_RE.match(stripped)
+
+        if fence is not None:
+            out.append(line)
+            if m and stripped[0] == fence:
+                fence = None
             continue
-        parts[i], n = re.subn(r"<!--[\s\S]*?-->", "", part)
-        total += n
-    return "".join(parts), total
+        if m and not in_comment:
+            fence = stripped[0]
+            out.append(line)
+            continue
+
+        stash: list[str] = []
+
+        def keep(mo: re.Match) -> str:
+            stash.append(mo.group(0))
+            return f"\x00{len(stash) - 1}\x00"
+
+        body = line if in_comment else re.sub(r"`[^`]*`", keep, line)
+
+        i = 0
+        while True:
+            if in_comment:
+                end = body.find("-->", i)
+                if end == -1:
+                    body = body[:i]
+                    break
+                body = body[:i] + body[end + 3:]
+                in_comment = False
+                continue
+            start = body.find("<!--", i)
+            if start == -1:
+                break
+            total += 1
+            end = body.find("-->", start + 4)
+            if end == -1:
+                body = body[:start]
+                in_comment = True
+                break
+            body = body[:start] + body[end + 3:]
+            i = start
+
+        for idx, chunk in enumerate(stash):
+            body = body.replace(f"\x00{idx}\x00", chunk)
+        out.append(body)
+
+    return "\n".join(out), total
 
 
 def parse_md(text: str) -> tuple[str | None, list[dict]]:

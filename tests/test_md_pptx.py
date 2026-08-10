@@ -322,6 +322,18 @@ class HtmlComments(unittest.TestCase):
         self.assertIn("пример", str(slides))
         self.assertEqual(err, "")
 
+    def test_inline_code_comment_survives(self):
+        _, slides, err = self.parse("# Т\n\n---\n\n## С\n\nПример: `<!-- c -->` тут.\n")
+        self.assertIn("c", str(slides))
+        self.assertEqual(err, "")
+
+    def test_indented_and_tilde_fences_survive(self):
+        # Парсер этого скрипта знает оба вида забора и отступ - вырезание тоже.
+        _, s1, e1 = self.parse("# Т\n\n---\n\n## С\n\n- п:\n\n  ```html\n  <!-- a -->\n  ```\n")
+        _, s2, e2 = self.parse("# Т\n\n---\n\n## С\n\n~~~html\n<!-- b -->\n~~~\n")
+        self.assertIn("a", str(s1)); self.assertEqual(e1, "")
+        self.assertIn("b", str(s2)); self.assertEqual(e2, "")
+
     def test_clean_source_is_silent(self):
         _, slides, err = self.parse("# Т\n\n---\n\n## С\n\nтекст\n")
         self.assertIn("текст", str(slides))
