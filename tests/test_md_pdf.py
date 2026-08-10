@@ -528,6 +528,42 @@ class HtmlComments(unittest.TestCase):
         self.assertIn("пример", body)
         self.assertEqual(err, "")
 
+    def test_inline_code_comment_survives(self):
+        # Комментарий в одинарных бэктиках - пример синтаксиса, а не заметка.
+        # Найдено ревью: первая версия резала его прямо из середины строки,
+        # оставляя пустые бэктики. Этот же скилл документирует синтаксис так же.
+        body, err = self.strip("Пример: `<!-- c -->` в тексте.\n")
+        self.assertIn("c", body)
+        self.assertEqual(err, "")
+
+    def test_indented_fence_survives(self):
+        # Забор с отступом (блок под пунктом списка): основной разбор опознает
+        # его по .strip(), значит и вырезание обязано.
+        body, err = self.strip("- пункт:\n\n  ```html\n  <!-- c -->\n  ```\n")
+        self.assertIn("c", body)
+        self.assertEqual(err, "")
+
+    def test_tilde_fence_survives(self):
+        body, err = self.strip("# З\n\n~~~html\n<!-- c -->\n~~~\n")
+        self.assertIn("c", body)
+        self.assertEqual(err, "")
+
+    def test_unclosed_fence_survives(self):
+        body, _ = self.strip("```html\n<!-- c -->\n")
+        self.assertIn("c", body)
+
+    def test_arrow_in_plain_text_kept(self):
+        # "-->" без открывающего "<!--" - обычный текст (ASCII-схема).
+        body, err = self.strip("Схема: A --> B, дальше текст.\n")
+        self.assertIn("--&gt; B", body)
+        self.assertEqual(err, "")
+
+    def test_comment_inside_line_removed(self):
+        body, _ = self.strip("до <!-- x --> после\n")
+        self.assertNotIn("x", body)
+        self.assertIn("до", body)
+        self.assertIn("после", body)
+
     def test_clean_source_is_silent(self):
         body, err = self.strip("# З\n\nобычный текст\n")
         self.assertIn("обычный текст", body)

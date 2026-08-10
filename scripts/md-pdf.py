@@ -212,24 +212,79 @@ def inline(text: str) -> str:
     return s
 
 
+FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+
+
 def strip_html_comments(md: str) -> tuple[str, int]:
-    """Вырезает HTML-комментарии вне fenced-блоков. Возвращает (текст, сколько вырезано).
+    """Вырезает HTML-комментарии вне кода. Возвращает (текст, сколько вырезано).
 
     Автор исходника прячет в `<!-- ... -->` служебное, потому что ни один
     markdown-рендерер комментарии не показывает. Наш разбор их не знал и
     выводил абзацем - служебные заметки уезжали в документ, уходящий наружу.
 
-    Внутри fenced-блоков комментарии остаются: там это пример кода, а не
-    заметка автора, и вырезать его значило бы испортить документацию.
+    Код не трогаем: там комментарий - пример, а не заметка автора, и вырезать
+    его значило бы испортить документацию. "Код" здесь определяется **теми же
+    правилами, что и в основном разборе ниже**, иначе защита оказывается уже
+    обещанной: fenced-блок опознается по `.strip()` (то есть с отступом тоже) и
+    по обоим видам забора, а inline-код прячется до вырезания. Первая версия
+    этой функции резала по сегментам `^``` ... ^```` и молча съедала комментарий
+    из блока с отступом, из `~~~`-забора и из одинарных бэктиков.
     """
-    parts = re.split(r"(^```[\s\S]*?^```)", md, flags=re.M)
+    out: list[str] = []
     total = 0
-    for i, part in enumerate(parts):
-        if part.startswith("```"):
+    fence: str | None = None   # символ открытого забора, пока блок не закрыт
+    in_comment = False         # многострочный комментарий продолжается
+
+    for line in md.split("\n"):
+        stripped = line.strip()
+        m = FENCE_RE.match(stripped)
+
+        if fence is not None:            # внутри блока кода - отдаем как есть
+            out.append(line)
+            if m and stripped[0] == fence:
+                fence = None
             continue
-        parts[i], n = re.subn(r"<!--[\s\S]*?-->", "", part)
-        total += n
-    return "".join(parts), total
+        if m and not in_comment:         # забор открывается только вне комментария
+            fence = stripped[0]
+            out.append(line)
+            continue
+
+        # Inline-код прячем: `<!-- ... -->` в бэктиках - тоже пример, не заметка.
+        stash: list[str] = []
+
+        def keep(mo: re.Match) -> str:
+            stash.append(mo.group(0))
+            return f"\x00{len(stash) - 1}\x00"
+
+        text = line if in_comment else re.sub(r"`[^`]*`", keep, line)
+
+        i = 0
+        while True:
+            if in_comment:
+                end = text.find("-->", i)
+                if end == -1:
+                    text = text[:i]
+                    break
+                text = text[:i] + text[end + 3:]
+                in_comment = False
+                continue
+            start = text.find("<!--", i)
+            if start == -1:
+                break
+            total += 1
+            end = text.find("-->", start + 4)
+            if end == -1:
+                text = text[:start]
+                in_comment = True
+                break
+            text = text[:start] + text[end + 3:]
+            i = start
+
+        for idx, chunk in enumerate(stash):
+            text = text.replace(f"\x00{idx}\x00", chunk)
+        out.append(text)
+
+    return "\n".join(out), total
 
 
 def md_to_html(md: str) -> tuple[str, str]:
