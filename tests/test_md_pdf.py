@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import importlib.util
 import os
 import shutil
@@ -488,6 +489,49 @@ class Footer(unittest.TestCase):
         self.assertIn("документ не загрузился", src)
         self.assertIn("scrollHeight", src)
 
+
+
+
+class HtmlComments(unittest.TestCase):
+    """HTML-комментарии не должны доезжать до документа.
+
+    Автор прячет в них служебное, полагаясь на то, что markdown их не
+    показывает. Разбор их не знал и выводил абзацем - служебные заметки
+    уезжали в PDF, уходящий внешнему адресату. Поймано на резюме: в файл
+    попал журнал внутренних решений по кандидату.
+    """
+
+    def strip(self, src):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            _, body = md_pdf.md_to_html(src)
+        return body, buf.getvalue()
+
+    def test_comment_does_not_reach_document(self):
+        body, err = self.strip("<!-- служебное -->\n\n# Заголовок\n")
+        self.assertNotIn("служебное", body)
+        self.assertIn("вырезано", err)
+
+    def test_multiline_comment_stripped_whole(self):
+        body, _ = self.strip("<!--\nпервая\nвторая\n-->\n\n# З\n")
+        self.assertNotIn("первая", body)
+        self.assertNotIn("вторая", body)
+
+    def test_counter_matches_number_of_blocks(self):
+        _, err = self.strip("<!-- a -->\n# З\n<!-- b -->\nтекст\n<!-- c -->\n")
+        self.assertIn("3", err)
+
+    def test_comment_inside_fence_survives(self):
+        # В кодовом блоке комментарий - пример, а не заметка автора:
+        # вырезать его значило бы испортить документацию про HTML.
+        body, err = self.strip("# З\n\n```html\n<!-- пример -->\n```\n")
+        self.assertIn("пример", body)
+        self.assertEqual(err, "")
+
+    def test_clean_source_is_silent(self):
+        body, err = self.strip("# З\n\nобычный текст\n")
+        self.assertIn("обычный текст", body)
+        self.assertEqual(err, "")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

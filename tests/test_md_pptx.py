@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import io
 import re
 import subprocess
@@ -295,6 +296,36 @@ class Cli(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("нет исходника", r.stderr)
 
+
+
+
+class HtmlComments(unittest.TestCase):
+    """То же, что в md-pdf: служебные комментарии не должны попадать на слайд.
+
+    У этого скрипта свой parse_md, поэтому дефект и фикс тут независимы -
+    правка md-pdf.py его бы не закрыла.
+    """
+
+    def parse(self, src):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            title, slides = mp.parse_md(src)
+        return title, slides, buf.getvalue()
+
+    def test_comment_does_not_reach_slide(self):
+        _, slides, err = self.parse("# Титул\n\n---\n\n## Слайд\n\n<!-- служебное -->\n\nтекст\n")
+        self.assertNotIn("служебное", str(slides))
+        self.assertIn("вырезано", err)
+
+    def test_comment_inside_fence_survives(self):
+        _, slides, err = self.parse("# Т\n\n---\n\n## С\n\n```html\n<!-- пример -->\n```\n")
+        self.assertIn("пример", str(slides))
+        self.assertEqual(err, "")
+
+    def test_clean_source_is_silent(self):
+        _, slides, err = self.parse("# Т\n\n---\n\n## С\n\nтекст\n")
+        self.assertIn("текст", str(slides))
+        self.assertEqual(err, "")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

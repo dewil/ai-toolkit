@@ -212,8 +212,32 @@ def inline(text: str) -> str:
     return s
 
 
+def strip_html_comments(md: str) -> tuple[str, int]:
+    """Вырезает HTML-комментарии вне fenced-блоков. Возвращает (текст, сколько вырезано).
+
+    Автор исходника прячет в `<!-- ... -->` служебное, потому что ни один
+    markdown-рендерер комментарии не показывает. Наш разбор их не знал и
+    выводил абзацем - служебные заметки уезжали в документ, уходящий наружу.
+
+    Внутри fenced-блоков комментарии остаются: там это пример кода, а не
+    заметка автора, и вырезать его значило бы испортить документацию.
+    """
+    parts = re.split(r"(^```[\s\S]*?^```)", md, flags=re.M)
+    total = 0
+    for i, part in enumerate(parts):
+        if part.startswith("```"):
+            continue
+        parts[i], n = re.subn(r"<!--[\s\S]*?-->", "", part)
+        total += n
+    return "".join(parts), total
+
+
 def md_to_html(md: str) -> tuple[str, str]:
     """Возвращает (title из первого H1 или '', html-тело)."""
+    md, stripped = strip_html_comments(md)
+    if stripped:
+        print(f"md-pdf: вырезано HTML-комментариев: {stripped} "
+              f"(в документ они не попадают)", file=sys.stderr)
     lines = md.splitlines()
     # пропустить YAML-frontmatter
     if lines and lines[0].strip() == "---":

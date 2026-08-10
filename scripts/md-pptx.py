@@ -116,12 +116,34 @@ BULLET_RE = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$")
 TABLE_ROW_RE = re.compile(r"^\|.*\|$")
 
 
+def strip_html_comments(text: str) -> tuple[str, int]:
+    """Вырезает HTML-комментарии вне fenced-блоков. Возвращает (текст, счетчик).
+
+    Дубль такой же функции из md-pdf.py, и это осознанно: парсер здесь свой
+    (слайды, а не поток), зависимости от md-pdf.py у этого скрипта нет, и
+    заводить ее ради четырех строк регулярки хуже, чем повторить их. Разойтись
+    им нечем - поведение задано форматом комментария, а не нашими решениями.
+    """
+    parts = re.split(r"(^```[\s\S]*?^```)", text, flags=re.M)
+    total = 0
+    for i, part in enumerate(parts):
+        if part.startswith("```"):
+            continue
+        parts[i], n = re.subn(r"<!--[\s\S]*?-->", "", part)
+        total += n
+    return "".join(parts), total
+
+
 def parse_md(text: str) -> tuple[str | None, list[dict]]:
     """markdown -> (титул H1 | None, слайды).
 
     Слайд: {"title": str|None, "paras": [(lvl, runs)]}, lvl: None - абзац,
     0/1 - уровень буллета.
     """
+    text, stripped = strip_html_comments(text)
+    if stripped:
+        print(f"md-pptx: вырезано HTML-комментариев: {stripped} "
+              f"(в презентацию они не попадают)", file=sys.stderr)
     title: str | None = None
     slides: list[dict] = []
     current: dict | None = None
