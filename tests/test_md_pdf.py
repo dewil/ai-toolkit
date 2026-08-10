@@ -564,6 +564,39 @@ class HtmlComments(unittest.TestCase):
         self.assertIn("до", body)
         self.assertIn("после", body)
 
+    def test_escaped_literal_survives(self):
+        # \<!-- - экранированный литерал по CommonMark, комментарием не является.
+        body, err = self.strip("Показать \\<!-- пример --> буквально\n")
+        self.assertIn("пример", body)
+        self.assertEqual(err, "")
+
+    def test_comment_delimiter_inside_url_kept(self):
+        # Вырезание внутри ссылки поменяло бы адрес - это хуже, чем оставить.
+        body, _ = self.strip("[Спека](https://example.test/api/<!--v2-->schema)\n")
+        self.assertIn("api/&lt;!--v2--&gt;schema", body)
+
+    def test_opener_in_backticks_does_not_eat_document(self):
+        # Литеральный "<!--" в коде + стрелка ниже по тексту: наивная регулярка
+        # связывала их и съедала все между, включая целый абзац.
+        body, err = self.strip("Маркер `<!--` тут.\n\nПоток: вход --> выход.\n")
+        self.assertIn("Поток", body)
+        self.assertIn("выход", body)
+        self.assertEqual(err, "")
+
+    def test_unclosed_comment_does_not_leak(self):
+        # Комментарий без закрывающей пары идет до конца файла (CommonMark) -
+        # regex-версия его не видела и печатала содержимое открытым текстом.
+        body, err = self.strip("# О\n\n<!-- заметка\nСЕКРЕТ ДО EOF\n")
+        self.assertNotIn("СЕКРЕТ", body)
+        self.assertIn("вырезано", err)
+
+    def test_fence_inside_comment_does_not_leak(self):
+        # Забор внутри комментария разрывал сегментацию, и вся заметка
+        # печаталась целиком - возврат исходной утечки.
+        body, _ = self.strip("# О\n\n<!-- з\n```text\nСЕКРЕТ\n```\nконец -->\n\n## Публично\n")
+        self.assertNotIn("СЕКРЕТ", body)
+        self.assertIn("Публично", body)
+
     def test_clean_source_is_silent(self):
         body, err = self.strip("# З\n\nобычный текст\n")
         self.assertIn("обычный текст", body)

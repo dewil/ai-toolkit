@@ -256,7 +256,12 @@ def strip_html_comments(md: str) -> tuple[str, int]:
             stash.append(mo.group(0))
             return f"\x00{len(stash) - 1}\x00"
 
-        text = line if in_comment else re.sub(r"`[^`]*`", keep, line)
+        # Прячем то, где `<!--` - литерал, а не комментарий: inline-код и
+        # ссылки (внутри url делимитер встречается и менять адрес нельзя).
+        text = line
+        if not in_comment:
+            text = re.sub(r"`[^`]*`", keep, text)
+            text = re.sub(r"\]\([^)\s]*\)", keep, text)
 
         i = 0
         while True:
@@ -271,6 +276,9 @@ def strip_html_comments(md: str) -> tuple[str, int]:
             start = text.find("<!--", i)
             if start == -1:
                 break
+            if start and text[start - 1] == "\\":   # \<!-- - экранированный литерал
+                i = start + 4
+                continue
             total += 1
             end = text.find("-->", start + 4)
             if end == -1:
@@ -280,8 +288,15 @@ def strip_html_comments(md: str) -> tuple[str, int]:
             text = text[:start] + text[end + 3:]
             i = start
 
-        for idx, chunk in enumerate(stash):
-            text = text.replace(f"\x00{idx}\x00", chunk)
+        # Разворачиваем по кругу: спрятанная ссылка может содержать сентинел
+        # спрятанного до нее inline-кода (тот же прием, что в inline() ниже).
+        for _ in range(len(stash) + 1):
+            grown = text
+            for idx, chunk in enumerate(stash):
+                grown = grown.replace(f"\x00{idx}\x00", chunk)
+            if grown == text:
+                break
+            text = grown
         out.append(text)
 
     return "\n".join(out), total

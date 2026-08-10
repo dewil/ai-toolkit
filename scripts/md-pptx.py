@@ -153,7 +153,10 @@ def strip_html_comments(text: str) -> tuple[str, int]:
             stash.append(mo.group(0))
             return f"\x00{len(stash) - 1}\x00"
 
-        body = line if in_comment else re.sub(r"`[^`]*`", keep, line)
+        body = line
+        if not in_comment:
+            body = re.sub(r"`[^`]*`", keep, body)
+            body = re.sub(r"\]\([^)\s]*\)", keep, body)
 
         i = 0
         while True:
@@ -168,6 +171,9 @@ def strip_html_comments(text: str) -> tuple[str, int]:
             start = body.find("<!--", i)
             if start == -1:
                 break
+            if start and body[start - 1] == "\\":   # \<!-- - экранированный литерал
+                i = start + 4
+                continue
             total += 1
             end = body.find("-->", start + 4)
             if end == -1:
@@ -177,8 +183,15 @@ def strip_html_comments(text: str) -> tuple[str, int]:
             body = body[:start] + body[end + 3:]
             i = start
 
-        for idx, chunk in enumerate(stash):
-            body = body.replace(f"\x00{idx}\x00", chunk)
+        # Разворачиваем по кругу: спрятанная ссылка может содержать сентинел
+        # спрятанного до нее inline-кода (тот же прием, что в inline() ниже).
+        for _ in range(len(stash) + 1):
+            grown = body
+            for idx, chunk in enumerate(stash):
+                grown = grown.replace(f"\x00{idx}\x00", chunk)
+            if grown == body:
+                break
+            body = grown
         out.append(body)
 
     return "\n".join(out), total
