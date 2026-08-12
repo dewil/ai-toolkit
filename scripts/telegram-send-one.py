@@ -118,12 +118,12 @@ async def amain(args) -> int:
                     print(f"  | {ln}")
             else:
                 print("  подпись: нет (файл уйдет без текста)")
-            wait, required = tgs.pace_check(args.account, chat_id)
+            wait, required = tgs.pace_check(args.account, entity)
             if wait > 0:
                 print(f"  темп: рано - после прошлого сообщения нужно {required:.0f} сек, осталось {wait:.0f}")
             return 0
 
-        rc = tgs.pace_guard(args.account, chat_id, args.no_pace_check)
+        rc = tgs.pace_guard(args.account, entity, args.no_pace_check)
         if rc:
             return rc
 
@@ -139,7 +139,7 @@ async def amain(args) -> int:
             sent = await client.send_message(
                 entity, text, reply_to=reply_to, parse_mode=parse_mode, silent=args.silent,
             )
-        tgs.pace_record(args.account, chat_id, len(text or ""))
+        tgs.pace_record(args.account, entity, len(text or ""))
         print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:

@@ -49,6 +49,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
+import os
 import random
 import sqlite3
 import sys
@@ -86,8 +88,23 @@ PACE_MAX_GAP = 180         # потолок: дольше трех минут г
 PACE_JITTER = 0.35         # разброс, чтобы паузы не легли ровной сеткой
 
 
+def pace_norm_chat(target):
+    """Один чат - один ключ, как бы его ни адресовали.
+
+    Канал доступен и сырым id (123456), и marked (-100123456), и телетон
+    резолвит оба в один peer - но строки ключа вышли бы разные, и гейт завел
+    бы два независимых счетчика. Это штатный обход темпа без всякого флага,
+    поэтому ключ считается по РЕЗОЛВНУТОМУ entity, а не по тому, что набрали
+    в команде. Тип в ключе нужен, чтобы user 123 и channel 123 не слиплись.
+    """
+    ident = getattr(target, "id", None)
+    if ident is None:
+        return target                      # entity нет - берем как есть
+    return f"{type(target).__name__}{ident}"
+
+
 def pace_key(account: str, chat_id) -> str:
-    return f"{account}:{chat_id}"
+    return f"{account}:{pace_norm_chat(chat_id)}"
 
 
 def pace_load() -> dict:
@@ -97,6 +114,12 @@ def pace_load() -> dict:
         return data if isinstance(data, dict) else {}
     except (FileNotFoundError, ValueError, OSError):
         return {}
+
+
+def pace_base(prev_chars: int) -> float:
+    """Расчетная пауза без разброса: минимум плюс время набора, но не выше потолка."""
+    need = PACE_MIN_GAP + (prev_chars / PACE_CHARS_PER_MIN) * 60
+    return min(need, PACE_MAX_GAP)
 
 
 def pace_required(prev_chars: int) -> float:
@@ -109,9 +132,10 @@ def pace_required(prev_chars: int) -> float:
     паузы легли бы ровной сеткой, а это та же подпись автомата, что и залп
     (rules/outbound-timing.md, "Ровная минута").
     """
-    need = PACE_MIN_GAP + (prev_chars / PACE_CHARS_PER_MIN) * 60
-    need = min(need, PACE_MAX_GAP)
-    return need * (1 + random.uniform(0, PACE_JITTER))
+    need = pace_base(prev_chars)
+    # Разброс вниз от расчетного: так потолок остается потолком. Порядок
+    # "сначала min, потом +jitter" давал бы 243 секунды при заявленных 180.
+    return max(PACE_MIN_GAP, need * (1 - random.uniform(0, PACE_JITTER)))
 
 
 def pace_check(account: str, chat_id) -> tuple[float, float]:
@@ -122,14 +146,22 @@ def pace_check(account: str, chat_id) -> tuple[float, float]:
     try:
         prev_ts = float(entry.get("ts", 0))
         required = float(entry.get("required", 0))
-    except (TypeError, ValueError):
+        if required <= 0:
+            # Запись старого формата: паузу берем БЕЗ разброса, иначе она
+            # пересчитывалась бы на каждой проверке - и повтором команды можно
+            # было бы вымучить значение поменьше.
+            required = pace_base(int(entry.get("chars", 0)))
+    except (TypeError, ValueError, OverflowError):
         return 0.0, 0.0
-    if required <= 0:   # запись старого формата, без зафиксированной паузы
-        try:
-            required = pace_required(int(entry.get("chars", 0)))
-        except (TypeError, ValueError):
-            return 0.0, 0.0
-    elapsed = time.time() - prev_ts
+    # Мусор в состоянии (inf/nan от чужой записи) держал бы чат вечно.
+    if not (math.isfinite(prev_ts) and math.isfinite(required)):
+        return 0.0, 0.0
+    now = time.time()
+    if prev_ts > now:
+        # Часы съехали назад или состояние из бэкапа: держать чат на величину
+        # сдвига нельзя, это часы врут, а не человек торопится.
+        return 0.0, 0.0
+    elapsed = now - prev_ts
     if elapsed >= required:
         return 0.0, required
     return required - elapsed, required
@@ -150,10 +182,16 @@ def pace_record(account: str, chat_id, chars: int) -> None:
             "chars": int(chars),
             "required": pace_required(int(chars)),
         }
-        tmp = PACE_STATE_PATH.with_suffix(".tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(state, fh, ensure_ascii=False)
-        tmp.replace(PACE_STATE_PATH)
+        # Уникальное имя + O_EXCL + O_NOFOLLOW: предсказуемый tmp можно
+        # подменить симлинком и через нас усечь чужой файл.
+        tmp = PACE_STATE_PATH.with_name(f"{PACE_STATE_PATH.name}.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(state, fh, ensure_ascii=False)
+            tmp.replace(PACE_STATE_PATH)
+        finally:
+            tmp.unlink(missing_ok=True)
     except OSError as exc:
         sys.stderr.write(f"Предупреждение: не удалось записать состояние темпа ({exc}).\n")
 
@@ -547,12 +585,12 @@ async def amain(args) -> int:
                     print(f"  | {ln}")
             else:
                 print("  подпись: нет (файл уйдет без текста)")
-            wait, required = pace_check(entry["account"], chat_id)
+            wait, required = pace_check(entry["account"], entity)
             if wait > 0:
                 print(f"  темп: рано - после прошлого сообщения нужно {required:.0f} сек, осталось {wait:.0f}")
             return 0
 
-        rc = pace_guard(entry["account"], chat_id, args.no_pace_check)
+        rc = pace_guard(entry["account"], entity, args.no_pace_check)
         if rc:
             return rc
 
@@ -567,7 +605,7 @@ async def amain(args) -> int:
             sent = await client.send_message(
                 entity, text, reply_to=reply_to, parse_mode=None, silent=args.silent,
             )
-        pace_record(entry["account"], chat_id, len(text or ""))
+        pace_record(entry["account"], entity, len(text or ""))
         print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
