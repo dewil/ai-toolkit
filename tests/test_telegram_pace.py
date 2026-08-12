@@ -52,11 +52,19 @@ class Required(PaceBase):
         self.assertGreater(long, short)
 
     def test_floor_and_ceiling(self):
+        # Потолок - это потолок: прежний порядок "сначала min, потом +jitter"
+        # давал 243 секунды при заявленных 180, и тест это освящал.
         for chars in (0, 100, 5000):
-            for _ in range(30):
+            for _ in range(50):
                 need = tgs.pace_required(chars)
                 self.assertGreaterEqual(need, tgs.PACE_MIN_GAP)
-                self.assertLessEqual(need, tgs.PACE_MAX_GAP * (1 + tgs.PACE_JITTER) + 1e-6)
+                self.assertLessEqual(need, tgs.PACE_MAX_GAP + 1e-6)
+
+    def test_jitter_survives_at_ceiling(self):
+        # У длинных сообщений расчет упирается в потолок - разброс обязан
+        # остаться, иначе паузы лягут ровной сеткой ровно там, где серия длинная.
+        values = {round(tgs.pace_required(5000), 4) for _ in range(40)}
+        self.assertGreater(len(values), 1)
 
     def test_jitter_gives_spread_not_constant(self):
         # Ровные интервалы читаются как расписание так же, как залп.
@@ -104,6 +112,73 @@ class CheckAndGuard(PaceBase):
     def test_skip_flag_bypasses(self):
         tgs.pace_record("acc", 42, 300)
         self.assertEqual(tgs.pace_guard("acc", 42, skip=True), 0)
+
+
+class HostileState(PaceBase):
+    """Мусор в состоянии не должен ни держать чат вечно, ни валить скрипт."""
+
+    def write(self, entry):
+        tgs.PACE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tgs.PACE_STATE_PATH.write_text(json.dumps({"acc:42": entry}), encoding="utf-8")
+
+    def test_future_timestamp_does_not_block(self):
+        # Часы съехали назад или состояние из бэкапа: держать чат на величину
+        # сдвига нельзя - врут часы, а не человек торопится.
+        self.write({"ts": time.time() + 3600, "required": 40})
+        self.assertEqual(tgs.pace_check("acc", 42), (0.0, 0.0))
+        self.assertEqual(tgs.pace_guard("acc", 42, skip=False), 0)
+
+    def test_infinite_required_does_not_block_forever(self):
+        self.write({"ts": time.time(), "required": float("inf")})
+        self.assertEqual(tgs.pace_guard("acc", 42, skip=False), 0)
+
+    def test_nan_does_not_block(self):
+        self.write({"ts": time.time(), "required": float("nan")})
+        self.assertEqual(tgs.pace_guard("acc", 42, skip=False), 0)
+
+    def test_huge_int_does_not_crash(self):
+        self.write({"ts": 10 ** 400, "chars": 10})
+        self.assertEqual(tgs.pace_guard("acc", 42, skip=False), 0)
+
+    def test_legacy_required_is_stable_across_checks(self):
+        # Без зафиксированной паузы прежняя версия рандомила ее на каждой
+        # проверке - повтором команды можно было вымучить значение поменьше.
+        self.write({"ts": time.time(), "chars": 300})
+        first = tgs.pace_check("acc", 42)[1]
+        for _ in range(20):
+            self.assertEqual(tgs.pace_check("acc", 42)[1], first)
+
+
+class ChatKey(PaceBase):
+    def test_same_entity_gives_one_key_regardless_of_how_addressed(self):
+        # Канал адресуют и сырым id, и marked (-100...). Ключ считается по
+        # резолвнутому entity, поэтому оба пути дают один счетчик - иначе это
+        # штатный обход темпа без всякого флага.
+        class Channel:
+            def __init__(self, ident): self.id = ident
+        self.assertEqual(tgs.pace_key("acc", Channel(1234567890)),
+                         tgs.pace_key("acc", Channel(1234567890)))
+
+    def test_same_id_different_entity_types_do_not_collide(self):
+        class Channel:
+            def __init__(self, ident): self.id = ident
+        class User:
+            def __init__(self, ident): self.id = ident
+        self.assertNotEqual(tgs.pace_key("acc", Channel(123)), tgs.pace_key("acc", User(123)))
+
+    def test_different_chats_still_differ(self):
+        self.assertNotEqual(tgs.pace_key("acc", 111), tgs.pace_key("acc", 222))
+
+
+class TempFile(PaceBase):
+    def test_tmp_name_is_unique_and_cleaned(self):
+        tgs.pace_record("acc", 42, 100)
+        leftovers = list(tgs.PACE_STATE_PATH.parent.glob("*.tmp"))
+        self.assertEqual(leftovers, [])
+
+    def test_state_file_not_group_readable(self):
+        tgs.pace_record("acc", 42, 100)
+        self.assertEqual(tgs.PACE_STATE_PATH.stat().st_mode & 0o077, 0)
 
 
 class StateFile(PaceBase):
