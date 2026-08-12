@@ -15,6 +15,11 @@
 адресата и печатает, что и куда уйдет, НО не отправляет. Реальная отправка -
 только с флагом --send.
 
+Второй предохранитель - гейт темпа: отправка слишком рано после предыдущей в
+тот же чат отклоняется с кодом 3 ("нужно N сек, осталось M"). Серия сообщений
+идет с паузами, а не пачкой: залп выдает автоматику вернее содержания текста.
+Обход - --no-pace-check (когда на том конце не человек или есть срочность).
+
 Текст уходит ДОСЛОВНО (parse_mode=None): markdown не парсится, символы
 _ * ` в тексте не искажаются.
 
@@ -44,8 +49,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import random
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -66,6 +73,110 @@ AUTH_PATH = AUTH_DIR / "auth.json"
 LOCK_ATTEMPTS = 5
 LOCK_DELAY = 15
 PROJECT_CONFIG_PATH = PROJECT_ROOT / ".telegram-snapshot.json"
+
+# Гейт темпа: не дает отправить серию сообщений пачкой. Живой человек не шлет
+# три абзаца в одну секунду, и залп выдает автоматику вернее содержания текста
+# (rules/outbound-timing.md, "Паузы внутри своей серии"). Правило существовало
+# текстом и трижды не удержало поведение на живых клиентах - поэтому оно здесь,
+# в механике, в точке действия.
+PACE_STATE_PATH = Path.home() / ".cache" / "telegram-send" / "last-sent.json"
+PACE_MIN_GAP = 40          # секунд - нижняя граница между своими сообщениями
+PACE_CHARS_PER_MIN = 250   # столько знаков человек набирает за минуту
+PACE_MAX_GAP = 180         # потолок: дольше трех минут гейт не держит
+PACE_JITTER = 0.35         # разброс, чтобы паузы не легли ровной сеткой
+
+
+def pace_key(account: str, chat_id) -> str:
+    return f"{account}:{chat_id}"
+
+
+def pace_load() -> dict:
+    try:
+        with PACE_STATE_PATH.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, ValueError, OSError):
+        return {}
+
+
+def pace_required(prev_chars: int) -> float:
+    """Пауза после сообщения длиной prev_chars - время на его набор, с разбросом.
+
+    Считается ОДИН раз, в момент отправки, и хранится в состоянии. Пересчет на
+    каждой проверке дал бы плавающее число: агент, упершийся в гейт, повторял бы
+    команду, пока случайный джиттер не выпадет поменьше, а сообщение "нужно N
+    сек" называло бы каждый раз разное. Разброс тут не украшение - без него
+    паузы легли бы ровной сеткой, а это та же подпись автомата, что и залп
+    (rules/outbound-timing.md, "Ровная минута").
+    """
+    need = PACE_MIN_GAP + (prev_chars / PACE_CHARS_PER_MIN) * 60
+    need = min(need, PACE_MAX_GAP)
+    return need * (1 + random.uniform(0, PACE_JITTER))
+
+
+def pace_check(account: str, chat_id) -> tuple[float, float]:
+    """(сколько еще ждать, сколько требовалось всего) в секундах; (0.0, 0.0) - можно слать."""
+    entry = pace_load().get(pace_key(account, chat_id))
+    if not isinstance(entry, dict):
+        return 0.0, 0.0
+    try:
+        prev_ts = float(entry.get("ts", 0))
+        required = float(entry.get("required", 0))
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+    if required <= 0:   # запись старого формата, без зафиксированной паузы
+        try:
+            required = pace_required(int(entry.get("chars", 0)))
+        except (TypeError, ValueError):
+            return 0.0, 0.0
+    elapsed = time.time() - prev_ts
+    if elapsed >= required:
+        return 0.0, required
+    return required - elapsed, required
+
+
+def pace_record(account: str, chat_id, chars: int) -> None:
+    """Запомнить момент отправки и паузу, которую он требует. Сбой записи отправку не отменяет.
+
+    Состояние читается и пишется без блокировки: два параллельных прогона в
+    разные чаты могут затереть записи друг друга. Для последовательной отправки
+    (наш случай) это неважно, а платить за это локом в пути отправки не стоит.
+    """
+    try:
+        PACE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        state = pace_load()
+        state[pace_key(account, chat_id)] = {
+            "ts": time.time(),
+            "chars": int(chars),
+            "required": pace_required(int(chars)),
+        }
+        tmp = PACE_STATE_PATH.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=False)
+        tmp.replace(PACE_STATE_PATH)
+    except OSError as exc:
+        sys.stderr.write(f"Предупреждение: не удалось записать состояние темпа ({exc}).\n")
+
+
+def pace_guard(account: str, chat_id, skip: bool) -> int:
+    """Проверка перед отправкой. 0 - можно слать, 3 - слишком рано.
+
+    Возврат 3 - это отказ, а не ожидание: пауза должна быть решением
+    отправителя, а не молчаливым сном скрипта внутри чужого прогона.
+    """
+    if skip:
+        return 0
+    wait, required = pace_check(account, chat_id)
+    if wait <= 0:
+        return 0
+    sys.stderr.write(
+        f"Слишком быстро после предыдущего сообщения в этот чат.\n"
+        f"  нужно выждать: {required:.0f} сек, осталось: {wait:.0f} сек\n"
+        f"  серия сообщений отправляется с паузами, а не пачкой - залп выдает автоматику\n"
+        f"  подожди и повтори команду; обход - флаг --no-pace-check\n"
+        f"  (обход уместен, когда на том конце не человек или есть срочность по существу)\n"
+    )
+    return 3
 
 
 def load_auth(account: str = "default") -> dict:
@@ -436,7 +547,14 @@ async def amain(args) -> int:
                     print(f"  | {ln}")
             else:
                 print("  подпись: нет (файл уйдет без текста)")
+            wait, required = pace_check(entry["account"], chat_id)
+            if wait > 0:
+                print(f"  темп: рано - после прошлого сообщения нужно {required:.0f} сек, осталось {wait:.0f}")
             return 0
+
+        rc = pace_guard(entry["account"], chat_id, args.no_pace_check)
+        if rc:
+            return rc
 
         reply_to = build_reply_to(topic_id, reply_id)
         if file_path:
@@ -449,6 +567,7 @@ async def amain(args) -> int:
             sent = await client.send_message(
                 entity, text, reply_to=reply_to, parse_mode=None, silent=args.silent,
             )
+        pace_record(entry["account"], chat_id, len(text or ""))
         print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
@@ -463,6 +582,11 @@ def main() -> int:
     parser.add_argument("--text", help="текст сообщения; если опущен - читается из stdin")
     parser.add_argument("--file", help="путь к файлу-вложению; текст уходит подписью к нему")
     parser.add_argument("--send", action="store_true", help="реально отправить (без флага - dry-run)")
+    parser.add_argument("--no-pace-check", action="store_true", dest="no_pace_check",
+                        help="не проверять паузу после предыдущего сообщения в этот чат. "
+                             "По умолчанию скрипт отказывает, если серия идет пачкой: "
+                             "залп сообщений выдает автоматику (rules/outbound-timing.md). "
+                             "Обход уместен, когда на том конце не человек или есть срочность")
     parser.add_argument("--topic", type=int, help="id корня форумной темы (по умолчанию - из конфига, если задан)")
     parser.add_argument("--reply-to", type=int, dest="reply_to", help="id сообщения, на которое отвечаем")
     parser.add_argument("--silent", action="store_true",

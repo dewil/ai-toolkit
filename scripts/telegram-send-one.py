@@ -118,7 +118,14 @@ async def amain(args) -> int:
                     print(f"  | {ln}")
             else:
                 print("  подпись: нет (файл уйдет без текста)")
+            wait, required = tgs.pace_check(args.account, chat_id)
+            if wait > 0:
+                print(f"  темп: рано - после прошлого сообщения нужно {required:.0f} сек, осталось {wait:.0f}")
             return 0
+
+        rc = tgs.pace_guard(args.account, chat_id, args.no_pace_check)
+        if rc:
+            return rc
 
         reply_to = tgs.build_reply_to(args.topic, args.reply_to)
         parse_mode = "html" if args.html else None
@@ -132,6 +139,7 @@ async def amain(args) -> int:
             sent = await client.send_message(
                 entity, text, reply_to=reply_to, parse_mode=parse_mode, silent=args.silent,
             )
+        tgs.pace_record(args.account, chat_id, len(text or ""))
         print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
@@ -149,6 +157,9 @@ def main() -> int:
     parser.add_argument("--file", help="путь к файлу-вложению; текст уходит подписью к нему "
                                        "(лимит Telegram - 1024 символа, длиннее - двумя сообщениями)")
     parser.add_argument("--send", action="store_true", help="реально отправить (без флага - dry-run)")
+    parser.add_argument("--no-pace-check", action="store_true", dest="no_pace_check",
+                        help="не проверять паузу после предыдущего сообщения в этот чат "
+                             "(см. тот же флаг в telegram-send.py)")
     parser.add_argument("--topic", type=int, help="id корня форумной темы (для форум-чатов)")
     parser.add_argument("--reply-to", type=int, dest="reply_to",
                         help="id сообщения, на которое отвечаем")
