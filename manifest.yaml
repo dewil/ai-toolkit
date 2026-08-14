@@ -107,6 +107,7 @@ management:
   - rules/meeting-transcripts.md        # двойной формат транскрипций (KTalk + mymeet) и .summary.md
   - rules/name-cross-check.md           # сверка имен из транскрипций по справочнику команды
   - rules/google-sheets-mcp.md          # работа с Google Sheets через MCP google-workspace
+  - scripts/gsheets.py                  # прямой доступ к Sheets API на stdlib: фолбэк, когда MCP потерял регистрацию инструментов, плюс чтение формул и больших диапазонов
   - rules/estimates-in-hours.md         # оценки в часах, не в человеко-днях
   - rules/billing-ai-work.md            # раскрытие при биллинге AI-работы: human-equiv часы, без wall-clock и cache_read, без фиктивных строк
   - agents/tracker.md                   # контроль статусов, дедлайнов, владельцев задач
