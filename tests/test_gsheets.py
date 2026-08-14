@@ -123,5 +123,60 @@ class WriteInput(unittest.TestCase):
         self.assertIn("массив строк", self.run_write("[1, 2]"))
 
 
+class TokenErrors(unittest.TestCase):
+    """Самый вероятный отказ - протухший refresh_token; он не должен давать трейсбек."""
+
+    def raise_http(self, code, body):
+        import urllib.error
+        def boom(*a, **kw):
+            raise urllib.error.HTTPError("u", code, "err", {}, io.BytesIO(body.encode()))
+        return boom
+
+    def test_invalid_grant_explains_how_to_fix(self):
+        with mock.patch.object(gs.urllib.request, "urlopen",
+                               self.raise_http(400, '{"error": "invalid_grant"}')):
+            with self.assertRaises(SystemExit) as cm:
+                gs.access_token(FULL)
+        text = str(cm.exception)
+        self.assertIn("invalid_grant", text)
+        self.assertIn("протух", text)
+
+    def test_other_http_error_is_reported(self):
+        with mock.patch.object(gs.urllib.request, "urlopen", self.raise_http(500, "oops")):
+            with self.assertRaises(SystemExit) as cm:
+                gs.access_token(FULL)
+        self.assertIn("500", str(cm.exception))
+
+    def test_no_network_is_reported(self):
+        import urllib.error
+        def boom(*a, **kw):
+            raise urllib.error.URLError("нет сети")
+        with mock.patch.object(gs.urllib.request, "urlopen", boom):
+            with self.assertRaises(SystemExit) as cm:
+                gs.access_token(FULL)
+        self.assertIn("не достучались", str(cm.exception))
+
+    def test_response_without_token_is_reported(self):
+        class R:
+            def __enter__(self): return io.BytesIO(b'{"no": "token"}')
+            def __exit__(self, *a): return False
+        with mock.patch.object(gs.urllib.request, "urlopen", lambda *a, **kw: R()):
+            with self.assertRaises(SystemExit) as cm:
+                gs.access_token(FULL)
+        self.assertIn("access_token", str(cm.exception))
+
+
+class ArgOrder(unittest.TestCase):
+    def test_incomplete_command_shows_usage_without_network(self):
+        # На опечатке пользователь должен видеть usage, а не ошибку авторизации.
+        def boom(*a, **kw):
+            raise AssertionError("сеть не должна трогаться при неполной команде")
+        with mock.patch.object(gs, "access_token", boom), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(gs.main(["gsheets.py", "read"]), 1)
+            self.assertEqual(gs.main(["gsheets.py", "sheets"]), 1)
+            self.assertEqual(gs.main(["gsheets.py", "чепуха", "x", "y"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

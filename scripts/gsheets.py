@@ -93,8 +93,20 @@ def access_token(creds: dict) -> str:
         "grant_type": "refresh_token",
     }).encode()
     req = urllib.request.Request(creds["token_uri"], data=body)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.load(r)["access_token"]
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)["access_token"]
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf8", "replace")[:300]
+        # invalid_grant - самый вероятный отказ: токен отозвали или он протух.
+        # Лечится повторным копированием refresh_token, а не кодом.
+        hint = ("\nrefresh_token отозван или протух - получи новый и обнови "
+                f"{AUTH}") if "invalid_grant" in detail else ""
+        sys.exit(f"не удалось обновить access_token (HTTP {e.code}): {detail}{hint}")
+    except urllib.error.URLError as e:
+        sys.exit(f"не достучались до {creds['token_uri']}: {e.reason}")
+    except (KeyError, ValueError) as e:
+        sys.exit(f"ответ сервера токенов не содержит access_token: {e}")
 
 
 def api(token: str, path: str, params: dict | None = None,
@@ -156,17 +168,18 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 1
     cmd = argv[1]
-    token = None
-    if cmd in ("read", "write", "sheets"):
-        token = access_token(load_creds())
-    if cmd == "read" and len(argv) >= 4:
+    # Аргументы проверяем ДО обращения к сети: на опечатке в команде
+    # пользователь должен видеть usage, а не ошибку авторизации.
+    needed = {"read": 4, "write": 4, "sheets": 3}
+    if cmd not in needed or len(argv) < needed[cmd]:
+        print(__doc__)
+        return 1
+    token = access_token(load_creds())
+    if cmd == "read":
         return cmd_read(token, argv[2], argv[3], "--formulas" in argv)
-    if cmd == "write" and len(argv) >= 4:
+    if cmd == "write":
         return cmd_write(token, argv[2], argv[3])
-    if cmd == "sheets" and len(argv) >= 3:
-        return cmd_sheets(token, argv[2])
-    print(__doc__)
-    return 1
+    return cmd_sheets(token, argv[2])
 
 
 if __name__ == "__main__":
