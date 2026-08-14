@@ -177,10 +177,10 @@ chmod +x "$HOME/bin/chrome-ctl"
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
 # .pub тоже проверяем: приватный ключ без публичной части встречается (потеряли,
 # скопировали не все), и тогда awk ниже вернул бы пустоту
-[ -f ~/.ssh/chrome-ctl-mac ] && [ -f ~/.ssh/chrome-ctl-mac.pub ] \
-  || ssh-keygen -y -f ~/.ssh/chrome-ctl-mac > ~/.ssh/chrome-ctl-mac.pub 2>/dev/null \
-  || ssh-keygen -t ed25519 -N "" -C "chrome-ctl@server" -f ~/.ssh/chrome-ctl-mac
-awk '{print $1" "$2}' ~/.ssh/chrome-ctl-mac.pub    # это и есть <AGENT_PUBKEY> - тело без комментария
+[ -f ~/.ssh/<CTL_KEY> ] && [ -f ~/.ssh/<CTL_KEY>.pub ] \
+  || ssh-keygen -y -f ~/.ssh/<CTL_KEY> > ~/.ssh/<CTL_KEY>.pub 2>/dev/null \
+  || ssh-keygen -t ed25519 -N "" -C "chrome-ctl-<HOST>@server" -f ~/.ssh/<CTL_KEY>
+awk '{print $1" "$2}' ~/.ssh/<CTL_KEY>.pub    # это и есть <AGENT_PUBKEY> - тело без комментария
 ```
 
 (Средняя ветка восстанавливает `.pub` из уцелевшего приватного ключа - перегенерировать пару в этом случае незачем, иначе пришлось бы переписывать `authorized_keys` на Mac.)
@@ -217,7 +217,7 @@ fi
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
 [ -f ~/.ssh/agent-tunnel ] && [ -f ~/.ssh/agent-tunnel.pub ] \
   || ssh-keygen -y -f ~/.ssh/agent-tunnel > ~/.ssh/agent-tunnel.pub 2>/dev/null \
-  || ssh-keygen -t ed25519 -N "" -C "agent-tunnel@mac" -f ~/.ssh/agent-tunnel
+  || ssh-keygen -t ed25519 -N "" -C "agent-tunnel@<HOST>" -f ~/.ssh/agent-tunnel
 KEYBODY=$(awk '{print $1" "$2}' ~/.ssh/agent-tunnel.pub)   # тип+ключ, без комментария
 [ -n "$KEYBODY" ] || { echo "не удалось прочитать ~/.ssh/agent-tunnel.pub"; exit 1; }
 LINE="command=\"/usr/bin/false\",restrict,port-forwarding $KEYBODY agent-tunnel"
@@ -431,4 +431,5 @@ ssh -p 2222 -i ~/.ssh/<CTL_KEY> <MAC_USER>@127.0.0.1 stop
 | `<SERVER_USER>` | Логин на удаленном сервере | тот же, под которым сейчас поднимается туннель руками |
 | `<SERVER_HOST>` | Адрес сервера | хост или IP, к которому идет `ssh -R` |
 | `<AGENT_PUBKEY>` | Публичный ключ агента для forced command - **только тело**, `тип base64`, без комментария | `ssh-ed25519 AAAA...` - публичная часть пары, которую генерирует сервер; секретом не является, но в шаблоне заменена плейсхолдером. Комментарий отбрасывается намеренно: по нему тот же ключ не опознался бы при повторном прогоне |
-| `<CTL_KEY>` | Имя приватного ключа управления НА СЕРВЕРЕ (парный к `<AGENT_PUBKEY>`) | например `~/.ssh/chrome-ctl-mac`; приватная часть живет только на сервере и никуда не передается |
+| `<CTL_KEY>` | Имя приватного ключа управления НА СЕРВЕРЕ (парный к `<AGENT_PUBKEY>`) | например `chrome-ctl-<HOST>`; приватная часть живет только на сервере и никуда не передается |
+| `<HOST>` | Короткое имя этой машины, попадает в имена ключей | `mac`, `mbp`; при второй macOS-машине имена обязаны различаться - иначе ключи и записи `authorized_keys` перепутаются |
