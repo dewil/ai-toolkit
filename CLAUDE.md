@@ -107,3 +107,4 @@
 @./rules/untrusted-content.md
 @./rules/memory-persistence.md
 @./rules/scheduled-automation.md
+@./rules/silent-failure.md
