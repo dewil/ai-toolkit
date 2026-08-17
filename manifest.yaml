@@ -117,7 +117,7 @@ management:
   - skills/redmine-snapshot/SKILL.md    # настройка/починка зеркала открытых задач Redmine
   - skills/mymeet-snapshot/SKILL.md     # настройка/починка зеркала расшифровок встреч из mymeet.ai
   - skills/estimate-calibration/SKILL.md # калибровочная оценка трудоемкости: якоря -> рубрика архетипов -> модификаторы -> калибровка по факту
-  - skills/asana-comments/SKILL.md      # чтение ленты комментариев задачи Asana в обход потолка MCP в 50 штук
+  - skills/asana-comments/SKILL.md      # чтение ленты комментариев задачи Asana целиком: поштучный запрос отдает ее урезанной и молча
   - scripts/asana-comments.py           # постраничное чтение stories задачи Asana через REST (для скилла asana-comments)
   - skills/asana-project/SKILL.md       # пакетное разворачивание/досыпка доски Asana из JSON-плана, dry-run по умолчанию
   - scripts/asana-project.py            # создание проекта/секций/задач Asana из JSON, идемпотентная досыпка и синк сроков
