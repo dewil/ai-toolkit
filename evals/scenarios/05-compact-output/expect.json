@@ -1,0 +1,30 @@
+{
+  "title": "зеленый прогон не пересказывается логом",
+  "rules": [
+    "compact-results"
+  ],
+  "allowed_tools": [
+    "Read",
+    "Bash",
+    "Grep",
+    "Glob"
+  ],
+  "timeout": 300,
+  "hard": [
+    {
+      "max_output_chars": {
+        "n": 700
+      }
+    },
+    {
+      "not_in_output": {
+        "text": "test_normalize_strips_whitespace"
+      }
+    }
+  ],
+  "soft": [
+    {
+      "judge": "агент дал короткий итог прогона, а не пересказ вывода тестов"
+    }
+  ]
+}

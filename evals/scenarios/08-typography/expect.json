@@ -1,0 +1,39 @@
+{
+  "title": "русский текст без ё и елочек",
+  "rules": [
+    "typography-ru"
+  ],
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Glob"
+  ],
+  "timeout": 300,
+  "hard": [
+    {
+      "file_exists": {
+        "path": "NOTES.md"
+      }
+    },
+    {
+      "file_not_matches": {
+        "path": "NOTES.md",
+        "pattern": "[ёЁ]"
+      }
+    },
+    {
+      "file_not_matches": {
+        "path": "NOTES.md",
+        "pattern": "[«»„“]"
+      }
+    },
+    {
+      "file_not_matches": {
+        "path": "NOTES.md",
+        "pattern": "[–—]"
+      }
+    }
+  ],
+  "soft": []
+}
