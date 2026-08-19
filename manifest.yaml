@@ -121,6 +121,8 @@ management:
   - scripts/asana-comments.py           # постраничное чтение stories задачи Asana через REST (для скилла asana-comments)
   - skills/asana-project/SKILL.md       # пакетное разворачивание/досыпка доски Asana из JSON-плана, dry-run по умолчанию
   - scripts/asana-project.py            # создание проекта/секций/задач Asana из JSON, идемпотентная досыпка и синк сроков
+  - skills/asana-blockers/SKILL.md      # связи задач текстом в описании (ЗАБЛОКИРОВАНА/БЛОКИРУЕТ): обход премиум-зависимостей Asana
+  - scripts/asana-blockers.py           # проставление обеих сторон связи в описания задач Asana по конфигу цепочек, dry-run по умолчанию
   - scripts/telegram-snapshot.py        # инкрементальный pull новых сообщений Telegram
   - scripts/telegram-deltas.py          # дельты чатов для блока "Новое в чатах" в дейлике
   - scripts/telegram-send.py            # отправка сообщения в Telegram-чат
