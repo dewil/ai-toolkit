@@ -95,6 +95,9 @@ DEFAULT_CSS = """
 body {
   font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
   font-size: 10.5pt; line-height: 1.45; color: #1c1e21;
+  /* неразрывный дефис (nb_hyphen) делает длинную цепочку составных слов одним
+     токеном: без этого она вылезает за поля страницы или за край ячейки */
+  overflow-wrap: break-word;
 }
 h1 { font-size: 17pt; margin: 0 0 3mm; }
 h2 { font-size: 13pt; margin: 5mm 0 2mm; page-break-after: avoid; }
@@ -472,6 +475,89 @@ def md_to_html(md: str) -> tuple[str, str]:
     return title, "\n".join(out)
 
 
+NB_HYPHEN = "\u2011"
+# Буква - любая юникодная (кроме цифры и подчеркивания): "cafe-bar" и
+# "наукові-дослідження" ломались бы ровно так же, как русское составное слово.
+_LETTER = r"[^\W\d_]"
+# Замена идет ПО ЦЕЛОМУ ТОКЕНУ, а не по одному дефису: "john-smith@example.com"
+# и "example.com/a-b" - машинно значимые строки, подменять в них символ нельзя.
+# Токен под замену - слово из букв с дефисами, вокруг могут быть только знаки
+# препинания и html-сущности (кавычки после html.escape); @ / \ исключены явно.
+_TOKEN_RE = re.compile(r"\S+")
+_ENTITY_RE = re.compile(r"&\w+;")
+_AFFIX = r"[^\s\w@/\\]*"
+_WORD_TOKEN_RE = re.compile(rf"{_AFFIX}{_LETTER}+(?:-{_LETTER}+)+{_AFFIX}")
+_WORD_HYPHEN_RE = re.compile(rf"(?<={_LETTER})-(?={_LETTER})")
+_TAG_OR_TEXT_RE = re.compile(r"<[^>]*>|[^<]+")
+_SKIP_TAG_RE = re.compile(r"</?\s*(?:code|pre|a)\b", re.I)
+
+
+def nb_hyphen(body: str) -> str:
+    """Дефис внутри слова -> неразрывный U+2011 (только в видимом тексте).
+
+    Chrome рвет строку по обычному дефису, и потребитель PDF (извлечение
+    текста, конвертация в docx) читает дефис в конце строки как след переноса
+    и выбрасывает его: "инженер-исследователь" приезжает "инженерисследователь".
+    Сам символ в текстовом слое при этом есть - теряется он при склейке строк,
+    поэтому лечится не CSS, а символом, по которому строка не рвется вовсе.
+
+    Что НЕ трогается и почему - три уровня отсечения:
+
+    1. внутренности тегов и содержимое <code>/<pre>/<a>. Под шаблон
+       "буква-буква" попадают и href (".../claude-toolkit" - битая ссылка), и
+       код ("--no-ner" - некопируемая команда). <a> целиком, а не только href:
+       autolink кладет адрес и в атрибут, и в видимый текст, а из PDF копируют
+       именно видимое;
+    2. токен, в котором есть что-то кроме букв, дефисов и обрамляющей
+       пунктуации. Так отсекаются почта ("john-smith@example.com" - подмена
+       дает другой адрес), домен и путь без протокола, номера ("2019-2024");
+    3. одиночное тире между пробелами - оно и так не внутри слова.
+
+    Вызывается из пайплайна PDF, а не из md_to_html: разбор общий с md-docx.py,
+    а docx редактируют в Word - там дефис не теряется, и подменять его
+    неразрывным незачем.
+
+    Остаточное, названное явно:
+
+    - дефис на границе разметки ("инженер-**исследователь**") не лечится:
+      буквы по разные стороны тега лежат в разных чанках, и токен целиком не
+      виден. Исходный дефект там остается - это пропуск, не порча;
+    - токен из одних букв, который на самом деле машинный ("ru-RU", "data-test"
+      в тексте без обратных кавычек), отличить от обычного слова нечем;
+    - длинная цепочка ("event-driven-microservice-...") становится неразрывной
+      целиком. Страховка - overflow-wrap в DEFAULT_CSS; с пользовательским
+      --css ее нет;
+    - глиф U+2011 есть не в каждом шрифте. Chrome обычно подставляет его из
+      фолбэка, но на голом окружении без такого шрифта возможен пустой
+      прямоугольник.
+    """
+
+    def swap(text: str) -> str:
+        out: list[str] = []
+        pos = 0
+        for m in _TOKEN_RE.finditer(text):
+            tok = m.group()
+            out.append(text[pos:m.start()])
+            core = _ENTITY_RE.sub("", tok)
+            out.append(_WORD_HYPHEN_RE.sub(NB_HYPHEN, tok)
+                       if _WORD_TOKEN_RE.fullmatch(core) else tok)
+            pos = m.end()
+        out.append(text[pos:])
+        return "".join(out)
+
+    out: list[str] = []
+    depth = 0
+    for m in _TAG_OR_TEXT_RE.finditer(body):
+        chunk = m.group()
+        if chunk.startswith("<"):
+            if _SKIP_TAG_RE.match(chunk):
+                depth = max(0, depth - 1) if chunk.startswith("</") else depth + 1
+            out.append(chunk)
+        else:
+            out.append(chunk if depth else swap(chunk))
+    return "".join(out)
+
+
 def embed_images(body: str, base: pathlib.Path) -> str:
     """Локальные <img src> заменяет на base64 data-URI (file:// в печать не попадет)."""
 
@@ -677,7 +763,10 @@ def print_params(header: str = "", footer: str = "") -> dict:
 
 
 def _tpl(text: str) -> str:
-    return (f'<div style="{FOOTER_STYLE}text-align:center">{text}</div>'
+    # nb_hyphen и здесь: колонтитул Chrome печатает отдельно от body, мимо
+    # общей сборки, - без этого "научно-исследовательский" в шапке теряет
+    # дефис на каждой странице
+    return (f'<div style="{FOOTER_STYLE}text-align:center">{nb_hyphen(text)}</div>'
             if text else "<span></span>")
 
 
@@ -826,6 +915,7 @@ def main() -> int:
     out = args.out or args.src.with_suffix(".pdf")
     css = args.css.read_text(encoding="utf-8") if args.css else DEFAULT_CSS
     title, body = md_to_html(args.src.read_text(encoding="utf-8"))
+    body = nb_hyphen(body)
     if args.photo:
         photo_path = resolve_photo(args.photo, args.src.parent)
         # абсолютный src без эскейпа: embed_images ищет src="([^"]+)" буквально

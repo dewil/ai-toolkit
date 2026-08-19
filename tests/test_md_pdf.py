@@ -415,6 +415,18 @@ class Footer(unittest.TestCase):
             self.assertNotIn("marginTop", p)
             self.assertNotIn("paperWidth", p)
 
+    def test_footer_gets_nb_hyphen(self):
+        """Колонтитул Chrome печатает мимо body - замена дефиса нужна и здесь."""
+        p = md_pdf.print_params(footer="научно-исследовательский центр",
+                                header="инженер-исследователь")
+        self.assertIn("научно\u2011исследовательский", p["footerTemplate"])
+        self.assertIn("инженер\u2011исследователь", p["headerTemplate"])
+
+    def test_footer_placeholder_markup_untouched(self):
+        """Спаны Chrome в шаблоне - разметка, а не текст: их трогать нельзя."""
+        got = md_pdf.print_params(footer=md_pdf.expand_placeholders("стр. {page}", "x"))
+        self.assertIn('<span class="pageNumber"></span>', got["footerTemplate"])
+
     def test_footer_text_is_literal_not_html(self):
         """Колонтитул объявлен текстом: разметка в нем печатается как есть и не
         ломает оболочку шаблона."""
@@ -601,6 +613,99 @@ class HtmlComments(unittest.TestCase):
         body, err = self.strip("# З\n\nобычный текст\n")
         self.assertIn("обычный текст", body)
         self.assertEqual(err, "")
+
+class NbHyphen(unittest.TestCase):
+    """Дефис внутри слова -> U+2011: иначе перенос строки его съедает."""
+
+    NB = "\u2011"
+
+    @staticmethod
+    def pdf_body(md: str) -> str:
+        """Тело так, как его видит пайплайн PDF (md_to_html + nb_hyphen)."""
+        return md_pdf.nb_hyphen(body(md))
+
+    def test_word_hyphen_replaced(self):
+        self.assertIn(f"инженер{self.NB}исследователь", self.pdf_body("инженер-исследователь"))
+
+    def test_dash_between_words_kept(self):
+        # тире отделено пробелами - это не составное слово
+        self.assertIn("дефис - это тире", self.pdf_body("дефис - это тире"))
+
+    def test_minus_in_numbers_kept(self):
+        self.assertIn("2019-2024", self.pdf_body("годы 2019-2024"))
+
+    def test_list_marker_kept(self):
+        out = self.pdf_body("- пункт\n- второй\n")
+        self.assertIn("<li>пункт</li>", out)
+        self.assertNotIn(self.NB, out)
+
+    def test_href_untouched(self):
+        out = self.pdf_body("ссылка https://github.com/dewil/claude-toolkit тут")
+        self.assertIn('href="https://github.com/dewil/claude-toolkit"', out)
+        self.assertNotIn(self.NB, out)
+
+    def test_markdown_link_untouched(self):
+        # <a> пропускается целиком: из PDF копируют видимый текст ссылки
+        out = self.pdf_body("[текст-метки](https://e.com/a-b)")
+        self.assertIn('href="https://e.com/a-b"', out)
+        self.assertNotIn(self.NB, out)
+
+    def test_inline_code_untouched(self):
+        out = self.pdf_body("команда `pii-mask --no-ner` тут")
+        self.assertIn("<code>pii-mask --no-ner</code>", out)
+        self.assertNotIn(self.NB, out)
+
+    def test_fenced_code_untouched(self):
+        out = self.pdf_body("```\ngoogle-chrome --headless\n```\n")
+        self.assertIn("google-chrome --headless", out)
+        self.assertNotIn(self.NB, out)
+
+    def test_text_around_code_still_replaced(self):
+        out = self.pdf_body("веб-сервер `a-b` веб-клиент")
+        self.assertIn(f"веб{self.NB}сервер", out)
+        self.assertIn(f"веб{self.NB}клиент", out)
+        self.assertIn("<code>a-b</code>", out)
+
+    # --- регресс на находки состязательного ревью 18.08.2026 ---
+
+    def test_email_untouched(self):
+        # подмена символа в адресе дает ДРУГОЙ адрес: контакт в резюме
+        out = self.pdf_body("почта john-smith@example.com тут")
+        self.assertIn("john-smith@example.com", out)
+        self.assertNotIn(self.NB, out)
+
+    def test_bare_domain_and_path_untouched(self):
+        # автолинк ловит только http(s) - адрес без протокола остается текстом
+        out = self.pdf_body("адрес example.com/a-b и файл my-dir/some-file.txt")
+        self.assertIn("example.com/a-b", out)
+        self.assertIn("my-dir/some-file.txt", out)
+        self.assertNotIn(self.NB, out)
+
+    def test_non_cyrillic_letters_replaced(self):
+        # диапазон букв не перечисляется руками: юникодная буква тоже слово
+        self.assertIn(f"cafe{self.NB}bar", self.pdf_body("cafe-bar"))
+        self.assertIn(f"наукові{self.NB}дослідження", self.pdf_body("наукові-дослідження"))
+
+    def test_quoted_word_replaced(self):
+        # html.escape превращает кавычки в сущности - токен от этого не машинный
+        out = self.pdf_body('слово "инженер-исследователь" тут')
+        self.assertIn(f"инженер{self.NB}исследователь", out)
+
+    def test_word_with_punctuation_replaced(self):
+        self.assertIn(f"(веб{self.NB}сервер)", self.pdf_body("(веб-сервер), дальше"))
+
+    def test_mixed_token_untouched(self):
+        # цифра или подчеркивание в токене - признак машинной строки
+        out = self.pdf_body("ключ abc-123 и файл my_file-name")
+        self.assertNotIn(self.NB, out)
+
+    def test_shared_parser_untouched(self):
+        # md_to_html переиспользует md-docx.py: в docx неразрывному дефису делать нечего
+        self.assertIn("инженер-исследователь", body("инженер-исследователь"))
+
+    def test_latin_word_replaced(self):
+        self.assertIn(f"e{self.NB}mail", self.pdf_body("адрес e-mail тут"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
