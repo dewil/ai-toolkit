@@ -44,7 +44,7 @@ evals/
       fixture/          # состояние рабочей папки на старте: CLAUDE.md с @-импортом
                         # проверяемого правила, копия самого правила, рабочие файлы
       expect.json       # что считается верным поведением
-  baseline.json         # статусы последнего принятого прогона
+  baselines/<модель>.json  # статусы последнего принятого прогона этой модели
   runs/                 # транскрипты прогонов, в .gitignore
 ```
 
@@ -97,7 +97,8 @@ setsid nohup python3 scripts/run-evals.py > /tmp/evals.log 2>&1 &   # весь �
 python3 scripts/run-evals.py --list                                 # что вообще есть
 python3 scripts/run-evals.py --scenario 08 --runs 1 --model haiku   # отладка плюмбинга
 python3 scripts/run-evals.py --rule secrets-handling                # выборка по правилу
-python3 scripts/run-evals.py --model opus --baseline                # зафиксировать базу
+python3 scripts/run-evals.py --model opus --baseline                # зафиксировать базу модели
+python3 scripts/run-evals.py --model sonnet --compare opus          # подходит ли кандидат
 ```
 
 **Запуск - только отвязанным процессом или из cron.** Прямой запуск из сессии Claude Code гибнет на первом вложенном `claude -p` вместе с родительской задачей, молча (`rules/scheduled-automation.md`). `--list` и фильтры агента не поднимают и из сессии работают.
