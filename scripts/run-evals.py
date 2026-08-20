@@ -45,7 +45,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCENARIOS = ROOT / "evals" / "scenarios"
 RUNS = ROOT / "evals" / "runs"
-BASELINE = ROOT / "evals" / "baseline.json"
+BASELINES = ROOT / "evals" / "baselines"
 
 DEFAULT_TIMEOUT = 300
 # Сеть в песочнице запрещена всегда: прогон должен зависеть только от фикстуры,
@@ -57,6 +57,7 @@ DEFAULT_RUNS = 3
 # Красный при падении в большинстве прогонов: модель недетерминирована, и один
 # каприз не должен ронять набор. Одиночное падение отмечается как нестабильность.
 FAIL_RATIO = 0.5
+RANK = {"green": 0, "yellow": 1, "red": 2}
 
 HARD_TYPES = {"no_tool_call", "tool_call", "file_exists", "file_absent",
               "files_unchanged", "file_matches", "file_not_matches",
@@ -467,6 +468,29 @@ def validate_assert(sid: str, group: str, a: dict) -> None:
                 sys.exit(f"сценарий {sid}: не компилируется регулярка {spec[key]!r}: {e}")
 
 
+def baseline_path(model: str) -> Path:
+    """База своя на каждую модель.
+
+    Одна общая база не годится под главный сценарий использования: прогнал
+    кандидата - затер точку отсчета той модели, на которой работаешь, и
+    сравнивать больше не с чем.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", model or "default")
+    return BASELINES / f"{safe}.json"
+
+
+def load_baseline(model: str) -> dict:
+    path = baseline_path(model)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        # Битая база - не повод считать, что базы нет: тогда регрессии молча
+        # перестанут находиться, и прогон будет выглядеть чистым.
+        sys.exit(f"не читается база {path}: {e}")
+
+
 def load_scenarios(only: str | None, rule: str | None) -> list[tuple[str, dict, str, Path]]:
     out = []
     if not SCENARIOS.exists():
@@ -534,7 +558,10 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=DEFAULT_RUNS)
     ap.add_argument("--model", help="алиас или полное имя модели")
     ap.add_argument("--judge-model", help="модель судьи (по умолчанию - та же)")
-    ap.add_argument("--baseline", action="store_true", help="записать результат как базу")
+    ap.add_argument("--baseline", action="store_true",
+                    help="записать результат как базу этой модели")
+    ap.add_argument("--compare", metavar="MODEL",
+                    help="сравнить с базой другой модели: подходит ли кандидат")
     ap.add_argument("--list", action="store_true", help="перечислить сценарии и выйти")
     args = ap.parse_args()
 
@@ -553,7 +580,11 @@ def main() -> int:
     stamp = time.strftime("%Y-%m-%d-%H%M")
     label = args.model or "default"
     run_dir = RUNS / f"{stamp}-{label}"
-    base = json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else {}
+    base = load_baseline(label)
+    other = load_baseline(args.compare) if args.compare else {}
+    if args.compare and not other:
+        sys.exit(f"нет базы модели '{args.compare}' - сравнивать не с чем "
+                 f"(есть: {', '.join(sorted(p.stem for p in BASELINES.glob('*.json'))) or 'ни одной'})")
     results, total_cost = {}, 0.0
 
     for sid, spec, prompt, fixture in scenarios:
@@ -604,12 +635,35 @@ def main() -> int:
           f"регрессий {len(regressions)}, стоимость ${total_cost:.2f}")
     print(f"транскрипты: {run_dir}")
 
+    if other:
+        print(f"\nсравнение с базой '{args.compare}':")
+        worse, better = [], []
+        for sid, r in results.items():
+            was = (other.get("scenarios") or {}).get(sid, {}).get("status")
+            if was is None:
+                print(f"  {sid:28} нет в базе '{args.compare}'")
+                continue
+            if was == r["status"]:
+                continue
+            arrow = f"{was} -> {r['status']}"
+            (worse if RANK[r["status"]] > RANK[was] else better).append(f"{sid} ({arrow})")
+        for line in worse:
+            print(f"  хуже:  {line}")
+        for line in better:
+            print(f"  лучше: {line}")
+        if not worse and not better:
+            print("  расхождений нет")
+        elif worse:
+            print(f"\nкандидат '{label}' хуже базы '{args.compare}' на {len(worse)} сценариях")
+
     if args.baseline:
-        BASELINE.write_text(json.dumps(
+        path = baseline_path(label)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(
             {"stamp": stamp, "model": label,
              "scenarios": {s: {"status": r["status"]} for s, r in results.items()}},
             ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        print(f"база обновлена: {BASELINE}")
+        print(f"база модели '{label}' обновлена: {path}")
 
     return 1 if red or regressions else 0
 

@@ -282,6 +282,43 @@ class TestScenarioValidation(unittest.TestCase):
                 self.load(tmp)
 
 
+class TestBaselines(unittest.TestCase):
+    """База своя на каждую модель: иначе прогон кандидата затирает точку отсчета."""
+
+    def test_path_is_per_model_and_safe(self):
+        self.assertEqual(re_mod.baseline_path("opus").name, "opus.json")
+        self.assertEqual(re_mod.baseline_path("claude-opus-5[1m]").name,
+                         "claude-opus-5_1m_.json")
+        self.assertEqual(re_mod.baseline_path("../../etc/passwd").name,
+                         ".._.._etc_passwd.json")
+
+    def test_missing_baseline_is_empty(self):
+        orig = re_mod.BASELINES
+        with tempfile.TemporaryDirectory() as tmp:
+            re_mod.BASELINES = Path(tmp)
+            try:
+                self.assertEqual(re_mod.load_baseline("нет-такой"), {})
+            finally:
+                re_mod.BASELINES = orig
+
+    def test_broken_baseline_is_loud(self):
+        """Битая база не должна выглядеть как отсутствующая: регрессии молча
+        перестали бы находиться, а прогон читался бы как чистый."""
+        orig = re_mod.BASELINES
+        with tempfile.TemporaryDirectory() as tmp:
+            re_mod.BASELINES = Path(tmp)
+            (Path(tmp) / "opus.json").write_text("{не json", encoding="utf-8")
+            try:
+                with self.assertRaises(SystemExit):
+                    re_mod.load_baseline("opus")
+            finally:
+                re_mod.BASELINES = orig
+
+    def test_rank_orders_statuses(self):
+        self.assertLess(re_mod.RANK["green"], re_mod.RANK["yellow"])
+        self.assertLess(re_mod.RANK["yellow"], re_mod.RANK["red"])
+
+
 class TestSandboxEnv(unittest.TestCase):
     def test_home_and_git_are_redirected(self):
         with tempfile.TemporaryDirectory() as tmp:
