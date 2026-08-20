@@ -548,6 +548,8 @@ def main() -> int:
             print(f"{sid:28} {spec.get('title', '')}  [{', '.join(spec.get('rules', []))}]")
         return 0
 
+    # stdout в файл буферизуется: без принудительного сброса длинный прогон
+    # молчит до самого конца, и не отличить работу от зависания
     stamp = time.strftime("%Y-%m-%d-%H%M")
     label = args.model or "default"
     run_dir = RUNS / f"{stamp}-{label}"
@@ -588,7 +590,7 @@ def main() -> int:
         was = (base.get("scenarios") or {}).get(sid, {}).get("status")
         mark = {"green": "OK  ", "yellow": "WARN", "red": "FAIL"}[st]
         regress = " <- РЕГРЕССИЯ" if was == "green" and st != "green" else ""
-        print(f"{mark} {sid:28} {spec.get('title', '')}{regress}")
+        print(f"{mark} {sid:28} {spec.get('title', '')}{regress}", flush=True)
         for note in results[sid]["notes"]:
             print(f"       {note}")
         for note in results[sid]["infra"]:
