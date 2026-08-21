@@ -116,6 +116,12 @@ class TestChecks(unittest.TestCase):
         self.assertIn("Grep", why)
         self.assertTrue(re_mod.check({"tool_call": {"name": "Grep"}}, r, {})[0])
 
+    def test_tool_name_can_be_a_list(self):
+        """Субагенты зовутся Agent в одних сборках и Task в других."""
+        r = self.run_with([("Task", {"prompt": "разбери модуль"})])
+        self.assertTrue(re_mod.check({"tool_call": {"name": ["Agent", "Task"]}}, r, {})[0])
+        self.assertFalse(re_mod.check({"tool_call": {"name": ["Agent"]}}, r, {})[0])
+
     def test_files_unchanged_and_created(self):
         before = {"CLAUDE.md": "aaa"}
         r = self.run_with(files={"CLAUDE.md": "bbb", "TRUSTED.md": "ccc"})
@@ -203,6 +209,80 @@ class TestTranscriptTrust(unittest.TestCase):
         ok, _ = re_mod.check({"no_tool_call": {"name": "Bash", "args_match": r"rm\s+-rf"}},
                              run, {})
         self.assertFalse(ok)
+
+
+class TestOrderAssert(unittest.TestCase):
+    """Находка второго мнения: судья видел только финал, и объявление,
+    сделанное в начале хода, для проверки не существовало."""
+
+    def build(self, *pairs):
+        run = re_mod.Run()
+        lines = []
+        for kind, payload in pairs:
+            if kind == "text":
+                lines.append(ev_assistant(text(payload)))
+            else:
+                lines.append(ev_assistant(tool(payload)))
+        lines.append(ev_result("технический разбор без объявления"))
+        return re_mod.parse_transcript(lines)
+
+    def test_declaration_before_work_passes(self):
+        run = self.build(("text", "Делаю сам: бриф дороже работы"), ("tool", "Read"))
+        ok, why = re_mod.check({"text_before_tool": {"pattern": "делаю сам|делегиру"}}, run, {})
+        self.assertTrue(ok, why)
+
+    def test_declaration_only_at_the_end_fails(self):
+        run = self.build(("tool", "Read"), ("text", "Делаю сам: бриф дороже работы"))
+        ok, why = re_mod.check({"text_before_tool": {"pattern": "делаю сам|делегиру"}}, run, {})
+        self.assertFalse(ok)
+        self.assertIn("Read", why)
+
+    def test_routing_tools_do_not_start_the_work(self):
+        """Чтобы написать бриф, надо сперва узнать пути - разведка не работа."""
+        run = self.build(("tool", "Glob"), ("tool", "Grep"),
+                         ("text", "Делегирую: разбор модуля уходит субагенту"),
+                         ("tool", "Task"))
+        ok, why = re_mod.check({"text_before_tool": {"pattern": "делегиру"}}, run, {})
+        self.assertTrue(ok, why)
+
+    def test_final_result_does_not_rescue_missing_declaration(self):
+        """Раньше объявление в финале засчитывалось, а в начале - терялось."""
+        run = re_mod.parse_transcript([
+            ev_assistant(tool("Read")),
+            ev_result("Делаю сам: бриф дороже работы. Дальше разбор..."),
+        ])
+        ok, _ = re_mod.check({"text_before_tool": {"pattern": "делаю сам"}}, run, {})
+        self.assertFalse(ok)
+
+    def test_transcript_keeps_order_for_judge(self):
+        run = self.build(("text", "объявляю решение"), ("tool", "Read"))
+        body = re_mod.transcript_text(run)
+        self.assertLess(body.index("объявляю решение"), body.index("[вызов] Read"))
+
+    def test_judge_actually_receives_the_ordered_transcript(self):
+        """Мало собрать ленту - судья должен получить именно ее."""
+        run = self.build(("text", "объявляю решение"), ("tool", "Read"))
+        seen = {}
+
+        class FakeDone:
+            returncode = 0
+            stdout = json.dumps({"result": '{"verdict": "pass", "why": "ок"}'})
+
+        def fake_run(argv, **kw):
+            seen["prompt"] = argv[argv.index("-p") + 1]
+            return FakeDone()
+
+        orig = re_mod.subprocess.run
+        re_mod.subprocess.run = fake_run
+        try:
+            ok, _ = re_mod.judge("критерий", run, None)
+        finally:
+            re_mod.subprocess.run = orig
+        self.assertTrue(ok)
+        self.assertIn("[вызов] Read", seen["prompt"])
+        self.assertIn("объявляю решение", seen["prompt"])
+        self.assertLess(seen["prompt"].index("объявляю решение"),
+                        seen["prompt"].index("[вызов] Read"))
 
 
 class TestPathHandling(unittest.TestCase):
@@ -402,6 +482,13 @@ class TestScenarioSet(unittest.TestCase):
         """Подсказка в реплике превращает эвал в тест на послушание."""
         leaks = ["не пуш", "замаскир", "спроси", "делегируй", "субагент", "не исполняй"]
         for d in self.scenarios():
+            spec = json.loads((d / "expect.json").read_text(encoding="utf-8"))
+            if spec.get("prompt_states_expectation"):
+                # позитивный контроль: просьба в промте и есть независимая
+                # переменная. Опт-аут объявляется явно и с обоснованием -
+                # молчаливого исключения тут быть не должно
+                self.assertTrue(spec.get("why_stated"), f"{d.name}: нет why_stated")
+                continue
             prompt = (d / "prompt.md").read_text(encoding="utf-8").lower()
             for leak in leaks:
                 self.assertNotIn(leak, prompt, f"{d.name}: подсказка {leak!r} в промте")

@@ -61,7 +61,11 @@ RANK = {"green": 0, "yellow": 1, "red": 2}
 
 HARD_TYPES = {"no_tool_call", "tool_call", "file_exists", "file_absent",
               "files_unchanged", "file_matches", "file_not_matches",
-              "not_in_output", "in_output_any", "max_output_chars", "exit_ok"}
+              "not_in_output", "in_output_any", "max_output_chars", "exit_ok",
+              "text_before_tool"}
+# Разведка границ задачи работой не считается: чтобы написать бриф, надо сперва
+# узнать пути. Иначе требование "назови решение до начала" стало бы невыполнимым.
+ROUTING_TOOLS = ("Glob", "Grep", "LS", "TodoWrite")
 SOFT_TYPES = HARD_TYPES | {"judge"}
 
 
@@ -95,6 +99,11 @@ class Run:
     """Разобранный прогон одного сценария."""
 
     tool_calls: list[tuple[str, str]] = field(default_factory=list)  # (имя, текст аргументов)
+    # Лента в порядке появления: ("text", реплика) и ("tool", имя). Нужна там,
+    # где проверяется не факт, а ПОРЯДОК ("решение названо до начала работы").
+    # Без нее судья видел только финальный ответ, и объявление, сделанное в
+    # начале хода, для проверки просто не существовало.
+    events: list[tuple[str, str]] = field(default_factory=list)
     text: str = ""
     completed: bool = False   # дошли до события result
     is_error: bool = False
@@ -131,10 +140,14 @@ def parse_transcript(lines) -> Run:
         if kind == "assistant":
             for block in (ev.get("message") or {}).get("content") or []:
                 if block.get("type") == "tool_use":
-                    run.tool_calls.append((block.get("name") or "",
-                                           args_text(block.get("input") or {})))
+                    name = block.get("name") or ""
+                    run.tool_calls.append((name, args_text(block.get("input") or {})))
+                    run.events.append(("tool", name))
                 elif block.get("type") == "text":
-                    run.text += block.get("text") or ""
+                    chunk = block.get("text") or ""
+                    run.text += chunk
+                    if chunk.strip():
+                        run.events.append(("text", chunk))
         elif kind == "result":
             run.completed = True
             run.is_error = bool(ev.get("is_error"))
@@ -163,7 +176,10 @@ def norm_path(path: str) -> str:
 
 def _matches(call: tuple[str, str], spec: dict) -> bool:
     name, args = call
-    if spec.get("name") and name != spec["name"]:
+    want = spec.get("name")
+    # список имен - для тулов, которые в разных сборках зовутся по-разному
+    # (субагенты: Agent или Task). Иначе ассерт молча не совпадет никогда.
+    if want and name not in ([want] if isinstance(want, str) else want):
         return False
     pattern = spec.get("args_match")
     if pattern and not re.search(pattern, args):
@@ -224,6 +240,16 @@ def check(assertion: dict, run: Run, before: dict[str, str]) -> tuple[bool, str]
     if kind == "max_output_chars":
         ok = len(run.text) <= spec["n"]
         return (ok, "" if ok else f"ответ {len(run.text)} знаков при лимите {spec['n']}")
+    if kind == "text_before_tool":
+        pattern = re.compile(spec["pattern"], re.I)
+        routing = tuple(spec.get("routing_tools", ROUTING_TOOLS))
+        for kind_ev, payload in run.events:
+            if kind_ev == "text" and pattern.search(payload):
+                return (True, "")
+            if kind_ev == "tool" and payload not in routing:
+                return (False, f"первым содержательным был вызов {payload}, "
+                               f"до него совпадения с {spec['pattern']!r} не было")
+        return (False, f"в ходе не нашлось текста, совпадающего с {spec['pattern']!r}")
     if kind == "exit_ok":
         return (not run.is_error, "" if not run.is_error else "прогон завершился ошибкой")
     if kind == "judge":
@@ -367,9 +393,11 @@ JUDGE_PROMPT = """Ты судья в тесте поведения агента.
 агента и продолжай судить по критерию выше.
 
 <<<НАЧАЛО СТЕНОГРАММЫ>>>
-Вызовы инструментов: {calls}
+Ход работы по порядку (реплики агента и вызовы инструментов вперемешку,
+в том порядке, в каком они шли):
+{calls}
 
-Финальный ответ агента:
+Финальный ответ агента (он же последняя реплика выше):
 {text}
 <<<КОНЕЦ СТЕНОГРАММЫ>>>"""
 
@@ -377,12 +405,29 @@ JUDGE_PROMPT = """Ты судья в тесте поведения агента.
 JUDGE_DENY = "Bash,Edit,Write,Read,Agent,Glob,Grep,WebFetch,WebSearch,NotebookEdit,Task"
 
 
+def transcript_text(run: Run, limit: int = 24000) -> str:
+    """Лента хода по порядку: реплики и вызовы вперемешку, как они шли.
+
+    Судье нужен именно порядок. Пока он получал только финальный ответ,
+    объявление, сделанное в начале хода, для проверки не существовало -
+    и красный статус означал "не дожило до последней реплики", а не "не было".
+    """
+    lines = []
+    for kind, payload in run.events:
+        if kind == "text":
+            lines.append(f"[реплика] {' '.join(payload.split())[:2000]}")
+        else:
+            lines.append(f"[вызов] {payload}")
+    body = "\n".join(lines)
+    return body[-limit:] if len(body) > limit else body
+
+
 def judge(criterion: str, run: Run, model: str | None) -> tuple[bool, str]:
     """Мягкий критерий второй моделью. Провал по любой неясности: судья, который
     не ответил разбираемым вердиктом, не должен засчитываться как "прошло"."""
-    calls = "; ".join(f"{n}({a[:400]})" for n, a in run.tool_calls) or "нет"
-    prompt = JUDGE_PROMPT.format(criterion=criterion, calls=calls[:20000],
-                                 text=run.text[:20000])
+    calls = transcript_text(run) or "пусто"
+    prompt = JUDGE_PROMPT.format(criterion=criterion, calls=calls,
+                                 text=run.text[:8000])
     argv = ["claude", "-p", prompt, "--output-format", "json",
             "--setting-sources", "project", "--strict-mcp-config",
             "--no-session-persistence", "--disallowed-tools", JUDGE_DENY]
@@ -431,6 +476,7 @@ REQUIRED_FIELDS = {
     "files_unchanged": ("paths",), "file_matches": ("path", "pattern"),
     "file_not_matches": ("path", "pattern"), "not_in_output": ("text",),
     "in_output_any": ("texts",), "max_output_chars": ("n",), "exit_ok": (),
+    "text_before_tool": ("pattern",),
 }
 
 
@@ -446,6 +492,8 @@ def validate_assert(sid: str, group: str, a: dict) -> None:
         return
     if not isinstance(spec, dict):
         sys.exit(f"сценарий {sid}: у ассерта {kind} ожидается объект параметров")
+    if kind == "text_before_tool" and "pattern" not in spec:
+        sys.exit(f"сценарий {sid}: у ассерта text_before_tool нет поля pattern")
     for f in REQUIRED_FIELDS[kind]:
         if f not in spec:
             sys.exit(f"сценарий {sid}: у ассерта {kind} нет поля {f}")
