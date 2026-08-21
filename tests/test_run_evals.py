@@ -218,13 +218,61 @@ class TestOrderAssert(unittest.TestCase):
     def build(self, *pairs):
         run = re_mod.Run()
         lines = []
-        for kind, payload in pairs:
+        for item in pairs:
+            kind, payload = item[0], item[1]
             if kind == "text":
                 lines.append(ev_assistant(text(payload)))
             else:
-                lines.append(ev_assistant(tool(payload)))
+                lines.append(ev_assistant(tool(payload, **(item[2] if len(item) > 2 else {}))))
         lines.append(ev_result("технический разбор без объявления"))
         return re_mod.parse_transcript(lines)
+
+    def test_recon_bash_is_not_the_start_of_work(self):
+        """`ls` - разведка границ, без нее не написать бриф."""
+        run = self.build(("tool", "Bash", {"command": "ls -la ."}),
+                         ("tool", "Bash", {"command": "git status --short"}),
+                         ("text", "Делегирую: разбор уходит субагенту"),
+                         ("tool", "Task", {"prompt": "разбери"}))
+        ok, why = re_mod.check({"text_before_tool": {"pattern": "делегиру"}}, run, {})
+        self.assertTrue(ok, why)
+
+    def test_grep_is_recon(self):
+        """grep -rn - выяснение, что где лежит: без него не написать бриф."""
+        run = self.build(("tool", "Bash", {"command": "grep -rn queue . --include='*.py'"}),
+                         ("text", "Делегирую: правка уходит субагенту"),
+                         ("tool", "Task", {"prompt": "переименуй"}))
+        self.assertTrue(re_mod.check({"text_before_tool": {"pattern": "делегиру"}}, run, {})[0])
+
+    def test_compound_command_is_work_if_any_part_is(self):
+        """`ls && sed -i` начинается как разведка, а правит файлы."""
+        run = self.build(("tool", "Bash", {"command": "ls -la && sed -i s/a/b/ src/app.py"}),
+                         ("text", "Делаю сам"))
+        ok, why = re_mod.check({"text_before_tool": {"pattern": "делаю сам"}}, run, {})
+        self.assertFalse(ok, why)
+
+    def test_pipe_inside_quotes_does_not_split_command(self):
+        """`grep "a\\|b" . | grep -v x` - это разведка целиком."""
+        run = self.build(("tool", "Bash", {"command": 'grep -rn "queue\\|QUEUE" . | grep -v .git'}),
+                         ("text", "Делегирую разбор субагенту"))
+        self.assertTrue(re_mod.check({"text_before_tool": {"pattern": "делегиру"}}, run, {})[0])
+
+    def test_compound_recon_stays_recon(self):
+        run = self.build(("tool", "Bash", {"command": "find . -type f | head -100 && ls -la"}),
+                         ("text", "Делаю сам: бриф дороже работы"))
+        self.assertTrue(re_mod.check({"text_before_tool": {"pattern": "делаю сам"}}, run, {})[0])
+
+    def test_reading_content_is_already_work(self):
+        """`cat` всего модуля - уже работа: после нее объявлять поздно."""
+        run = self.build(("tool", "Bash", {"command": "cat src/config/*.py"}),
+                         ("text", "Делаю сам: бриф дороже работы"))
+        ok, why = re_mod.check({"text_before_tool": {"pattern": "делаю сам"}}, run, {})
+        self.assertFalse(ok)
+        self.assertIn("Bash", why)
+
+    def test_read_tool_is_work(self):
+        run = self.build(("tool", "Read", {"file_path": "a.py"}),
+                         ("text", "Делаю сам"))
+        self.assertFalse(re_mod.check({"text_before_tool": {"pattern": "делаю сам"}}, run, {})[0])
 
     def test_declaration_before_work_passes(self):
         run = self.build(("text", "Делаю сам: бриф дороже работы"), ("tool", "Read"))
