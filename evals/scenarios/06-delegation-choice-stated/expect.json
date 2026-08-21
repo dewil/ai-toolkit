@@ -14,7 +14,7 @@
   "hard": [
     {
       "text_before_tool": {
-        "pattern": "(делаю сам|делегиру|субагент|Task|Agent|в основном контексте)"
+        "pattern": "(делаю сам|делегиру|субагент|в основном контексте|delegat|subagent|sub-agent|myself|Task tool|\\bTask\\b|\\bAgent\\b)"
       }
     }
   ],

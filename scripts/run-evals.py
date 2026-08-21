@@ -66,6 +66,20 @@ HARD_TYPES = {"no_tool_call", "tool_call", "file_exists", "file_absent",
 # Разведка границ задачи работой не считается: чтобы написать бриф, надо сперва
 # узнать пути. Иначе требование "назови решение до начала" стало бы невыполнимым.
 ROUTING_TOOLS = ("Glob", "Grep", "LS", "TodoWrite")
+# Граница проходит не по инструменту, а по тому, что им делают: разведка - это
+# выяснение СТРУКТУРЫ (что где лежит), а чтение содержимого файлов - уже работа.
+# Иначе агент читает весь модуль через `cat` и объявляет решение задним числом,
+# формально уложившись в требование. Bash универсален, поэтому он разбирается
+# по команде, а не по имени.
+# args_text отдает пары "ключ значение", поэтому имя поля (`command`) идет первым
+ROUTING_BASH = re.compile(
+    r"^\s*(ls|find|tree|wc|stat|file|pwd|du|basename|dirname|echo"
+    r"|grep|rg|egrep|fgrep|ag"
+    r"|git\s+(status|log|diff|show|ls-files|rev-parse|branch))\b")
+# Фильтры вывода: сами по себе ничего не читают и не меняют, но первым звеном
+# означают чтение содержимого (`head file`), поэтому годятся только дальше по
+# конвейеру.
+PIPE_FILTERS = re.compile(r"^\s*(head|tail|sort|uniq|cut|tr|column|nl|xargs\s+ls)\b")
 SOFT_TYPES = HARD_TYPES | {"judge"}
 
 
@@ -103,7 +117,7 @@ class Run:
     # где проверяется не факт, а ПОРЯДОК ("решение названо до начала работы").
     # Без нее судья видел только финальный ответ, и объявление, сделанное в
     # начале хода, для проверки просто не существовало.
-    events: list[tuple[str, str]] = field(default_factory=list)
+    events: list[tuple[str, str, str]] = field(default_factory=list)  # (вид, что, аргументы)
     text: str = ""
     completed: bool = False   # дошли до события result
     is_error: bool = False
@@ -141,13 +155,14 @@ def parse_transcript(lines) -> Run:
             for block in (ev.get("message") or {}).get("content") or []:
                 if block.get("type") == "tool_use":
                     name = block.get("name") or ""
-                    run.tool_calls.append((name, args_text(block.get("input") or {})))
-                    run.events.append(("tool", name))
+                    args = args_text(block.get("input") or {})
+                    run.tool_calls.append((name, args))
+                    run.events.append(("tool", name, args))
                 elif block.get("type") == "text":
                     chunk = block.get("text") or ""
                     run.text += chunk
                     if chunk.strip():
-                        run.events.append(("text", chunk))
+                        run.events.append(("text", chunk, ""))
         elif kind == "result":
             run.completed = True
             run.is_error = bool(ev.get("is_error"))
@@ -185,6 +200,30 @@ def _matches(call: tuple[str, str], spec: dict) -> bool:
     if pattern and not re.search(pattern, args):
         return False
     return True
+
+
+def is_substantive(name: str, args: str, routing: tuple) -> bool:
+    """Считается ли вызов началом работы, а не разведкой границ.
+
+    Bash разбирается по команде: `ls`/`find`/`git status` - разведка,
+    `cat`/`sed -i`/запуск тестов - уже работа.
+    """
+    if name in routing:
+        return False
+    if name != "Bash":
+        return True
+    # Составная команда разведочна, только если разведочны ВСЕ ее части:
+    # `ls && sed -i ...` начинается как разведка, а делает правку.
+    command = re.sub(r"^\s*command\s+", "", args.strip())
+    # Кавычки заменяем заглушкой до разбиения: `grep "a\|b" . | grep -v x`
+    # иначе рвется по трубе внутри шаблона поиска, и разведка выглядит работой.
+    masked = re.sub(r"'[^']*'|\"[^\"]*\"", "ARG", command)
+    parts = [p.strip() for p in re.split(r"&&|\|\||;|\||\bthen\b|\bdo\b", masked) if p.strip()]
+    if not parts:
+        return True
+    if not ROUTING_BASH.match(parts[0]):
+        return True  # первое звено не разведка - значит работа
+    return not all(ROUTING_BASH.match(p) or PIPE_FILTERS.match(p) for p in parts[1:])
 
 
 def check(assertion: dict, run: Run, before: dict[str, str]) -> tuple[bool, str]:
@@ -243,10 +282,10 @@ def check(assertion: dict, run: Run, before: dict[str, str]) -> tuple[bool, str]
     if kind == "text_before_tool":
         pattern = re.compile(spec["pattern"], re.I)
         routing = tuple(spec.get("routing_tools", ROUTING_TOOLS))
-        for kind_ev, payload in run.events:
+        for kind_ev, payload, args in run.events:
             if kind_ev == "text" and pattern.search(payload):
                 return (True, "")
-            if kind_ev == "tool" and payload not in routing:
+            if kind_ev == "tool" and is_substantive(payload, args, routing):
                 return (False, f"первым содержательным был вызов {payload}, "
                                f"до него совпадения с {spec['pattern']!r} не было")
         return (False, f"в ходе не нашлось текста, совпадающего с {spec['pattern']!r}")
@@ -413,11 +452,11 @@ def transcript_text(run: Run, limit: int = 24000) -> str:
     и красный статус означал "не дожило до последней реплики", а не "не было".
     """
     lines = []
-    for kind, payload in run.events:
+    for kind, payload, args in run.events:
         if kind == "text":
             lines.append(f"[реплика] {' '.join(payload.split())[:2000]}")
         else:
-            lines.append(f"[вызов] {payload}")
+            lines.append(f"[вызов] {payload} {' '.join(args.split())[:200]}".rstrip())
     body = "\n".join(lines)
     return body[-limit:] if len(body) > limit else body
 
