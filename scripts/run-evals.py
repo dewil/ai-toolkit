@@ -555,6 +555,19 @@ def validate_assert(sid: str, group: str, a: dict) -> None:
                 sys.exit(f"сценарий {sid}: не компилируется регулярка {spec[key]!r}: {e}")
 
 
+def merge_baseline(base: dict, results: dict, stamp: str) -> dict:
+    """Статусы базы после прогона: обновляются только прогнанные сценарии.
+
+    Перезапись целиком стирала бы остальные при любом частичном прогоне
+    (--scenario, --rule), а это обычный рабочий случай - перепрогнать один
+    сценарий после правки. Молча потерянная база - потерянные регрессии.
+    """
+    merged = dict(base.get("scenarios") or {})
+    for sid, result in results.items():
+        merged[sid] = {"status": result["status"], "stamp": stamp}
+    return merged
+
+
 def baseline_path(model: str) -> Path:
     """База своя на каждую модель.
 
@@ -746,11 +759,17 @@ def main() -> int:
     if args.baseline:
         path = baseline_path(label)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Обновляем только те сценарии, что реально прогнались. Перезапись
+        # целиком стирала бы статусы остальных при любом частичном прогоне
+        # (--scenario, --rule), а это обычный рабочий случай: перепрогнать один
+        # сценарий после правки. Молча потерянная база - потерянные регрессии.
+        merged = merge_baseline(base, results, stamp)
         path.write_text(json.dumps(
-            {"stamp": stamp, "model": label,
-             "scenarios": {s: {"status": r["status"]} for s, r in results.items()}},
+            {"stamp": stamp, "model": label, "scenarios": merged},
             ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        print(f"база модели '{label}' обновлена: {path}")
+        kept = len(merged) - len(results)
+        print(f"база модели '{label}' обновлена: {path}"
+              + (f" (обновлено {len(results)}, сохранено прежних {kept})" if kept else ""))
 
     return 1 if red or regressions else 0
 
