@@ -20,6 +20,7 @@ import importlib.util
 import io
 import json
 import tempfile
+import re
 import unicodedata
 import unittest
 import urllib.error
@@ -37,11 +38,20 @@ END = ab.MARK_END
 PROJECT = "123"
 
 
-def task(gid, name, notes="", completed=False, html=None):
-    return {"gid": gid, "name": name, "notes": notes, "completed": completed,
-            "permalink_url": f"https://app.asana.com/0/1/{gid}",
-            "projects": [{"gid": PROJECT}],
-            "html_notes": html if html is not None else f"<body>{notes}</body>"}
+def task(gid, name, notes="", completed=False, html=None, assignee=("7", "Евгений")):
+    t = {"gid": gid, "name": name, "notes": notes, "completed": completed,
+         "permalink_url": f"https://app.asana.com/0/1/{gid}",
+         "projects": [{"gid": PROJECT}],
+         "html_notes": html if html is not None else f"<body>{notes}</body>"}
+    if assignee:
+        t["assignee"] = {"gid": assignee[0], "name": assignee[1]}
+    return t
+
+
+def link(gid):
+    """Упоминание, как его пишет скрипт."""
+    return '<a data-asana-gid="%s"/>' % gid
+
 
 
 class Board:
@@ -60,10 +70,25 @@ class Board:
         self.bad_body: set[str] = set()  # 200 с неполным телом
 
     def get_all(self, path, token):
-        return self.tasks
+        return [dict(t, html_notes=self.canonize(t.get("html_notes") or ""))
+                for t in self.tasks]
 
     def _find(self, gid):
         return next((t for t in self.tasks if t["gid"] == gid), None)
+
+    @staticmethod
+    def canonize(html):
+        """Asana при чтении разворачивает короткое упоминание в полный якорь.
+
+        Заглушка обязана это моделировать: пока она возвращала записанные байты
+        как есть, тесты не видели, что скрипт перестает узнавать собственный блок
+        после первой же записи (находка состязательного ревью)."""
+        def expand(m):
+            gid = m.group(1)
+            return (f'<a href="https://app.asana.com/0/0/{gid}/f" data-asana-accessible="true" '
+                    f'data-asana-dynamic="true" data-asana-type="task" '
+                    f'data-asana-gid="{gid}">имя-{gid}</a>')
+        return re.sub(r'<a data-asana-gid="(\d+)"\s*/>', expand, html)
 
     def request(self, method, url, token, payload=None):
         gid = url.rstrip("/").split("/tasks/")[-1].split("?")[0]
@@ -75,12 +100,18 @@ class Board:
             if gid in self.bad_body:
                 return {"data": None}
             cur.update(self.live_edit.pop(gid, {}))
-            return {"data": dict(cur)}
+            out = dict(cur)
+            out["html_notes"] = self.canonize(out.get("html_notes") or "")
+            return {"data": out}
         if method != "PUT":
             raise AssertionError(f"неожиданный метод записи: {method}")
-        self.puts.append((gid, payload["notes"]))
-        cur["notes"] = payload["notes"]
-        cur["html_notes"] = f"<body>{payload['notes']}</body>"
+        assert "html_notes" in payload, "пишем html_notes, а не notes"
+        inner = payload["html_notes"]
+        assert inner.startswith("<body>") and inner.endswith("</body>"), inner[:40]
+        body = inner[len("<body>"):-len("</body>")]
+        self.puts.append((gid, body))
+        cur["html_notes"] = inner
+        cur["notes"] = body
         return {"data": cur}
 
 
@@ -118,8 +149,11 @@ class TestBasics(unittest.TestCase):
         self.assertFalse(err)
         self.assertEqual(written, 2)
         notes = dict(board.puts)
-        self.assertIn("ЗАБЛОКИРОВАНА: B (открыта)", notes["1"])
-        self.assertIn("БЛОКИРУЕТ: A", notes["2"])
+        self.assertIn(ab.WAITS_HEAD, notes["1"])
+        self.assertIn("- %s - %s, открыта" % (link("2"), link("7")), notes["1"])
+        self.assertIn(ab.HOLDS_HEAD, notes["2"])
+        self.assertIn("- %s - %s" % (link("1"), link("7")), notes["2"])
+        self.assertNotIn("ЗАБЛОКИРОВАНА", notes["1"])
 
     def test_second_run_is_noop(self):
         board = Board([task("1", "A"), task("2", "B")])
@@ -150,7 +184,7 @@ class TestBasics(unittest.TestCase):
     def test_completed_dependency_marked_closed(self):
         board = Board([task("1", "A"), task("2", "B", completed=True)])
         run(board, {"A": ["B"]})
-        self.assertIn("ЗАБЛОКИРОВАНА: B (закрыта)", dict(board.puts)["1"])
+        self.assertIn("- %s - %s, закрыта" % (link("2"), link("7")), dict(board.puts)["1"])
 
 
 class TestForeignTextNotOurs(unittest.TestCase):
@@ -166,7 +200,7 @@ class TestForeignTextNotOurs(unittest.TestCase):
 
     def test_mixed_block_untouched(self):
         """Наша строка плюс чужая внутри блока - блок все равно не наш."""
-        notes = (f"{BLOCK}\nЗАБЛОКИРОВАНА: B (открыта)\nhttps://x\n"
+        notes = (f"{BLOCK}\nЗАБЛОКИРОВАНА: B (открыта)\nhttps://app.asana.com/0/1/2\n"
                  f"и заодно ждем счет от бухгалтерии\n{END}\nхвост")
         board = Board([task("9", "C", notes)])
         written, _, _ = run(board, {})
@@ -189,22 +223,21 @@ class TestConcurrentEdit(unittest.TestCase):
 
     def test_edit_between_plan_and_write_survives(self):
         board = Board([task("1", "A"), task("2", "B")])
-        board.live_edit["1"] = {"notes": "ТЗ v2, согласованная цена",
-                                "html_notes": "<body>ТЗ v2, согласованная цена</body>"}
+        board.live_edit["1"] = {"html_notes": "<body>ТЗ v2, согласованная цена</body>"}
         run(board, {"A": ["B"]})
         written = dict(board.puts)["1"]
         self.assertIn("ТЗ v2, согласованная цена", written)
-        self.assertIn("ЗАБЛОКИРОВАНА: B", written)
+        self.assertIn(ab.WAITS_HEAD, written)
 
     def test_write_skipped_if_someone_already_did_it(self):
         board = Board([task("1", "A"), task("2", "B")])
         run(board, {"A": ["B"]})
-        board.tasks[0]["notes"] = ""  # снимок предпросмотра устареет
+        board.tasks[0]["html_notes"] = "<body></body>"  # снимок устареет
         board.puts.clear()
         written, err, _ = run(board, {"A": ["B"]})
         self.assertEqual(err, False)
         self.assertEqual(written, 1)
-        self.assertIn("ЗАБЛОКИРОВАНА: B", board.tasks[0]["notes"])
+        self.assertIn(ab.WAITS_HEAD, board.tasks[0]["html_notes"])
 
 
 class TestRetry(unittest.TestCase):
@@ -231,7 +264,7 @@ class TestRetry(unittest.TestCase):
         ab.time.sleep = lambda s: slept.append(s)
         try:
             with contextlib.redirect_stderr(io.StringIO()):
-                body = ab._request("GET", "https://x/tasks/1", "tok")
+                body = ab._request("GET", "https://app.asana.com/0/1/2/tasks/1", "tok")
         finally:
             ab.urllib.request.urlopen, ab.time.sleep = orig_open, orig_sleep
         self.assertEqual(body["data"]["ok"], True)
@@ -246,7 +279,7 @@ class TestRetry(unittest.TestCase):
         ab.urllib.request.urlopen = fake_urlopen
         try:
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-                ab._request("GET", "https://x/tasks/1", "tok")
+                ab._request("GET", "https://app.asana.com/0/1/2/tasks/1", "tok")
         finally:
             ab.urllib.request.urlopen = orig
 
@@ -261,8 +294,8 @@ class TestNameNormalization(unittest.TestCase):
         written, err, _ = run(board, conf["b"]["chains"])
         self.assertEqual((written, err), (2, False))
         notes = dict(board.puts)
-        self.assertIn("ЗАБЛОКИРОВАНА: B", notes["1"])
-        self.assertIn("БЛОКИРУЕТ: A", notes["2"])
+        self.assertIn(ab.WAITS_HEAD, notes["1"])
+        self.assertIn(ab.HOLDS_HEAD, notes["2"])
 
     def test_padded_duplicate_key_is_config_error(self):
         msg = cfg({"b": {"project": "123", "chains": {"A": ["B"], " A ": ["C"]}}})
@@ -288,7 +321,7 @@ class TestDuplicateTasksOutsideConfig(unittest.TestCase):
     """Находка 5: на одноименных задачах вне конфига оставался старый блок."""
 
     def test_stale_block_removed_from_every_duplicate(self):
-        stale = f"{BLOCK}\nЗАБЛОКИРОВАНА: X (открыта)\nhttps://x\n{END}\nхвост"
+        stale = f"{BLOCK}\nЗАБЛОКИРОВАНА: X (открыта)\nhttps://app.asana.com/0/1/2\n{END}\nхвост"
         board = Board([task("1", "A", stale), task("2", "A", stale)])
         written, err, _ = run(board, {})
         self.assertEqual((written, err), (2, False))
@@ -319,7 +352,7 @@ class TestCRLF(unittest.TestCase):
     """Находка 7: блок с CRLF не опознавался, прогон дописывал второй."""
 
     def test_crlf_block_replaced_not_duplicated(self):
-        crlf = f"{BLOCK}\r\nЗАБЛОКИРОВАНА: B (открыта)\r\nhttps://x\r\n{END}\r\n\r\nхвост"
+        crlf = f"{BLOCK}\r\nЗАБЛОКИРОВАНА: B (открыта)\r\nhttps://app.asana.com/0/1/2\r\n{END}\r\n\r\nхвост"
         board = Board([task("1", "A", crlf), task("2", "B")])
         run(board, {"A": ["B"]})
         written = dict(board.puts)["1"]
@@ -391,14 +424,6 @@ class TestOwnershipStrictness(unittest.TestCase):
 class TestWriteGuards(unittest.TestCase):
     """Находки раунда 2: что должно остановить запись после предпросмотра."""
 
-    def test_new_formatting_blocks_write(self):
-        board = Board([task("1", "A"), task("2", "B")])
-        board.live_edit["1"] = {"html_notes": "<body><strong>важно</strong></body>",
-                                "notes": ""}
-        written, err, _ = run(board, {"A": ["B"]})
-        self.assertNotIn("1", dict(board.puts))
-        self.assertTrue(err)  # пропуск не должен выглядеть чистым прогоном
-
     def test_incomplete_response_blocks_write(self):
         board = Board([task("1", "A", "ВАЖНО"), task("2", "B")])
         board.bad_body.add("1")
@@ -432,10 +457,9 @@ class TestWriteGuards(unittest.TestCase):
         """Настоящая проверка ветки skip: нужный блок появился до записи."""
         board = Board([task("1", "A"), task("2", "B")])
         run(board, {"A": ["B"]})
-        done = board.tasks[0]["notes"]
-        board.tasks[0]["notes"] = ""  # план построится по устаревшему снимку
-        board.tasks[0]["html_notes"] = "<body></body>"
-        board.live_edit["1"] = {"notes": done, "html_notes": f"<body>{done}</body>"}
+        done = board.tasks[0]["html_notes"]
+        board.tasks[0]["html_notes"] = "<body></body>"  # план по устаревшему снимку
+        board.live_edit["1"] = {"html_notes": done}
         board.puts.clear()
         written, err, _ = run(board, {"A": ["B"]})
         self.assertEqual((written, err, board.puts), (0, False, []))
@@ -473,17 +497,189 @@ class TestLeadingBlankLines(unittest.TestCase):
         self.assertEqual((written, err), (0, False))
 
 
-class TestRichText(unittest.TestCase):
-    def test_formatted_description_is_flagged(self):
-        board = Board([task("1", "A", "текст", html="<body><ul><li>раз</li></ul></body>"),
-                       task("2", "B")])
-        _w, _e, out = run(board, {"A": ["B"]}, send=False)
-        self.assertIn("описание оформлено", out)
+class TestAsanaCanonicalization(unittest.TestCase):
+    """Находка ревью: Asana разворачивает наше короткое упоминание в полный
+    якорь, и распознаватель перестал бы узнавать собственный блок - на каждом
+    прогоне добавлялся бы еще один."""
 
-    def test_plain_description_not_flagged(self):
-        board = Board([task("1", "A", "текст"), task("2", "B")])
+    def test_expanded_mention_is_still_our_line(self):
+        expanded = ('- <a href="https://app.asana.com/0/0/2/f" data-asana-type="task" '
+                    'data-asana-gid="2">Прислать фото</a> - '
+                    '<a data-asana-gid="7">Евгений</a>, открыта')
+        self.assertTrue(ab.is_item_line(expanded))
+
+    def test_second_run_after_canonization_is_noop(self):
+        board = Board([task("1", "A"), task("2", "B")])
+        run(board, {"A": ["B"]})
+        board.puts.clear()
+        written, err, out = run(board, {"A": ["B"]})
+        self.assertEqual((written, err, board.puts), (0, False, []))
+        self.assertIn("задач с изменениями: 0", out)
+
+    def test_no_second_block_appears(self):
+        board = Board([task("1", "A"), task("2", "B")])
+        run(board, {"A": ["B"]})
+        run(board, {"A": ["B"]})
+        self.assertEqual(board.tasks[0]["html_notes"].count(BLOCK), 1)
+
+    def test_block_is_removed_after_canonization(self):
+        board = Board([task("1", "A"), task("2", "B")])
+        run(board, {"A": ["B"]})
+        board.puts.clear()
+        written, err, _ = run(board, {})
+        self.assertEqual((written, err), (2, False))
+        self.assertNotIn(BLOCK, board.tasks[0]["html_notes"])
+
+    def test_manual_note_inside_item_line_makes_block_foreign(self):
+        notes = (f"{BLOCK}\n{ab.WAITS_HEAD}\n"
+                 '- <a data-asana-gid="2"/> - ручная оговорка: НЕ УДАЛЯТЬ\n'
+                 f"{END}\nСОХРАНИТЬ")
+        self.assertEqual(ab.split_block(notes), (None, notes))
+
+
+class TestForeignBlockWarning(unittest.TestCase):
+    """Находка ревью: блок под нашим заголовком с ручной правкой внутри мы
+    своим не считаем, но новый ляжет сверху - на карточке две версии связей."""
+
+    def test_preview_warns_about_foreign_block(self):
+        foreign = (f"{BLOCK}\n{ab.WAITS_HEAD}\n"
+                   '- <a data-asana-gid="2"/> - и еще ждем счет от бухгалтерии\n'
+                   f"{END}\nхвост")
+        board = Board([task("1", "A", html=f"<body>{foreign}</body>"), task("2", "B")])
         _w, _e, out = run(board, {"A": ["B"]}, send=False)
-        self.assertNotIn("описание оформлено", out)
+        self.assertIn("уже есть блок связей", out)
+
+    def test_anchor_regex_does_not_swallow_text_between_mentions(self):
+        """Самозакрывающийся якорь не должен съедать текст до следующего </a>."""
+        text = '<a data-asana-gid="2"/> ВАЖНЫЙ ТЕКСТ <a href="x">имя</a> хвост'
+        self.assertIn("ВАЖНЫЙ ТЕКСТ", ab.gid_form(text))
+        self.assertIn("хвост", ab.gid_form(text))
+
+    def test_no_warning_when_block_is_ours(self):
+        board = Board([task("1", "A"), task("2", "B")])
+        run(board, {"A": ["B"]})
+        _w, _e, out = run(board, {"A": ["B"]}, send=False)
+        self.assertNotIn("уже есть блок связей", out)
+
+    def test_missing_assignee_name_shows_gid_not_emptiness(self):
+        board = Board([task("1", "A", assignee=("9", "Другой")),
+                       task("2", "B", assignee=("7", None))])
+        _w, _e, out = run(board, {"A": ["B"]}, send=False)
+        self.assertIn("gid 7", out)
+        self.assertNotIn("data-asana-gid", out)
+
+
+class TestOldFormatMigration(unittest.TestCase):
+    """На досках уже стоят блоки первой редакции. Не узнать свой старый блок
+    значит дописать второй сверху вместо замены - и оставить на карточке две
+    противоречивые версии связей."""
+
+    def old_block(self, dep_name="B", url="https://app.asana.com/0/1/2"):
+        return (f"{BLOCK}\nЗАБЛОКИРОВАНА: {dep_name} (открыта)\n{url}\n{END}")
+
+    def test_manual_block_with_foreign_link_is_not_ours(self):
+        """Ручной блок с термином и ссылкой на чужой сайт - текст человека."""
+        notes = (f"{BLOCK}\nБЛОКИРУЕТ: сверить договор с юристами\n"
+                 f"https://example.com/legal\n{END}\nСОХРАНИТЬ")
+        self.assertEqual(ab.split_block(notes), (None, notes))
+
+    def test_old_block_with_autolinked_url_is_recognized(self):
+        """Asana превращает голый URL в якорь - старый блок выглядит иначе."""
+        notes = (f"{BLOCK}\nЗАБЛОКИРОВАНА: B (открыта)\n"
+                 '<a href="https://app.asana.com/0/1/2">https://app.asana.com/0/1/2</a>\n'
+                 f"{END}\nхвост")
+        block, rest = ab.split_block(notes)
+        self.assertIsNotNone(block)
+        self.assertEqual(rest.strip(), "хвост")
+
+    def test_old_block_is_recognized_as_ours(self):
+        block, rest = ab.split_block(self.old_block() + "\n\nхвост")
+        self.assertIsNotNone(block)
+        self.assertEqual(rest.strip(), "хвост")
+
+    def test_old_block_is_replaced_not_duplicated(self):
+        board = Board([task("1", "A", html=f"<body>{self.old_block()}\n\nхвост</body>"),
+                       task("2", "B")])
+        run(board, {"A": ["B"]})
+        written = dict(board.puts)["1"]
+        self.assertEqual(written.count(BLOCK), 1)
+        self.assertIn(ab.WAITS_HEAD, written)
+        self.assertNotIn("ЗАБЛОКИРОВАНА", written)
+        self.assertTrue(written.endswith("хвост"))
+
+    def test_old_block_without_links_in_config_is_removed(self):
+        board = Board([task("9", "C", html=f"<body>{self.old_block('X')}\n\nхвост</body>")])
+        written, err, _ = run(board, {})
+        self.assertEqual((written, err), (1, False))
+        self.assertEqual(board.tasks[0]["html_notes"], "<body>хвост</body>")
+
+    def test_migration_is_idempotent(self):
+        board = Board([task("1", "A", html=f"<body>{self.old_block()}</body>"),
+                       task("2", "B")])
+        run(board, {"A": ["B"]})
+        board.puts.clear()
+        written, err, _ = run(board, {"A": ["B"]})
+        self.assertEqual((written, err, board.puts), (0, False, []))
+
+
+class TestMentionsAndAssignee(unittest.TestCase):
+    """Находка брифа: направление связи термином двусмысленно, а исполнителя
+    в строке не было вовсе."""
+
+    def test_direction_is_a_sentence_not_a_term(self):
+        board = Board([task("1", "A"), task("2", "B")])
+        run(board, {"A": ["B"]})
+        waits, holds = dict(board.puts)["1"], dict(board.puts)["2"]
+        self.assertIn("ЖДЕТ", waits)
+        self.assertIn("ДЕРЖИТ", holds)
+        self.assertNotIn("БЛОКИРУЕТ:", holds)
+
+    def test_task_and_assignee_are_mentions_not_text(self):
+        board = Board([task("1", "A"), task("2", "B", assignee=("7", "Евгений"))])
+        run(board, {"A": ["B"]})
+        written = dict(board.puts)["1"]
+        self.assertIn(link("2"), written)
+        self.assertIn(link("7"), written)
+        self.assertNotIn("Евгений", written)   # имя подставляет трекер
+        self.assertNotIn("B", written.replace(BLOCK, ""))
+        self.assertNotIn("https://", written)  # упоминание уже ссылка
+
+    def test_unassigned_task_says_so(self):
+        board = Board([task("1", "A"), task("2", "B", assignee=None)])
+        run(board, {"A": ["B"]})
+        self.assertIn("исполнитель не назначен", dict(board.puts)["1"])
+
+    def test_status_only_where_we_are_waiting(self):
+        board = Board([task("1", "A"), task("2", "B")])
+        run(board, {"A": ["B"]})
+        self.assertIn(", открыта", dict(board.puts)["1"])
+        self.assertNotIn("открыта", dict(board.puts)["2"])
+
+    def test_preview_shows_names_not_gids(self):
+        board = Board([task("1", "A"), task("2", "B", assignee=("7", "Евгений"))])
+        _w, _e, out = run(board, {"A": ["B"]}, send=False)
+        self.assertIn("Евгений", out)
+        self.assertNotIn("data-asana-gid", out)
+
+
+class TestFormattingPreserved(unittest.TestCase):
+    """Раньше запись шла в notes и сплющивала чужое оформление, из-за чего
+    приходилось держать отдельный гейт. С html_notes теряться нечему."""
+
+    def test_existing_markup_survives_the_write(self):
+        board = Board([task("1", "A", html="<body><ul><li>важный пункт</li></ul></body>"),
+                       task("2", "B")])
+        run(board, {"A": ["B"]})
+        written = dict(board.puts)["1"]
+        self.assertIn("<ul><li>важный пункт</li></ul>", written)
+        self.assertTrue(written.startswith(ab.MARK_START))
+
+    def test_formatting_added_after_preview_is_kept(self):
+        board = Board([task("1", "A"), task("2", "B")])
+        board.live_edit["1"] = {"html_notes": "<body><strong>важно</strong></body>"}
+        written, err, _ = run(board, {"A": ["B"]})
+        self.assertEqual(err, False)
+        self.assertIn("<strong>важно</strong>", dict(board.puts)["1"])
 
 
 class TestDryRun(unittest.TestCase):
@@ -495,7 +691,7 @@ class TestDryRun(unittest.TestCase):
         self.assertIn("это предпросмотр", out)
 
     def test_removal_preview_shows_what_disappears(self):
-        stale = f"{BLOCK}\nЗАБЛОКИРОВАНА: X (открыта)\nhttps://x\n{END}\nхвост"
+        stale = f"{BLOCK}\nЗАБЛОКИРОВАНА: X (открыта)\nhttps://app.asana.com/0/1/2\n{END}\nхвост"
         board = Board([task("1", "A", stale)])
         _w, _e, out = run(board, {}, send=False)
         self.assertIn("ЗАБЛОКИРОВАНА: X", out)

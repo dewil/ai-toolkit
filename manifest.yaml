@@ -76,6 +76,7 @@ coding:
   - rules/error-exposure.md             # не глотать ошибки - показывать их наверх
   - rules/format-dimensions.md          # единый формат величин с размерностью: одна функция на размерность, постоянная точность, явные пороги единиц
   - rules/requirements-traceability.md  # трассируемость требование-код-тест через теги тестов вместо ручной матрицы, rot-guard
+  - rules/tracker-addressing.md         # описание PR и комментарий в issue - адресату, а не о нем в третьем лице
   - agents/debugger.md                  # воспроизведение и локализация багов
   - agents/test-writer.md               # тесты с чистого листа по спеке, без чтения реализации (SDD)
   - agents/implementer.md               # реализация по готовому плану
@@ -104,6 +105,7 @@ wiki:
 management:
   - rules/meetings.md                   # формат заметок встреч
   - rules/tasks-tracking.md             # формат задач и планов
+  - rules/tracker-addressing.md         # текст в трекере пишется адресату на "ты", а не о нем в третьем лице
   - rules/calendar-tasks.md             # задача с дедлайном - блоком в календарь исполнителя, префикс типа в названии
   - rules/artifacts-structure.md        # структура папок управленческого проекта
   - rules/meeting-transcripts.md        # двойной формат транскрипций (KTalk + mymeet) и .summary.md
@@ -122,7 +124,7 @@ management:
   - scripts/asana-comments.py           # постраничное чтение stories задачи Asana через REST (для скилла asana-comments)
   - skills/asana-project/SKILL.md       # пакетное разворачивание/досыпка доски Asana из JSON-плана, dry-run по умолчанию
   - scripts/asana-project.py            # создание проекта/секций/задач Asana из JSON, идемпотентная досыпка и синк сроков
-  - skills/asana-blockers/SKILL.md      # связи задач текстом в описании (ЗАБЛОКИРОВАНА/БЛОКИРУЕТ): обход премиум-зависимостей Asana
+  - skills/asana-blockers/SKILL.md      # связи задач текстом в описании (чего ждет / что держит, с исполнителем): обход премиум-зависимостей Asana
   - scripts/asana-blockers.py           # проставление обеих сторон связи в описания задач Asana по конфигу цепочек, dry-run по умолчанию
   - scripts/telegram-snapshot.py        # инкрементальный pull новых сообщений Telegram
   - scripts/telegram-deltas.py          # дельты чатов для блока "Новое в чатах" в дейлике

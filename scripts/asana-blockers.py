@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import html as html_lib
 import re
 import ssl
 import sys
@@ -82,7 +83,10 @@ DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / ".asana-blockers.json"
 MARK_START = "СВЯЗИ ЗАДАЧИ"
 MARK_END = "- - -"
 
-FIELDS = "name,notes,html_notes,completed,permalink_url"
+# assignee.gid просим явно: упоминание собирается из него, и полагаться на то,
+# что Asana доложит gid к запрошенному assignee.name, тут нельзя - промах даст
+# упоминание из None, то есть блок без исполнителя при живом исполнителе.
+FIELDS = "name,notes,html_notes,completed,permalink_url,assignee.gid,assignee.name"
 # Строки, которые пишем мы. Блок под нашим заголовком считается нашим, только
 # если состоит из них: иначе человек, начавший описание словами "СВЯЗИ ЗАДАЧИ",
 # потерял бы свой текст на первом же прогоне.
@@ -91,9 +95,32 @@ FIELDS = "name,notes,html_notes,completed,permalink_url"
 # префиксом, любая начинающаяся с http) принимала за свой ручной текст и
 # стирала его: человек пишет пояснение прямо к ссылке или начинает абзац
 # словом "БЛОКИРУЕТ:".
-BLOCKED_LINE = re.compile(r"^ЗАБЛОКИРОВАНА: .+ \((?:открыта|закрыта)\)$")
-BLOCKS_LINE = re.compile(r"^БЛОКИРУЕТ: .+$")
-BARE_URL = re.compile(r"^https?://\S+$")
+# Направление связи пишется целым предложением, а не термином. Термин
+# ("ЗАБЛОКИРОВАНА", "БЛОКИРУЕТ") читается в обе стороны одинаково правдоподобно,
+# и на живом пользователе это подтвердилось: "непонятно, кто блокирует - та
+# задача эту или эта ту". Ошибка при этом не видна - строка выглядит осмысленной
+# при любом прочтении.
+WAITS_HEAD = "ЭТА ЗАДАЧА ЖДЕТ - ее нельзя сделать, пока не закрыты:"
+HOLDS_HEAD = "ЭТА ЗАДАЧА ДЕРЖИТ - они не сдвинутся, пока не закрыта эта:"
+# Строка связи нового формата: пункт списка с упоминаниями. Опознавать ее по
+# точному виду тега нельзя: мы отправляем короткое `<a data-asana-gid="2"/>`, а
+# Asana при чтении разворачивает его в полный якорь с href, набором data-атрибутов
+# и подставленным именем. Проверка идет от обратного: убираем все якоря и
+# смотрим, что осталось - должен остаться только наш каркас строки.
+# Самозакрывающаяся форма проверяется ПЕРВОЙ, а парная не должна начинаться
+# с самозакрывающегося тега: иначе `<a .../>` совпадает с открывающей частью
+# парного варианта и `.*?</a>` съедает весь текст до следующего якоря -
+# вместе с чужими правками между ними.
+ANCHOR = re.compile(r"<a\b[^>]*/>|<a\b[^>]*(?<!/)>.*?</a>", re.S)
+GID_ATTR = re.compile(r'data-asana-gid="\d+"')
+ITEM_REST = re.compile(r"^-\s*(?:-\s*(?:исполнитель не назначен)?)?\s*"
+                       r"(?:,\s*(?:открыта|закрыта))?$")
+# Старый формат (термин плюс голая ссылка) остается известен ЧТЕНИЮ: на досках
+# уже лежат блоки в нем, и не узнать свой блок значит дописать второй сверху.
+# Записываем только в новом.
+OLD_BLOCKED = re.compile(r"^ЗАБЛОКИРОВАНА: .+ \((?:открыта|закрыта)\)$")
+OLD_BLOCKS = re.compile(r"^БЛОКИРУЕТ: .+$")
+OLD_TASK_URL = re.compile(r"^https?://(?:app\.)?asana\.com/\S+$")
 # Невидимые символы уравниваем: иначе две визуально одинаковые задачи не дают
 # коллизии, и связь молча уходит на ту из них, которая совпала побайтно.
 ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\ufeff"))
@@ -324,17 +351,71 @@ def bad_name(name) -> str | None:
     return None
 
 
-def _is_ours(inner: str) -> bool:
-    """Состоит ли содержимое блока ровно из наших пар "связь + ссылка"."""
+def is_item_line(line: str) -> bool:
+    """Пункт связи: одно-два упоминания и наш каркас вокруг них.
+
+    Форма якоря значения не имеет (короткая наша или развернутая от Asana), но
+    ручная приписка внутри строки делает ее чужой - там текст человека.
+    """
+    if not GID_ATTR.search(line):
+        return False
+    return bool(ITEM_REST.match(ANCHOR.sub("", line).strip()))
+
+
+def _is_ours_new(inner: str) -> bool:
+    """Блок нового формата: заголовки направлений и пункты с упоминаниями."""
     lines = [ln.strip() for ln in inner.split("\n") if ln.strip()]
-    if not lines or len(lines) % 2:
-        return False  # пустой блок мы не генерируем, непарный - тоже
-    for head, url in zip(lines[::2], lines[1::2]):
-        if not (BLOCKED_LINE.match(head) or BLOCKS_LINE.match(head)):
+    if not lines:
+        return False
+    heads = 0
+    for ln in lines:
+        if ln in (WAITS_HEAD, HOLDS_HEAD):
+            heads += 1
+        elif not is_item_line(ln):
             return False
-        if not BARE_URL.match(url):
-            return False  # ссылка с дописанным пояснением - уже текст человека
+    return heads > 0 and len(lines) > heads
+
+
+def gid_form(text: str) -> str:
+    """Описание в сравнимом виде: любое упоминание сводится к <@gid>."""
+    def one(m):
+        found = GID_ATTR.search(m.group(0))
+        return f"<@{found.group(0)}>" if found else m.group(0)
+    return ANCHOR.sub(one, text).strip("\n")
+
+
+def plain(line: str) -> str:
+    """Строка без разметки: Asana сама превращает голый URL в якорь, а символы
+    вроде & хранит сущностью, поэтому старый блок в html_notes выглядит иначе,
+    чем мы его писали."""
+    return html_lib.unescape(ANCHOR.sub(lambda m: re.sub(r"<[^>]+>", "", m.group(0)),
+                                        line)).strip()
+
+
+def _is_ours_old(inner: str) -> bool:
+    """Блок первой редакции: пары "термин + ссылка на задачу Asana"."""
+    lines = [plain(ln) for ln in inner.split("\n") if ln.strip()]
+    if not lines or len(lines) % 2:
+        return False
+    for head, url in zip(lines[::2], lines[1::2]):
+        if not (OLD_BLOCKED.match(head) or OLD_BLOCKS.match(head)):
+            return False
+        # Ссылка обязана вести в Asana: любой URL принимать нельзя, иначе под
+        # определение попадает ручной блок вида "БЛОКИРУЕТ: сверить договор" со
+        # ссылкой на чужой сайт - и он будет стерт как наш.
+        if not OLD_TASK_URL.match(url):
+            return False
     return True
+
+
+def _is_ours(inner: str) -> bool:
+    """Наш ли блок - в любом из двух форматов.
+
+    Старый узнается ради миграции: на досках уже стоят блоки первой редакции, и
+    если перестать их опознавать, прогон допишет второй блок сверху вместо
+    замены. Перезаписан он будет уже в новом формате.
+    """
+    return _is_ours_new(inner) or _is_ours_old(inner)
 
 
 def split_block(notes: str) -> tuple[str | None, str]:
@@ -361,40 +442,75 @@ def render(lines: list[str], rest: str) -> str:
     rest = rest.lstrip("\n")
     if not lines:
         return rest.rstrip("\n")
-    block = MARK_START + "\n" + "\n\n".join(lines) + "\n" + MARK_END
+    block = MARK_START + "\n" + "\n".join(lines) + "\n" + MARK_END
     return (block + "\n\n" + rest).rstrip("\n")
 
 
-def is_rich(task: dict) -> bool:
-    """Оформлено ли описание задачи (списки, ссылки, жирный).
+BODY = re.compile(r"^\s*<body>(.*)</body>\s*$", re.S | re.I)
 
-    Запись идет в поле notes - плоский текст, и Asana при этом сбрасывает
-    html_notes. Оформление чужого описания на этом теряется, поэтому такие
-    задачи предпросмотр помечает отдельно.
+
+def body_of(task: dict) -> str:
+    """Содержимое описания задачи без обертки <body>, CRLF приведены к LF.
+
+    Работаем с html_notes, а не с notes: во-первых, упоминания живут только там
+    (в плоском тексте они превратились бы в сырой тег), во-вторых, запись
+    плоского notes сбрасывала бы оформление чужого описания - тот самый дефект,
+    который в первой редакции приходилось закрывать отдельным гейтом.
     """
-    html = task.get("html_notes") or ""
-    inner = re.sub(r"^<body>|</body>$", "", html.strip(), flags=re.I)
-    return bool(re.search(r"<[a-zA-Z/]", inner))
+    html = (task.get("html_notes") or "").replace("\r\n", "\n")
+    m = BODY.match(html)
+    return (m.group(1) if m else html).strip("\n")
 
 
-def notes_of(task: dict) -> str:
-    """Описание задачи в сравнимом виде: CRLF в LF.
+def wrap(inner: str) -> str:
+    """Обратная обертка для записи: Asana принимает html_notes только целиком."""
+    return f"<body>{inner}</body>"
 
-    Asana отдает LF, но вставленный из письма или редактора текст приносит CRLF,
-    и наш же блок в нем перестает опознаваться - прогон дописал бы второй.
+
+def readable(text: str, names: dict[str, str]) -> str:
+    """Упоминания в человеческие имена - для предпросмотра.
+
+    Предпросмотр тут единственный канал контроля перед записью, а строку из
+    gid-ов проверить глазами невозможно: записываем упоминания, показываем имена.
     """
-    return (task.get("notes") or "").replace("\r\n", "\n")
+    return re.sub(r'<a data-asana-gid="(\d+)"\s*/>',
+                  lambda m: names.get(m.group(1), f"gid {m.group(1)}"), text)
+
+
+def mention(gid: str) -> str:
+    """Упоминание Asana. Имя подставляет трекер, поэтому оно всегда актуально."""
+    return f'<a data-asana-gid="{gid}"/>'
+
+
+def who(task: dict) -> str:
+    """Исполнитель задачи упоминанием - или честная строка про его отсутствие.
+
+    Разница между "ничей" и "мой" важнее аккуратности строки: увидев блокировку,
+    человек первым делом хочет знать, ждет он своего шага или чужого.
+    """
+    assignee = task.get("assignee") or {}
+    gid = assignee.get("gid")
+    return mention(gid) if gid else "исполнитель не назначен"
 
 
 def build_lines(name: str, chains: dict, blocks: dict, by_name: dict) -> list[str]:
-    """Строки блока для одной задачи: сперва чего ждет она, потом кого держит."""
+    """Строки блока для одной задачи: сперва чего ждет она, потом кого держит.
+
+    Статус (открыта/закрыта) ставится только тем, кого ждем: у задач, которые
+    держим мы, он избыточен и мешает читать.
+    """
     lines = []
-    for n in chains.get(name, []):
-        dep = by_name[n]
-        state = "закрыта" if dep.get("completed") else "открыта"
-        lines.append(f"ЗАБЛОКИРОВАНА: {n} ({state})\n{dep['permalink_url']}")
-    for n in blocks.get(name, []):
-        lines.append(f"БЛОКИРУЕТ: {n}\n{by_name[n]['permalink_url']}")
+    waits = [by_name[n] for n in chains.get(name, [])]
+    holds = [by_name[n] for n in blocks.get(name, [])]
+    if waits:
+        lines.append(WAITS_HEAD)
+        for dep in waits:
+            state = "закрыта" if dep.get("completed") else "открыта"
+            lines.append(f"- {mention(dep['gid'])} - {who(dep)}, {state}")
+    if holds:
+        lines.append(HOLDS_HEAD)
+        for dep in holds:
+            lines.append(f"- {mention(dep['gid'])} - {who(dep)}")
     return lines
 
 
@@ -437,31 +553,42 @@ def run_board(label: str, cfg: dict, token: str, send: bool) -> tuple[int, bool]
 
     # обход идет по списку задач, а не по by_name: одноименные задачи вне
     # цепочек схлопнулись бы, и на второй из них остался бы висеть старый блок
-    plan: list[tuple[str, str, list[str], str, bool]] = []
+    plan: list[tuple[str, str, list[str], str]] = []
     for t in tasks:
         name = norm(t.get("name") or "")
         lines = build_lines(name, chains, blocks, by_name)
-        notes = notes_of(t)
+        notes = body_of(t)
         block_txt, rest = split_block(notes)
         if not lines and block_txt is None:
             continue  # ни связей, ни нашего блока - задача не наша, не трогаем
         fresh = render(lines, rest)
-        if fresh != notes.rstrip("\n"):
-            plan.append((t["gid"], name, lines, notes, is_rich(t)))
+        if gid_form(fresh) != gid_form(notes):
+            plan.append((t["gid"], name, lines, notes))
+
+    # Предпросмотр показывает имена, а не gid: это единственный канал контроля
+    # перед записью, а строку из идентификаторов глазами не проверить.
+    names = {t["gid"]: norm(t.get("name") or "") for t in tasks if t.get("name")}
+    for t in tasks:
+        assignee = t.get("assignee") or {}
+        if assignee.get("gid") and assignee.get("name"):
+            names[assignee["gid"]] = assignee["name"]
 
     print(f"задач с изменениями: {len(plan)}")
-    for _gid, name, lines, notes, rich in plan:
+    for _gid, name, lines, notes in plan:
         print(f"\n--- {name}")
         if not lines:
             print("    СНЯТЬ БЛОК СВЯЗЕЙ (связи убраны из конфига), остается только текст ниже него:")
             block_txt, _rest = split_block(notes)
-            for line in (block_txt or "").splitlines():
+            for line in readable(block_txt or "", names).splitlines():
                 print(f"      | {line}")
         for line in lines:
-            print(f"    {line.splitlines()[0]}")
-        if rich:
-            print("    внимание: описание оформлено (списки/ссылки/жирный) - "
-                  "запись в notes сплющит его в плоский текст")
+            print(f"    {readable(line, names)}")
+        # Блок под нашим заголовком, который мы своим не считаем, останется в
+        # описании, а новый ляжет сверху - на карточке будет две версии связей.
+        # Молча этого делать нельзя: предпросмотр тут единственный канал контроля.
+        if lines and MARK_START in notes and split_block(notes)[0] is None:
+            print("    внимание: в описании уже есть блок связей, который мы не считаем "
+                  "своим (в нем есть ручные правки?) - новый ляжет сверху, старый останется")
 
     if not send:
         if plan:
@@ -469,16 +596,16 @@ def run_board(label: str, cfg: dict, token: str, send: bool) -> tuple[int, bool]
         return len(plan), False
 
     written, skipped = 0, 0
-    for gid, name, lines, notes, rich in plan:
+    for gid, name, lines, notes in plan:
         # Перечитываем задачу прямо перед записью: между предпросмотром и
         # записью ее мог поменять человек, а PUT перезаписывает поле целиком -
         # без этого чужая правка молча терялась бы. У Asana нет ни ETag, ни
         # условной записи, поэтому окно сужаем, а не закрываем; все, что
-        # разошлось со снимком не по тексту, а по сути (имя, доска, появившееся
-        # оформление), - повод не писать вовсе.
-        cur = _request("GET", f"{API}/tasks/{gid}?opt_fields=notes,html_notes,name,projects",
+        # разошлось со снимком не по тексту, а по сути (имя, доска), - повод
+        # не писать вовсе.
+        cur = _request("GET", f"{API}/tasks/{gid}?opt_fields=html_notes,name,projects",
                        token).get("data")
-        if not isinstance(cur, dict) or not isinstance(cur.get("notes"), str):
+        if not isinstance(cur, dict) or not isinstance(cur.get("html_notes"), str):
             print(f"'{name}': неполный ответ Asana при перечитывании - пропускаем",
                   file=sys.stderr)
             skipped += 1
@@ -492,22 +619,15 @@ def run_board(label: str, cfg: dict, token: str, send: bool) -> tuple[int, bool]
             print(f"'{name}': задачи больше нет на этой доске - пропускаем", file=sys.stderr)
             skipped += 1
             continue
-        if is_rich(cur) and not rich:
-            # оформление появилось после предпросмотра, а значит предупреждения
-            # про сплющивание человек не видел и согласия на потерю не давал
-            print(f"'{name}': описание оформили после предпросмотра - пропускаем, "
-                  f"повтори предпросмотр", file=sys.stderr)
-            skipped += 1
-            continue
-        cur_notes = notes_of(cur)
-        if cur_notes.rstrip("\n") != notes.rstrip("\n"):
+        cur_notes = body_of(cur)
+        if gid_form(cur_notes) != gid_form(notes):
             print(f"описание '{name}' изменилось после предпросмотра - "
                   f"блок накладываем на новую версию", file=sys.stderr)
         _block, rest = split_block(cur_notes)
         fresh = render(lines, rest)
-        if fresh == cur_notes.rstrip("\n"):
+        if gid_form(fresh) == gid_form(cur_notes):
             continue  # кто-то уже привел описание к нужному виду
-        _request("PUT", f"{API}/tasks/{gid}", token, {"notes": fresh})
+        _request("PUT", f"{API}/tasks/{gid}", token, {"html_notes": wrap(fresh)})
         written += 1
     print(f"\nзаписано: {written}" + (f", пропущено: {skipped}" if skipped else ""))
     return written, bool(skipped)
