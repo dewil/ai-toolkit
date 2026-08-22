@@ -52,6 +52,7 @@ universal:
   - skills/memory-compact/SKILL.md      # свертка разросшейся автопамяти: слить записи об одном сюжете, снять отработавшее, пересобрать индекс
   - skills/session-cost/SKILL.md        # подсчет токенов сессии Claude Code из транскрипта (смета, отчет)
   - commands/canon.md                   # /canon = синхронизация проекта с каноном
+  - commands/feedback-inbox.md          # разбор очереди поправок пользователя: кандидат -> память проекта или канон-инбокс
   - scripts/md-pdf.py                   # движок рендера markdown в PDF (для скилла md-pdf)
   - scripts/md-docx.py                  # сборка .docx из markdown, stdlib-only; разбор md берет из md-pdf.py
   - skills/csv-xlsx/SKILL.md            # сборка .xlsx из CSV/TSV (файл = лист), stdlib без openpyxl
