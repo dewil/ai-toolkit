@@ -92,6 +92,8 @@ documentation:
 wiki:
   - rules/wiki-notes-style.md           # формат заметки в vault
   - rules/wiki-linking-obsidian.md      # перелинковка [[...]] в Obsidian
+  - rules/wiki-decision-log.md          # журнал решений vault'а: довод и отклоненные варианты
+  - rules/wiki-inbox-flow.md            # жизненный цикл сырья: Inbox -> заметка -> архив
   - agents/note-writer.md               # пишет заметки по конвенциям vault
   - agents/librarian.md                 # read-only ревизия vault: битые ссылки, дубли, сироты
   - skills/telegram-snapshot/SKILL.md   # настройка/починка зеркала чатов Telegram
