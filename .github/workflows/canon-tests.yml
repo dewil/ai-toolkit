@@ -6,6 +6,10 @@ name: canon-delta tests
 #
 # paths - маской по scripts/*.py, а не поименно: раскатываемые скрипты раньше
 # в триггер не входили вовсе, и дефект в них доезжал до парка мимо CI.
+#
+# Список тестов ниже - поименный, и он уже расходился с tests/: chrome_cookies,
+# gsheets и telegram_pace лежали в репозитории, но в CI не гонялись. Заводишь
+# новый tests/test_*.py - дописывай его сюда же.
 
 on:
   push:
@@ -38,7 +42,7 @@ jobs:
       - name: run tests
         run: |
           set -e
-          for t in build_lock classify wal integration migrate fs_mapping md_pdf md_docx csv_xlsx md_pptx telegram_config mymeet_snapshot asana_comments asana_project asana_blockers run_evals feedback_collect; do
+          for t in build_lock classify wal integration migrate fs_mapping md_pdf md_docx csv_xlsx md_pptx telegram_config mymeet_snapshot asana_comments asana_project asana_blockers run_evals feedback_collect chrome_cookies gsheets telegram_pace; do
             echo "::group::test_$t"
             python3 tests/test_$t.py
             echo "::endgroup::"

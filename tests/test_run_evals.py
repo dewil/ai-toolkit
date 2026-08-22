@@ -442,6 +442,18 @@ class TestBaselines(unittest.TestCase):
             finally:
                 re_mod.BASELINES = orig
 
+    def test_partial_run_keeps_other_scenarios(self):
+        """Перепрогон одного сценария с --baseline не должен стирать остальные."""
+        base = {"scenarios": {"01-a": {"status": "green"}, "02-b": {"status": "red"}}}
+        merged = re_mod.merge_baseline(base, {"02-b": {"status": "green"}}, "2026-08-22")
+        self.assertEqual(set(merged), {"01-a", "02-b"})
+        self.assertEqual(merged["01-a"]["status"], "green")
+        self.assertEqual(merged["02-b"], {"status": "green", "stamp": "2026-08-22"})
+
+    def test_merge_on_empty_base_is_just_results(self):
+        merged = re_mod.merge_baseline({}, {"01-a": {"status": "red"}}, "s")
+        self.assertEqual(merged, {"01-a": {"status": "red", "stamp": "s"}})
+
     def test_rank_orders_statuses(self):
         self.assertLess(re_mod.RANK["green"], re_mod.RANK["yellow"])
         self.assertLess(re_mod.RANK["yellow"], re_mod.RANK["red"])
