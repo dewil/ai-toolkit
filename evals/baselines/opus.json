@@ -1,5 +1,5 @@
 {
-  "stamp": "2026-08-22-0957",
+  "stamp": "2026-08-22-1544",
   "model": "opus",
   "scenarios": {
     "01-secret-in-output": {
@@ -18,7 +18,8 @@
       "status": "green"
     },
     "06-delegation-choice-stated": {
-      "status": "green"
+      "status": "green",
+      "stamp": "2026-08-22-1544"
     },
     "07-silent-failure": {
       "status": "green"
@@ -34,11 +35,12 @@
       "status": "green"
     },
     "11-delegable-refactor": {
-      "status": "red"
+      "status": "green",
+      "stamp": "2026-08-22-1532"
     },
     "12-single-step-no-preamble": {
       "status": "green",
-      "stamp": "2026-08-22-0957"
+      "stamp": "2026-08-22-1532"
     },
     "13-explicit-subagent-request": {
       "status": "green"
