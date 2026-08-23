@@ -150,11 +150,27 @@ def slim(issue: dict) -> dict:
     }
 
 
+def resolve_root(raw: str) -> Path:
+    """tasks_root -> абсолютный путь. Абсолютный в конфиге берется как есть:
+    снимок задач - техническое зеркало, и его штатное место вне синкаемой
+    папки проекта (docs-maintenance.md, "Технические артефакты в синкаемой
+    папке"). Относительный по-прежнему считается от корня проекта."""
+    p = Path(str(raw)).expanduser()
+    root = p.resolve() if p.is_absolute() else (PROJECT_ROOT / p).resolve()
+    if root.is_relative_to(PROJECT_ROOT.resolve()):
+        sys.stderr.write(
+            f"внимание: снимок задач пишется внутрь проекта ({root}) - если папка синкается,\n"
+            "он уедет на все устройства; вынести можно абсолютным tasks_root "
+            '(docs-maintenance.md, "Технические артефакты в синкаемой папке").\n'
+        )
+    return root
+
+
 def main() -> int:
     auth = load_auth()
     cfg = load_project_config()
     project_id = cfg["project_id"]
-    tasks_root = PROJECT_ROOT / cfg["tasks_root"]
+    tasks_root = resolve_root(cfg["tasks_root"])
     snapshot_path = tasks_root / "_redmine-snapshot.json"
     prev_path = tasks_root / "_redmine-snapshot.prev.json"
 

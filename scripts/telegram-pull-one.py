@@ -51,6 +51,15 @@ async def amain(
     chat_id: int, out_path: str, expected_username: str | None, account: str = "default",
     download_media: bool = True,
 ) -> int:
+    if (tgs.PROJECT_ROOT / out_path).resolve().is_relative_to(tgs.PROJECT_ROOT.resolve()):
+        sys.stderr.write(
+            f"внимание: зеркало пишется внутрь проекта ({(tgs.PROJECT_ROOT / out_path)}).\n"
+            "Папка проекта обычно синкается: выгрузка уедет на все устройства и в бэкапы за секунды,\n"
+            "и исключение из синка задним числом этого уже не отменит "
+            '(docs-maintenance.md, "Технические артефакты в синкаемой папке").\n'
+            f"Штатное место: {tgs.MIRROR_STORE / tgs.project_store_slug()}/<label>\n"
+        )
+
     auth = tgs.load_auth(account)
     session_path = str(tgs.AUTH_DIR / auth["session_name"])
 
@@ -113,7 +122,11 @@ def main() -> int:
         description="Снапшот одного Telegram-чата по id в произвольную папку."
     )
     parser.add_argument("chat_id", type=int, help="числовой id чата")
-    parser.add_argument("out_path", help="путь папки назначения от корня проекта")
+    parser.add_argument(
+        "out_path",
+        help="путь папки назначения: абсолютный (штатно - в хранилище зеркал вне синка) "
+             "или от корня проекта",
+    )
     parser.add_argument(
         "username", nargs="?", default=None,
         help="ожидаемый username для сверки (без @); при несовпадении - стоп",

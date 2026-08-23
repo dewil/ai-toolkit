@@ -21,6 +21,7 @@ import io
 import json
 import sqlite3
 import sys
+import time
 import tempfile
 import types
 import unittest
@@ -289,11 +290,14 @@ class PerChatDest(unittest.TestCase):
                 got = mod.resolve_dest("подпроект/чаты/Лариса")
                 self.assertEqual(got, (mod.PROJECT_ROOT / "подпроект/чаты/Лариса").resolve())
 
-    def test_resolve_dest_rejects_absolute(self):
+    def test_resolve_dest_takes_absolute_as_is(self):
+        """Политика сменилась 23.08.2026: абсолютный dest - штатный способ
+        увести зеркало из синкаемой папки, а не промах пальца. Прежний тест
+        требовал обратного и переписан вместе с правилом
+        (docs-maintenance.md, "Технические артефакты в синкаемой папке")."""
         for name, mod in (("snapshot", SNAPSHOT), ("deltas", DELTAS)):
             with self.subTest(mod=name):
-                with self.assertRaises(SystemExit):
-                    mod.resolve_dest("/tmp/чужое")
+                self.assertEqual(mod.resolve_dest("/tmp/зеркала/x"), Path("/tmp/зеркала/x"))
 
     def test_resolve_dest_rejects_escape(self):
         for name, mod in (("snapshot", SNAPSHOT), ("deltas", DELTAS)):
@@ -1102,5 +1106,282 @@ class RetryScopedToConnect(unittest.TestCase):
             self.assertGreater(found, 0, f"{name}: вызовов отправки не найдено")
 
 
+class MirrorPathsTest(unittest.TestCase):
+    """Зеркала уводятся из синкаемой папки проекта (docs-maintenance.md).
+
+    Регресс на правку 23.08.2026: до нее resolve_dest запрещал абсолютные
+    пути, а дефолт chats_root вел внутрь проекта - зеркало личной переписки
+    уезжало на все устройства пользователя, и ignore-правило после факта
+    ничего не спасало.
+    """
+
+    BOTH_MIRROR = (("snapshot", SNAPSHOT), ("deltas", DELTAS))
+
+    def test_absolute_dest_allowed(self):
+        for name, mod in self.BOTH_MIRROR:
+            with self.subTest(script=name):
+                self.assertEqual(mod.resolve_dest("/data/chats/x"), Path("/data/chats/x"))
+
+    def test_relative_dest_still_contained(self):
+        """Защита от опечатки "../.." снята быть не должна."""
+        for name, mod in self.BOTH_MIRROR:
+            with self.subTest(script=name):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        mod.resolve_dest("../../etc")
+
+    def test_relative_dest_resolves_inside_project(self):
+        for name, mod in self.BOTH_MIRROR:
+            with self.subTest(script=name):
+                self.assertEqual(
+                    mod.resolve_dest("Встречи/чаты/x"),
+                    (mod.PROJECT_ROOT / "Встречи/чаты/x").resolve(),
+                )
+
+    def test_absolute_chats_root_taken_as_is(self):
+        for name, mod in self.BOTH_MIRROR:
+            with self.subTest(script=name):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    root = mod.chats_root_path({"chats_root": "/data/chats/proj"})
+                self.assertEqual(root, Path("/data/chats/proj"))
+
+    def test_default_root_is_outside_project(self):
+        """Новый проект заводится сразу вне синка."""
+        for name, mod in self.BOTH_MIRROR:
+            with self.subTest(script=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    original = mod.PROJECT_ROOT
+                    mod.PROJECT_ROOT = Path(tmp)
+                    try:
+                        with contextlib.redirect_stderr(io.StringIO()):
+                            default = Path(mod.default_chats_root())
+                    finally:
+                        mod.PROJECT_ROOT = original
+                self.assertTrue(default.is_absolute())
+                self.assertTrue(default.is_relative_to(mod.MIRROR_STORE))
+
+    def test_existing_legacy_folder_wins_over_new_default(self):
+        """Проект, заведенный до правки, продолжает читать свою папку:
+        молчаливая смена пути начала бы качать историю заново, а старая
+        копия осталась бы в синке."""
+        for name, mod in self.BOTH_MIRROR:
+            with self.subTest(script=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    legacy = Path(tmp) / mod.LEGACY_CHATS_ROOT / "чат"
+                    legacy.mkdir(parents=True)
+                    (legacy / "result.json").write_text("{}", encoding="utf-8")
+                    original = mod.PROJECT_ROOT
+                    mod.PROJECT_ROOT = Path(tmp)
+                    try:
+                        with contextlib.redirect_stderr(io.StringIO()) as err:
+                            default = mod.default_chats_root()
+                    finally:
+                        mod.PROJECT_ROOT = original
+                self.assertEqual(default, mod.LEGACY_CHATS_ROOT)
+                if name == "snapshot":
+                    self.assertIn("Перенести", err.getvalue())
+
+    def test_empty_legacy_folder_does_not_hijack_default(self):
+        """Пустую папку создает и синк, и человек. Если она перехватывает
+        дефолт, прогон уводит выкачку обратно в синкаемое дерево, а дельты
+        начинают читать пустоту, пока снапшот пишет в хранилище."""
+        for name, mod in self.BOTH_MIRROR:
+            with self.subTest(script=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / mod.LEGACY_CHATS_ROOT).mkdir(parents=True)
+                    original = mod.PROJECT_ROOT
+                    mod.PROJECT_ROOT = Path(tmp)
+                    try:
+                        with contextlib.redirect_stderr(io.StringIO()):
+                            default = mod.default_chats_root()
+                    finally:
+                        mod.PROJECT_ROOT = original
+                self.assertNotEqual(default, mod.LEGACY_CHATS_ROOT)
+
+    def test_same_basename_different_projects_do_not_collide(self):
+        """/work/a/app и /work/b/app не должны делить хранилище: снапшот
+        второго уперся бы в чужой id, а дельты id не проверяют - и показали бы
+        переписку одного клиента как чат другого."""
+        for name, mod in self.BOTH_MIRROR:
+            with self.subTest(script=name):
+                slugs = set()
+                with tempfile.TemporaryDirectory() as tmp:
+                    for parent in ("client-a", "client-b"):
+                        root = Path(tmp) / parent / "app"
+                        root.mkdir(parents=True)
+                        original = mod.PROJECT_ROOT
+                        mod.PROJECT_ROOT = root
+                        try:
+                            slugs.add(mod.project_store_slug())
+                        finally:
+                            mod.PROJECT_ROOT = original
+                self.assertEqual(len(slugs), 2)
+
+    def test_label_cannot_escape_chats_root(self):
+        """Label подставляется в путь как есть, а chats_root теперь бывает где
+        угодно: без проверки границ зеркало молча уезжает мимо хранилища."""
+        for name, mod in self.BOTH_MIRROR:
+            with self.subTest(script=name):
+                root = Path("/data/зеркала/проект")
+                for bad in ("../чужое", "/etc/чужое"):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit):
+                            mod.resolve_label_target(root, bad)
+                self.assertEqual(
+                    mod.resolve_label_target(root, "1-1/Иванов"), root / "1-1/Иванов"
+                )
+
+    def test_label_collapsing_into_root_rejected(self):
+        """Пустой label и "." схлопываются в сам chats_root: result.json лег бы
+        в корень хранилища, а второй чат затер бы его."""
+        root = Path("/data/зеркала/проект")
+        for name, mod in self.BOTH_MIRROR:
+            for bad in ("", ".", "чат/.."):
+                with self.subTest(script=name, label=bad):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit):
+                            mod.resolve_label_target(root, bad)
+
+    def test_relative_chats_root_resolves_from_project(self):
+        """Проверяется в обоих скриптах: если deltas начнет считать
+        относительный путь от рабочего каталога, она будет читать чужую папку
+        при запуске не из корня проекта - и молча покажет ноль изменений."""
+        for name, mod in self.BOTH_MIRROR:
+            with self.subTest(script=name):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    got = mod.chats_root_path({"chats_root": "Встречи/чаты"})
+                self.assertEqual(got, (mod.PROJECT_ROOT / "Встречи/чаты").resolve())
+
+    def test_per_chat_dest_inside_project_warns(self):
+        """chats_root вне синка, а dest конкретного чата - внутри: раньше этот
+        случай молчал, хотя именно он и увез личную переписку."""
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            with contextlib.suppress(SystemExit):
+                SNAPSHOT.check_unique_targets(
+                    {"личный": {"id": 1, "topic_id": None, "dest": "чаты/личный", "media": True}},
+                    Path("/data/зеркала/проект"),
+                )
+        self.assertIn("внутрь проекта", err.getvalue())
+
+    def test_defaults_of_both_scripts_match_on_same_project(self):
+        """Сравнения одних констант мало: разошедшиеся функции дали бы разные
+        пути при одинаковых MIRROR_STORE, и дельты читали бы не ту папку."""
+        with tempfile.TemporaryDirectory() as tmp:
+            originals = [(mod, mod.PROJECT_ROOT) for _, mod in self.BOTH_MIRROR]
+            try:
+                for mod, _ in originals:
+                    mod.PROJECT_ROOT = Path(tmp)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    got = {mod.default_chats_root() for mod, _ in originals}
+            finally:
+                for mod, orig in originals:
+                    mod.PROJECT_ROOT = orig
+        self.assertEqual(len(got), 1)
+
+    def test_snapshot_and_deltas_agree_on_default(self):
+        """Расхождение дефолтов = deltas читает не ту папку и молча отдает
+        ноль новых сообщений вместо ошибки."""
+        self.assertEqual(SNAPSHOT.MIRROR_STORE, DELTAS.MIRROR_STORE)
+        self.assertEqual(SNAPSHOT.LEGACY_CHATS_ROOT, DELTAS.LEGACY_CHATS_ROOT)
+
+    def test_mirror_inside_project_warns(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            SNAPSHOT.chats_root_path({"chats_root": "Встречи/чаты"})
+        self.assertIn("внутрь проекта", err.getvalue())
+
+
+class MediaSettingsTest(unittest.TestCase):
+    """TTL и путь медиа-кэша настраиваются: копий скрипта на машине много,
+    правка константы не переживает /canon."""
+
+    def setUp(self):
+        self.cache, self.ttl = SNAPSHOT.MEDIA_CACHE, SNAPSHOT.MEDIA_TTL_HOURS
+
+    def tearDown(self):
+        SNAPSHOT.MEDIA_CACHE, SNAPSHOT.MEDIA_TTL_HOURS = self.cache, self.ttl
+
+    def test_default_ttl_is_week(self):
+        self.assertEqual(self.ttl, 168)
+
+    def test_config_overrides_media(self):
+        ok = SNAPSHOT.MIRROR_STORE / "медиа-тест"
+        SNAPSHOT.apply_media_settings({"media_cache": str(ok), "media_ttl_hours": 12})
+        self.assertEqual(SNAPSHOT.MEDIA_CACHE, ok)
+        self.assertEqual(SNAPSHOT.MEDIA_TTL_HOURS, 12)
+
+    def test_bad_ttl_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                SNAPSHOT.apply_media_settings({"media_ttl_hours": "неделя"})
+
+    def test_home_as_cache_rejected(self):
+        """media_cache="~" + отрицательный TTL превращали проектный конфиг в
+        примитив рекурсивного удаления домашнего каталога: кэш чистится
+        рекурсивно, а cutoff при TTL <= 0 уезжает в будущее."""
+        for bad in ("~", str(Path.home()), "/", str(Path.home().parent)):
+            with self.subTest(path=bad):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        SNAPSHOT.apply_media_settings({"media_cache": bad})
+
+    def test_cache_outside_allowed_roots_rejected(self):
+        """Симлинк или прямой путь на чужой каталог (`~/.ssh`, `~/Documents`)
+        проходил проверку "не дом и не корень", а чистка по TTL вынесла бы его
+        содержимое. Разрешены только хранилище зеркал и ~/.cache."""
+        for bad in (Path.home() / ".ssh", Path.home() / "Документы", Path("/var/tmp/кэш")):
+            with self.subTest(path=str(bad)):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        SNAPSHOT.apply_media_settings({"media_cache": str(bad)})
+
+    def test_relative_cache_rejected(self):
+        """Относительный путь считается от cwd: cron и ручной запуск чистили бы
+        разные деревья."""
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                SNAPSHOT.apply_media_settings({"media_cache": "кэш"})
+
+    def test_nonpositive_ttl_rejected(self):
+        for bad in (-1, 0, False):
+            with self.subTest(ttl=bad):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        SNAPSHOT.apply_media_settings({"media_ttl_hours": bad})
+
+    def test_second_config_does_not_inherit_first(self):
+        """Конфиг A задал путь, конфиг B в том же процессе его не задает -
+        B обязан получить дефолт, а не унаследовать чужой каталог."""
+        SNAPSHOT.apply_media_settings(
+            {"media_cache": str(SNAPSHOT.MIRROR_STORE / "зеркала-a"), "media_ttl_hours": 5}
+        )
+        SNAPSHOT.apply_media_settings({})
+        self.assertEqual(SNAPSHOT.MEDIA_CACHE, SNAPSHOT.MEDIA_CACHE_DEFAULT)
+        self.assertEqual(SNAPSHOT.MEDIA_TTL_HOURS, SNAPSHOT.MEDIA_TTL_DEFAULT)
+
+    def test_cleanup_refuses_dangerous_cache(self):
+        """Вторая линия: путь мог прийти переменной окружения, мимо валидации
+        конфига."""
+        SNAPSHOT.MEDIA_CACHE = Path.home()
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                SNAPSHOT.cleanup_old_media()
+
+    def test_cleanup_reads_ttl_at_call_time(self):
+        """Дефолт-аргумент функции застыл бы на импортном значении и молча
+        игнорировал настройку проекта."""
+        with tempfile.TemporaryDirectory() as tmp:
+            SNAPSHOT.MEDIA_CACHE = Path(tmp)
+            old = Path(tmp) / "old.bin"
+            old.write_bytes(b"x")
+            import os as _os
+            long_ago = time.time() - 100 * 3600
+            _os.utime(old, (long_ago, long_ago))
+            SNAPSHOT.MEDIA_TTL_HOURS = 200
+            self.assertEqual(SNAPSHOT.cleanup_old_media(), 0)
+            SNAPSHOT.MEDIA_TTL_HOURS = 10
+            self.assertEqual(SNAPSHOT.cleanup_old_media(), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

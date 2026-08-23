@@ -28,6 +28,10 @@
     один раз на устройство, один аккаунт Telegram. Не коммитить.
   - Проектные чаты - в .telegram-snapshot.json в корне проекта (рядом со скриптом),
     {chats_root, chats: {label: chat_id}}. Не секрет, можно коммитить.
+    chats_root может быть абсолютным - так зеркала уводятся из синкаемой
+    папки; по умолчанию берется хранилище вне синка (TELEGRAM_SNAPSHOT_STORE,
+    дефолт ~/.local/share/telegram-snapshot/chats). Необязательные ключи
+    media_cache и media_ttl_hours перекрывают путь и TTL медиа-кэша.
 
 Запуск:
     python3 scripts/telegram-snapshot.py
@@ -40,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -85,13 +90,38 @@ AUTH_PATH = AUTH_DIR / "auth.json"
 LOCK_ATTEMPTS = 5
 LOCK_DELAY = 15
 
+def _env_path(name: str, default: Path) -> Path:
+    raw = os.environ.get(name)
+    return Path(raw).expanduser() if raw else default
+
+
+# Зеркала чатов живут ВНЕ синкаемого дерева проекта: папка проекта едет на все
+# устройства пользователя и в облачные бэкапы, а зеркало личной переписки -
+# сотни мегабайт чужих сообщений (docs-maintenance.md, "Технические артефакты
+# в синкаемой папке"). Хранилище задается переменной окружения на устройстве,
+# дефолт - XDG-каталог данных.
+MIRROR_STORE = _env_path(
+    "TELEGRAM_SNAPSHOT_STORE", Path.home() / ".local" / "share" / "telegram-snapshot" / "chats"
+)
+if not MIRROR_STORE.is_absolute():
+    sys.exit(
+        f"TELEGRAM_SNAPSHOT_STORE={str(MIRROR_STORE)!r}: нужен абсолютный путь. "
+        "Относительный считается от рабочего каталога и легко превращает "
+        "хранилище вне синка в папку внутри проекта"
+    )
+LEGACY_CHATS_ROOT = "Встречи/чаты"
+
 # Вложения качаются в локальный НЕсинкаемый кэш (не в vault/проект - там бывают
 # секреты клиентов, а папки проекта синкаются в облако). result.json остается
 # текстовым (медиа туда НЕ пишем); корреляция сообщение<->файл по <msg_id> в
 # имени файла кэша + метаданные file_name/mime в самой записи. TTL: на каждом
-# запуске чистим файлы старше суток.
-MEDIA_CACHE = Path.home() / ".cache" / "telegram-snapshot" / "media"
-MEDIA_TTL_HOURS = 24
+# запуске чистим файлы старше него. Оба значения перекрываются переменными
+# окружения и ключами проектного конфига (media_cache, media_ttl_hours):
+# копий скрипта на машине много, локальная правка констант не переживет /canon.
+MEDIA_CACHE = _env_path("TELEGRAM_SNAPSHOT_MEDIA", Path.home() / ".cache" / "telegram-snapshot" / "media")
+MEDIA_TTL_HOURS = int(os.environ.get("TELEGRAM_SNAPSHOT_MEDIA_TTL", "168"))
+MEDIA_CACHE_DEFAULT = MEDIA_CACHE
+MEDIA_TTL_DEFAULT = MEDIA_TTL_HOURS
 PROJECT_CONFIG_PATH = PROJECT_ROOT / ".telegram-snapshot.json"
 
 ENTITY_MAP = {
@@ -322,19 +352,35 @@ def chat_entry(value) -> dict:
 
 
 def resolve_dest(dest: str) -> Path:
-    """dest из конфига -> абсолютный путь, строго внутри проекта.
+    """dest из конфига -> абсолютный путь.
 
-    Абсолютные пути и выход из корня (`..`) отклоняются: dest задает папку
-    ПРОЕКТА, а опечатка вида "../..." молча писала бы зеркало чата вне
-    рабочего дерева.
+    Абсолютный путь разрешен и является штатным способом увести зеркало из
+    синкаемого дерева. Относительный по-прежнему обязан остаться внутри
+    проекта: опечатка вида "../..." молча писала бы зеркало мимо и проекта,
+    и хранилища. Абсолютный путь - осознанное указание, а не промах пальца.
     """
-    p = Path(dest)
+    p = Path(dest).expanduser()
     if p.is_absolute():
-        sys.exit(f"dest {dest!r}: абсолютный путь не допускается - укажите путь от корня проекта")
+        return p.resolve()
     resolved = (PROJECT_ROOT / p).resolve()
     if not resolved.is_relative_to(PROJECT_ROOT.resolve()):
-        sys.exit(f"dest {dest!r}: выходит за пределы проекта")
+        sys.exit(f"dest {dest!r}: относительный путь выходит за пределы проекта")
     return resolved
+
+
+def resolve_label_target(chats_root: Path, label: str) -> Path:
+    """chats_root/<label> с проверкой границ.
+
+    Label подставляется в путь как есть, а chats_root теперь бывает где угодно:
+    абсолютный label или label с ".." увел бы зеркало мимо хранилища молча.
+    """
+    target = (chats_root / label).resolve()
+    root = chats_root.resolve()
+    if not target.is_relative_to(root):
+        sys.exit(f"label {label!r}: выходит за пределы chats_root ({chats_root})")
+    if target == root:
+        sys.exit(f"label {label!r}: схлопывается в сам chats_root - зеркало легло бы в корень хранилища")
+    return target
 
 
 def check_unique_targets(chats: dict, chats_root: Path) -> None:
@@ -347,7 +393,8 @@ def check_unique_targets(chats: dict, chats_root: Path) -> None:
     все равно патология конфига, строгость дешевле детекта ФС."""
     targets: dict[str, str] = {}
     for label, entry in chats.items():
-        tgt = resolve_dest(entry["dest"]) if entry.get("dest") else (chats_root / label).resolve()
+        tgt = resolve_dest(entry["dest"]) if entry.get("dest") else resolve_label_target(chats_root, label)
+        warn_if_inside_project(tgt, f"зеркало чата {label!r}")
         key = str(tgt).casefold()
         if key in targets:
             sys.exit(
@@ -385,12 +432,130 @@ def load_project_config() -> dict:
     except (ValueError, TypeError) as exc:
         sys.stderr.write(f"В {PROJECT_CONFIG_PATH} некорректная запись chats: {exc}\n")
         sys.exit(2)
-    cfg.setdefault("chats_root", "Встречи/чаты")
+    if "chats_root" not in cfg:
+        cfg["chats_root"] = default_chats_root()
+    apply_media_settings(cfg)
     return cfg
 
 
+def project_store_slug() -> str:
+    """Имя папки проекта плюс хвост хеша полного пути.
+
+    Одного basename недостаточно: /work/client-a/app и /work/client-b/app дали
+    бы одно хранилище, снапшот второго уперся бы в чужой id, а дельты id не
+    проверяют - и показали бы переписку одного клиента как чат другого.
+    """
+    root = PROJECT_ROOT.resolve()
+    return f"{root.name}-{hashlib.sha1(str(root).encode('utf-8')).hexdigest()[:8]}"
+
+
+def legacy_has_mirrors() -> bool:
+    """Legacy-папка перехватывает дефолт, только если в ней ЕСТЬ зеркала.
+
+    Проверять существование мало: пустую папку создает и синк, и сам
+    пользователь, и тогда прогон уводит выкачку обратно в синкаемое дерево -
+    ровно то, от чего уходим.
+    """
+    legacy = PROJECT_ROOT / LEGACY_CHATS_ROOT
+    if not legacy.is_dir():
+        return False
+    # ровно те глубины, на которых зеркала и лежат: <root>/<label>/result.json и
+    # <root>/<группа>/<label>/result.json. Полный rglob стоил бы обхода всего
+    # дерева и считал бы зеркалом любой result.json в архивной подпапке
+    return any(legacy.glob("*/result.json")) or any(legacy.glob("*/*/result.json"))
+
+
+def warn_if_inside_project(path: Path, what: str) -> None:
+    """Зеркало внутри проекта - не отказ, но и не молчание."""
+    if path.resolve().is_relative_to(PROJECT_ROOT.resolve()):
+        sys.stderr.write(
+            f"внимание: {what} пишется внутрь проекта ({path}) - если папка проекта синкается,\n"
+            "выгрузка уедет на все устройства и в бэкапы, и исключение задним числом этого не отменит\n"
+            '(docs-maintenance.md, "Технические артефакты в синкаемой папке").\n'
+        )
+
+
+def default_chats_root() -> str:
+    """Куда писать зеркала, если проект не сказал явно.
+
+    Дефолт - хранилище вне синка. Но у проекта, заведенного до этого
+    изменения, зеркала уже лежат в `Встречи/чаты`: молча сменив путь, скрипт
+    начал бы качать историю заново в другое место, а старая копия осталась бы
+    в синке - ровно то, от чего уходим. Поэтому существующая legacy-папка
+    выигрывает у дефолта, а пользователю печатается, как перенести.
+    """
+    legacy = PROJECT_ROOT / LEGACY_CHATS_ROOT
+    if legacy_has_mirrors():
+        sys.stderr.write(
+            f"зеркала лежат в синкаемой папке проекта ({legacy}).\n"
+            f"Перенести: mv {str(legacy)!r} {str(MIRROR_STORE / project_store_slug())!r} и прописать\n"
+            f'  "chats_root": "{MIRROR_STORE / project_store_slug()}"\n'
+            f"в {PROJECT_CONFIG_PATH}. Пока читаю старый путь.\n"
+        )
+        return LEGACY_CHATS_ROOT
+    return str(MIRROR_STORE / project_store_slug())
+
+
+def apply_media_settings(cfg: dict) -> None:
+    """Проектный конфиг перекрывает переменные окружения и дефолты.
+
+    Значения валидируются, потому что кэш чистится РЕКУРСИВНО по TTL: пара
+    media_cache="~" + media_ttl_hours=-1 сделала бы из проектного конфига
+    примитив удаления всего домашнего каталога (cutoff уезжает в будущее, под
+    "старше TTL" попадает каждый файл). Сброс к дефолтам обязателен: второй
+    конфиг в том же процессе иначе унаследовал бы путь от первого.
+    """
+    global MEDIA_CACHE, MEDIA_TTL_HOURS
+    MEDIA_CACHE, MEDIA_TTL_HOURS = MEDIA_CACHE_DEFAULT, MEDIA_TTL_DEFAULT
+    raw = cfg.get("media_cache")
+    if raw:
+        path = Path(str(raw)).expanduser()
+        if not path.is_absolute():
+            sys.exit(f"media_cache {str(raw)!r}: нужен абсолютный путь (относительный зависит от cwd)")
+        MEDIA_CACHE = validated_cache_dir(path, "media_cache")
+    ttl = cfg.get("media_ttl_hours")
+    if ttl is not None:
+        if isinstance(ttl, bool):
+            sys.exit(f"media_ttl_hours: ожидалось целое число часов, получено {ttl!r}")
+        try:
+            ttl = int(ttl)
+        except (TypeError, ValueError):
+            sys.exit(f"media_ttl_hours: ожидалось число, получено {cfg['media_ttl_hours']!r}")
+        if ttl < 1:
+            sys.exit(
+                f"media_ttl_hours={ttl}: нужно целое >= 1. Кэш чистится рекурсивно, "
+                "а TTL <= 0 сдвигает границу в будущее и удаляет все содержимое"
+            )
+        MEDIA_TTL_HOURS = ttl
+
+
+def validated_cache_dir(path: Path, what: str) -> Path:
+    """Каталог, который можно рекурсивно чистить, не унеся чужое."""
+    resolved = path.resolve()
+    home = Path.home().resolve()
+    if resolved == Path(resolved.anchor) or resolved == home or home.is_relative_to(resolved):
+        sys.exit(
+            f"{what} {str(path)!r}: нельзя указывать корень ФС, домашний каталог или его родителя - "
+            "содержимое этой папки чистится по TTL рекурсивно"
+        )
+    if resolved.is_relative_to(PROJECT_ROOT.resolve()):
+        sys.exit(f"{what} {str(path)!r}: внутри проекта - вложения уедут в синк, укажите путь вне его")
+    allowed = (MIRROR_STORE.resolve(), (Path.home() / ".cache").resolve())
+    if not any(resolved.is_relative_to(a) for a in allowed):
+        sys.exit(
+            f"{what} {str(path)!r}: разрешены только каталоги внутри {allowed[0]} или {allowed[1]}. "
+            "Папка чистится по TTL рекурсивно, поэтому произвольный путь (в том числе через симлинк) "
+            "означал бы удаление чужих файлов"
+        )
+    return resolved
+
+
 def chats_root_path(project_cfg: dict) -> Path:
-    return PROJECT_ROOT / project_cfg["chats_root"]
+    """chats_root -> абсолютный путь. Абсолютный в конфиге берется как есть."""
+    raw = Path(str(project_cfg["chats_root"])).expanduser()
+    root = raw.resolve() if raw.is_absolute() else (PROJECT_ROOT / raw).resolve()
+    warn_if_inside_project(root, "chats_root")
+    return root
 
 
 def load_existing(result_path: Path) -> dict:
@@ -751,8 +916,21 @@ async def download_message_media(client: TelegramClient, msg, chat_media_dir: Pa
         return None
 
 
-def cleanup_old_media(ttl_hours: int = MEDIA_TTL_HOURS) -> int:
-    """Удаляет файлы медиа-кэша старше ttl_hours (по mtime). Возвращает число удаленных."""
+def cleanup_old_media(ttl_hours: int | None = None) -> int:
+    """Удаляет файлы медиа-кэша старше ttl_hours (по mtime). Возвращает число удаленных.
+
+    Значение по умолчанию берется в момент вызова, а не в момент импорта:
+    проектный конфиг перекрывает MEDIA_TTL_HOURS уже после загрузки модуля,
+    и defaults-аргумент застыл бы на дефолте, молча игнорируя настройку.
+    """
+    if ttl_hours is None:
+        ttl_hours = MEDIA_TTL_HOURS
+    if ttl_hours < 1:
+        sys.exit(f"TTL медиа-кэша {ttl_hours}: рекурсивная чистка с такой границей удалила бы все")
+    cache = MEDIA_CACHE.resolve() if MEDIA_CACHE.exists() else MEDIA_CACHE
+    home = Path.home().resolve()
+    if cache == Path(cache.anchor) or cache == home or home.is_relative_to(cache):
+        sys.exit(f"медиа-кэш {MEDIA_CACHE}: корень, дом или его родитель - чистить рекурсивно нельзя")
     if not MEDIA_CACHE.exists():
         return 0
     cutoff = time.time() - ttl_hours * 3600
