@@ -15,7 +15,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,15 +48,77 @@ def chat_entry(value) -> dict:
 
 
 def resolve_dest(dest: str) -> Path:
-    """dest из конфига -> абсолютный путь, строго внутри проекта (зеркально
-    telegram-snapshot.py: тот же конфиг обязан читаться из той же папки)."""
-    p = Path(dest)
+    """dest из конфига -> абсолютный путь (зеркально telegram-snapshot.py:
+    тот же конфиг обязан читаться из той же папки).
+
+    Абсолютный путь разрешен - им зеркала уводятся из синкаемой папки.
+    Относительный обязан остаться внутри проекта: опечатка "../.." писала бы
+    мимо. Расхождение с telegram-snapshot.py здесь означало бы, что deltas
+    ищет зеркала не там, где их пишет снапшот, и молча выдает пустые дельты."""
+    p = Path(dest).expanduser()
     if p.is_absolute():
-        sys.exit(f"dest {dest!r}: абсолютный путь не допускается - укажите путь от корня проекта")
+        return p.resolve()
     resolved = (PROJECT_ROOT / p).resolve()
     if not resolved.is_relative_to(PROJECT_ROOT.resolve()):
-        sys.exit(f"dest {dest!r}: выходит за пределы проекта")
+        sys.exit(f"dest {dest!r}: относительный путь выходит за пределы проекта")
     return resolved
+
+
+MIRROR_STORE = (
+    Path(os.environ["TELEGRAM_SNAPSHOT_STORE"]).expanduser()
+    if os.environ.get("TELEGRAM_SNAPSHOT_STORE")
+    else Path.home() / ".local" / "share" / "telegram-snapshot" / "chats"
+)
+if not MIRROR_STORE.is_absolute():
+    sys.exit(
+        f"TELEGRAM_SNAPSHOT_STORE={str(MIRROR_STORE)!r}: нужен абсолютный путь. "
+        "Относительный считается от рабочего каталога и легко превращает "
+        "хранилище вне синка в папку внутри проекта"
+    )
+LEGACY_CHATS_ROOT = "Встречи/чаты"
+
+
+def project_store_slug() -> str:
+    """Зеркально telegram-snapshot.py: basename плюс хвост хеша полного пути,
+    иначе два проекта с одинаковым именем папки делят одно хранилище."""
+    root = PROJECT_ROOT.resolve()
+    return f"{root.name}-{hashlib.sha1(str(root).encode('utf-8')).hexdigest()[:8]}"
+
+
+def legacy_has_mirrors() -> bool:
+    """Зеркально telegram-snapshot.py: пустая папка дефолт не перехватывает.
+    Иначе созданная синком пустая директория переключала бы дельты на legacy,
+    пока снапшот пишет в хранилище - и дельты молча показывали бы ноль."""
+    legacy = PROJECT_ROOT / LEGACY_CHATS_ROOT
+    if not legacy.is_dir():
+        return False
+    return any(legacy.glob("*/result.json")) or any(legacy.glob("*/*/result.json"))
+
+
+def default_chats_root() -> str:
+    """Зеркально telegram-snapshot.py: дефолт - хранилище вне синка, но уже
+    существующая legacy-папка проекта выигрывает. Логика обязана совпадать с
+    той, что в снапшоте, иначе deltas читает не ту папку и молча отдает ноль
+    новых сообщений вместо ошибки."""
+    if legacy_has_mirrors():
+        return LEGACY_CHATS_ROOT
+    return str(MIRROR_STORE / project_store_slug())
+
+
+def chats_root_path(project_cfg: dict) -> Path:
+    raw = Path(str(project_cfg["chats_root"])).expanduser()
+    return raw.resolve() if raw.is_absolute() else (PROJECT_ROOT / raw).resolve()
+
+
+def resolve_label_target(chats_root: Path, label: str) -> Path:
+    """Зеркально telegram-snapshot.py: label не должен уводить за chats_root."""
+    target = (chats_root / label).resolve()
+    root = chats_root.resolve()
+    if not target.is_relative_to(root):
+        sys.exit(f"label {label!r}: выходит за пределы chats_root ({chats_root})")
+    if target == root:
+        sys.exit(f"label {label!r}: схлопывается в сам chats_root - зеркало легло бы в корень хранилища")
+    return target
 
 
 def check_unique_targets(chats: dict, chats_root: Path) -> None:
@@ -63,7 +127,7 @@ def check_unique_targets(chats: dict, chats_root: Path) -> None:
     своей проверки читал бы одну папку под двумя labels."""
     targets: dict[str, str] = {}
     for label, entry in chats.items():
-        tgt = resolve_dest(entry["dest"]) if entry.get("dest") else (chats_root / label).resolve()
+        tgt = resolve_dest(entry["dest"]) if entry.get("dest") else resolve_label_target(chats_root, label)
         key = str(tgt).casefold()
         if key in targets:
             sys.exit(
@@ -90,7 +154,8 @@ def load_project_config() -> dict:
     except (ValueError, TypeError) as exc:
         sys.stderr.write(f"В {PROJECT_CONFIG_PATH} некорректная запись chats: {exc}\n")
         sys.exit(2)
-    cfg.setdefault("chats_root", "Встречи/чаты")
+    if "chats_root" not in cfg:
+        cfg["chats_root"] = default_chats_root()
     return cfg
 
 
@@ -184,7 +249,7 @@ def main() -> int:
     args = p.parse_args()
 
     project_cfg = load_project_config()
-    chats_root = PROJECT_ROOT / project_cfg["chats_root"]
+    chats_root = chats_root_path(project_cfg)
     check_unique_targets(project_cfg["chats"], chats_root)
     labels = list(project_cfg["chats"].keys())
     group_labels = [l for l in labels if not l.startswith(PERSONAL_PREFIX)]

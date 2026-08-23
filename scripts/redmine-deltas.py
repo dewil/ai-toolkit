@@ -75,9 +75,17 @@ def format_issue_short(issue: dict) -> str:
     return f"({v}/{c}) {subj}"
 
 
+def resolve_root(raw: str) -> Path:
+    """Зеркально redmine-snapshot.py: абсолютный tasks_root берется как есть,
+    "~" раскрывается. Расхождение с записывающим скриптом означало бы, что
+    дельты читают другой файл и вечно показывают устаревшее."""
+    p = Path(str(raw)).expanduser()
+    return p.resolve() if p.is_absolute() else (PROJECT_ROOT / p).resolve()
+
+
 def main() -> int:
     cfg = load_project_config()
-    tasks_root = PROJECT_ROOT / cfg["tasks_root"]
+    tasks_root = resolve_root(cfg["tasks_root"])
     snapshot_path = tasks_root / "_redmine-snapshot.json"
     prev_path = tasks_root / "_redmine-snapshot.prev.json"
 
