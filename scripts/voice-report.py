@@ -48,9 +48,12 @@ CHUNK_LIMIT = 800
 # прослушивания обоих: на скорости 1,5 он разборчивее мужского.
 SPEAKERS = ("xenia", "baya", "kseniya", "eugene", "aidar")
 # Слушатель держит в клиенте скорость 1,5 и переключать ее ради наших сообщений
-# не станет. Поэтому синтез замедляется так, чтобы НА ЕГО скорости речь звучала
-# естественно: 1/1.5 = 0.67. Слушать такое на 1x специально не предполагается.
-DEFAULT_TEMPO = 0.67
+# не станет, поэтому синтез замедляется под нее. Чистая арифметика дала бы
+# 1/1.5 = 0.67, но на слух это оказалось медленно (проверено dwl 23.08.2026):
+# Silero и без того говорит размеренно, и компенсировать скорость плеера
+# полностью не нужно. 0.8 - примерно на пятую часть быстрее прежнего.
+# Слушать на 1x специально не предполагается.
+DEFAULT_TEMPO = 0.8
 LISTENING_SPEED = 1.5
 HERE = Path(__file__).resolve().parent
 
@@ -120,12 +123,22 @@ def ensure_model() -> Path:
 
 
 def reexec_in_venv() -> None:
-    """torch живет в venv; свой интерпретатор ему не нужен, чужой - не подходит."""
+    """torch живет в venv; свой интерпретатор ему не нужен, чужой - не подходит.
+
+    Маркер в окружении обязателен: venv, в котором torch тоже нет, вызывал бы
+    сам себя без конца - процесс живет, работа не идет, в логе тишина.
+    """
+    if os.environ.get("VOICE_REPORT_REEXEC"):
+        sys.exit(
+            f"в {VENV_PYTHON} нет torch (перезапуск уже был). Поставь его туда "
+            "или укажи другой интерпретатор через VOICE_REPORT_PYTHON"
+        )
     if not VENV_PYTHON.exists():
         sys.exit(
             f"нет torch в текущем python и нет venv {VENV_PYTHON}.\n"
             "Укажи интерпретатор с torch через VOICE_REPORT_PYTHON."
         )
+    os.environ["VOICE_REPORT_REEXEC"] = "1"
     os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
 
 
@@ -158,10 +171,18 @@ def write_wav(audio, path: Path) -> float:
     return len(samples) / SAMPLE_RATE
 
 
-def to_opus(wav: Path, out: Path, tempo: float = DEFAULT_TEMPO) -> None:
+def find_ffmpeg() -> str:
     ffmpeg = shutil.which("ffmpeg") or str(Path.home() / ".local" / "bin" / "ffmpeg")
-    if not Path(ffmpeg).exists() and not shutil.which("ffmpeg"):
+    if not Path(ffmpeg).exists():
         sys.exit("нужен ffmpeg с libopus - без него Telegram не примет файл как голосовое")
+    probe = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True)
+    if "libopus" not in probe.stdout:
+        sys.exit(f"{ffmpeg} собран без libopus - голосовое из него не соберется")
+    return ffmpeg
+
+
+def to_opus(wav: Path, out: Path, tempo: float = DEFAULT_TEMPO) -> None:
+    ffmpeg = find_ffmpeg()
     # 32 кбит/с моно - формат голосовых Telegram; больше не нужно, речь не музыка
     filters = [] if abs(tempo - 1.0) < 0.01 else [f"atempo={tempo:.3f}"]
     cmd = [ffmpeg, "-y", "-loglevel", "error", "-i", str(wav)]
@@ -233,15 +254,27 @@ def main() -> int:
             "и сверка получателя, которых у этого пути нет"
         )
 
-    if args.text:
+    if args.text is not None:
+        if not args.text.strip():
+            sys.exit("--text задан пустой строкой - проверь переменную с текстом")
         raw = args.text
-    elif args.file:
-        raw = Path(args.file).expanduser().read_text(encoding="utf-8")
+    elif args.file is not None:
+        if not args.file:
+            sys.exit("--file задан пустой строкой - проверь переменную с путем")
+        source = Path(args.file).expanduser()
+        if not source.is_file():
+            sys.exit(f"файл не найден: {source}")
+        raw = source.read_text(encoding="utf-8")
     else:
         raw = sys.stdin.read()
     text = strip_markup(raw)
     if not text.strip():
         sys.exit("пустой текст - озвучивать нечего")
+    if not re.search(r"\w", text):
+        sys.exit("в тексте нет ни одного слова - озвучивать нечего")
+    if not 0.5 <= args.tempo <= 2.0:
+        sys.exit(f"--tempo {args.tempo}: ffmpeg принимает множитель от 0.5 до 2.0")
+    find_ffmpeg()
 
     try:
         import torch  # noqa: F401
@@ -250,12 +283,13 @@ def main() -> int:
 
     chunks = split_chunks(text)
     audio = synthesize(chunks, args.speaker, args.threads)
-    out = Path(args.out).expanduser() if args.out else Path(tempfile.gettempdir()) / "voice-report.ogg"
-    out.parent.mkdir(parents=True, exist_ok=True)
+    if args.out:
+        out = Path(args.out).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        out = Path(tempfile.mkdtemp(prefix="voice-report-")) / "итог.ogg"
     wav = out.with_suffix(".wav")
     seconds = write_wav(audio, wav)
-    if not 0.5 <= args.tempo <= 2.0:
-        sys.exit(f"--tempo {args.tempo}: ffmpeg принимает множитель от 0.5 до 2.0")
     to_opus(wav, out, args.tempo)
     if not args.keep_wav:
         wav.unlink(missing_ok=True)
