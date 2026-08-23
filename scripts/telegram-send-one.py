@@ -35,8 +35,14 @@ tgs = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(tgs)
 
 
+SAVED = "me"  # Telegram-адрес собственного чата ("Избранное")
+
+
 async def amain(args) -> int:
-    chat_id = int(args.chat_id)
+    # "me" - собственное "Избранное": туда уходят отчеты самому себе, и туда не
+    # применимы гейты про живого получателя (outbound-timing.md: "на том конце
+    # нет человека" - точнее, там сам отправитель)
+    chat_id = SAVED if str(args.chat_id).strip().lower() == SAVED else int(args.chat_id)
     # None и "" различаются: --file "$VAR" с пустой переменной - это заданный
     # файловый режим, а не его отсутствие; молча уйти текстом было бы враньем
     if args.file is not None and not args.file:
@@ -84,7 +90,9 @@ async def amain(args) -> int:
                 dialog_entities[eid] = d.entity
 
         try:
-            entity = await tgs.resolve_entity(client, chat_id, dialog_entities)
+            entity = (await client.get_me()) if chat_id == SAVED else await tgs.resolve_entity(
+                client, chat_id, dialog_entities
+            )
         except Exception as exc:
             sys.stderr.write(f"Не удалось найти чат id {chat_id}: {exc}\n")
             return 1
@@ -130,10 +138,12 @@ async def amain(args) -> int:
         reply_to = tgs.build_reply_to(args.topic, args.reply_to)
         parse_mode = "html" if args.html else None
         if file_path:
-            # файл с подписью-текстом; force_document - имя и расширение как есть
+            # voice_note - проигрываемое голосовое; force_document отправил бы
+            # тот же ogg вложением, которое в дороге не послушать
             sent = await client.send_file(
                 entity, str(file_path), caption=text, reply_to=reply_to,
-                force_document=True, parse_mode=parse_mode, silent=args.silent,
+                force_document=not args.voice, voice_note=args.voice,
+                parse_mode=parse_mode, silent=args.silent,
             )
         else:
             sent = await client.send_message(
@@ -150,12 +160,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Отправка сообщения в один Telegram-чат по id, минуя .telegram-snapshot.json."
     )
-    parser.add_argument("chat_id", help="числовой id чата (как в telegram-pull-one.py)")
+    parser.add_argument("chat_id", help="числовой id чата (как в telegram-pull-one.py) "
+                                        "или \"me\" - собственное Избранное")
     parser.add_argument("username", nargs="?", default=None,
                         help="ожидаемый username для сверки (без @); при несовпадении - стоп")
     parser.add_argument("--text", help="текст сообщения; если опущен - читается из stdin")
     parser.add_argument("--file", help="путь к файлу-вложению; текст уходит подписью к нему "
                                        "(лимит Telegram - 1024 символа, длиннее - двумя сообщениями)")
+    parser.add_argument("--voice", action="store_true",
+                        help="отправить файл голосовым сообщением (ogg/opus), а не вложением. "
+                             "Телеграм проигрывает такое прямо в ленте - нужно, когда получатель "
+                             "слушает на ходу и читать не может")
     parser.add_argument("--send", action="store_true", help="реально отправить (без флага - dry-run)")
     parser.add_argument("--no-pace-check", action="store_true", dest="no_pace_check",
                         help="не проверять паузу после предыдущего сообщения в этот чат "
