@@ -50,6 +50,7 @@ universal:
   - skills/md-pdf/SKILL.md              # рендер markdown в PDF (для чтения и рассылки)
   - skills/md-docx/SKILL.md             # сборка .docx из markdown (когда документ пойдет на правки)
   - skills/harvest-canon/SKILL.md       # оформить переиспользуемый прием проекта в upstream-кандидат канона
+  - skills/backlog-task/SKILL.md        # побочную находку - в файл-таску бэклога, а не в текущий диф
   - skills/memory-compact/SKILL.md      # свертка разросшейся автопамяти: слить записи об одном сюжете, снять отработавшее, пересобрать индекс
   - skills/session-cost/SKILL.md        # подсчет токенов сессии Claude Code из транскрипта (смета, отчет)
   - commands/canon.md                   # /canon = синхронизация проекта с каноном
@@ -70,6 +71,9 @@ universal:
   - skills/agent-browser/runbook-mac.md # пошаговая установка схемы на macOS
   - skills/agent-browser/runbook-linux.md # пошаговая установка схемы на Linux (systemd, проверено на Ubuntu 24.04)
   - scripts/chrome-cookies.py           # бэкап/восстановление кук браузерной сессии через CDP (дамп - секрет, см. secrets-handling)
+  - skills/voice-report/SKILL.md        # озвучить итог работы и прислать голосовым в Telegram (для дороги)
+  - scripts/voice-report.py             # движок озвучки: Silero TTS offline -> ogg/opus -> свой бот (или Избранное)
+  - scripts/tg-bot-voice.py             # голосовой канал с владельцем через своего бота: отправка и расшифровка ответа
 
 coding:
   - rules/karpathy-guidelines.md        # снижение типовых LLM-ошибок в коде (простота, хирургичность)
