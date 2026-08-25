@@ -103,6 +103,7 @@
 @./rules/addressing.md
 @./rules/agent-as-user-voice.md
 @./rules/outbound-timing.md
+@./rules/outbound-checklist.md
 @./rules/secrets-handling.md
 @./rules/untrusted-content.md
 @./rules/memory-persistence.md
