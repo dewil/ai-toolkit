@@ -698,5 +698,74 @@ class TestDryRun(unittest.TestCase):
         self.assertEqual(board.puts, [])
 
 
+class Sections(unittest.TestCase):
+    """Технический блок общий на два скрипта: свои секции заменяем, чужие
+    известные сохраняем. Наивный общий реестр заголовков был бы ХУЖЕ прежнего
+    состояния: узнав чужую секцию своим блоком, замена стерла бы ее."""
+
+    def item(self, gid):
+        return f'- <a data-asana-gid="{gid}"/>'
+
+    def test_foreign_section_survives_own_rewrite(self):
+        old = [ab.ORIGIN_HEAD, self.item("9"), ab.WAITS_HEAD, self.item("1")]
+        out = ab.merge_sections(old, ab.OWN_HEADS, [ab.WAITS_HEAD, self.item("2")])
+        self.assertIn(ab.ORIGIN_HEAD, out)
+        self.assertIn(self.item("9"), out)
+        self.assertIn(self.item("2"), out)
+        self.assertNotIn(self.item("1"), out)
+
+    def test_order_is_canonical_not_write_order(self):
+        """Иначе два скрипта переставляли бы секции друг друга, и каждый прогон
+        видел бы изменение - идемпотентности не было бы ни у одного."""
+        a = ab.merge_sections([ab.ORIGIN_HEAD, self.item("9")],
+                              ab.OWN_HEADS, [ab.WAITS_HEAD, self.item("1")])
+        b = ab.merge_sections([ab.WAITS_HEAD, self.item("1")],
+                              (ab.ORIGIN_HEAD,), [ab.ORIGIN_HEAD, self.item("9")])
+        self.assertEqual(a, b)
+        self.assertEqual(a.index(ab.WAITS_HEAD), 0)
+
+    def test_empty_own_section_disappears_foreign_stays(self):
+        out = ab.merge_sections([ab.WAITS_HEAD, self.item("1"), ab.ORIGIN_HEAD,
+                                 self.item("9")], ab.OWN_HEADS, [])
+        self.assertEqual(out, [ab.ORIGIN_HEAD, self.item("9")])
+
+    def test_block_removed_when_nothing_left(self):
+        self.assertEqual(ab.merge_sections([ab.WAITS_HEAD, self.item("1")],
+                                           ab.OWN_HEADS, []), [])
+
+    def test_unknown_heading_is_not_ours(self):
+        """Расширить признак до "любая строка капсом" нельзя: описание, начатое
+        человеком заглавными, было бы стерто как наш блок."""
+        self.assertFalse(ab._is_ours_new("МОИ ЗАМЕТКИ:\n" + self.item("1")))
+
+    def test_block_must_start_with_heading(self):
+        self.assertFalse(ab._is_ours_new(self.item("1") + "\n" + ab.WAITS_HEAD
+                                         + "\n" + self.item("2")))
+
+    def test_duplicate_foreign_sections_merge_items(self):
+        """Первая редакция "схлопывания" оставляла первую секцию и выбрасывала
+        остальные - то есть чинила косметику ценой молчаливой потери связей."""
+        dup = [ab.ORIGIN_HEAD, self.item("1"), ab.ORIGIN_HEAD, self.item("2")]
+        out = ab.merge_sections(dup, ab.OWN_HEADS, [])
+        self.assertEqual(out, [ab.ORIGIN_HEAD, self.item("1"), self.item("2")])
+
+    def test_duplicate_items_are_not_doubled(self):
+        dup = [ab.ORIGIN_HEAD, self.item("1"), ab.ORIGIN_HEAD, self.item("1")]
+        self.assertEqual(ab.merge_sections(dup, ab.OWN_HEADS, []),
+                         [ab.ORIGIN_HEAD, self.item("1")])
+
+    def test_block_lines_strips_markers(self):
+        txt = ab.MARK_START + "\n" + ab.WAITS_HEAD + "\n" + self.item("1") + "\n" + ab.MARK_END
+        self.assertEqual(ab.block_lines(txt), [ab.WAITS_HEAD, self.item("1")])
+        self.assertEqual(ab.block_lines(None), [])
+
+    def test_round_trip_is_idempotent(self):
+        lines = [ab.WAITS_HEAD, self.item("1"), ab.ORIGIN_HEAD, self.item("9")]
+        once = ab.merge_sections(lines, ab.OWN_HEADS, [ab.WAITS_HEAD, self.item("1")])
+        twice = ab.merge_sections(once, ab.OWN_HEADS, [ab.WAITS_HEAD, self.item("1")])
+        self.assertEqual(once, twice)
+        self.assertEqual(once, lines)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

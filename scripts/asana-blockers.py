@@ -102,6 +102,20 @@ FIELDS = "name,notes,html_notes,completed,permalink_url,assignee.gid,assignee.na
 # при любом прочтении.
 WAITS_HEAD = "ЭТА ЗАДАЧА ЖДЕТ - ее нельзя сделать, пока не закрыты:"
 HOLDS_HEAD = "ЭТА ЗАДАЧА ДЕРЖИТ - они не сдвинутся, пока не закрыта эта:"
+# Связь-происхождение: у отчетной задачи за выполненные работы блокировок нет
+# по определению, а показать, из чего работа выросла, надо. Пишет эту секцию не
+# этот скрипт, а asana-project (он подгружает отсюда каркас блока).
+ORIGIN_HEAD = "СВЯЗАННЫЕ ЗАДАЧИ - откуда выросла эта работа:"
+# Свои секции - только их этот скрипт перезаписывает; чужие известные сохраняет.
+OWN_HEADS = (WAITS_HEAD, HOLDS_HEAD)
+# Реестр всех заголовков технического блока. Узнавать надо ВСЕ, включая чужие:
+# не узнав секцию соседа, скрипт не считает блок своим и кладет свой сверху -
+# на карточке оказываются два блока. Узнав, но не сохранив, - стирает чужую
+# работу. Отсюда две вещи сразу: общий реестр и посекционное слияние.
+# Порядок в кортеже - канонический порядок секций в блоке: он же задает вывод,
+# поэтому два скрипта, пишущие по очереди, не переставляют секции друг друга
+# туда-сюда (иначе каждый прогон видел бы изменение и писал заново).
+KNOWN_HEADS = (WAITS_HEAD, HOLDS_HEAD, ORIGIN_HEAD)
 # Строка связи нового формата: пункт списка с упоминаниями. Опознавать ее по
 # точному виду тега нельзя: мы отправляем короткое `<a data-asana-gid="2"/>`, а
 # Asana при чтении разворачивает его в полный якорь с href, набором data-атрибутов
@@ -363,17 +377,86 @@ def is_item_line(line: str) -> bool:
 
 
 def _is_ours_new(inner: str) -> bool:
-    """Блок нового формата: заголовки направлений и пункты с упоминаниями."""
+    """Блок нового формата: заголовки из реестра и пункты с упоминаниями.
+
+    Первой строкой обязан идти заголовок. Требование не косметическое: без него
+    блок может начинаться с пункта, не относящегося ни к одной секции, и разбор
+    на секции перестает быть полным - такой пункт пришлось бы либо молча
+    выбросить при слиянии, либо приписать чужой секции.
+    """
     lines = [ln.strip() for ln in inner.split("\n") if ln.strip()]
-    if not lines:
+    if not lines or lines[0] not in KNOWN_HEADS:
         return False
     heads = 0
     for ln in lines:
-        if ln in (WAITS_HEAD, HOLDS_HEAD):
+        if ln in KNOWN_HEADS:
             heads += 1
         elif not is_item_line(ln):
             return False
-    return heads > 0 and len(lines) > heads
+    return len(lines) > heads
+
+
+def parse_sections(lines: list[str]) -> list[tuple[str, list[str]]]:
+    """Строки блока -> [(заголовок, пункты)]. Вход - только опознанный блок."""
+    out: list[tuple[str, list[str]]] = []
+    for ln in lines:
+        text = ln.strip()
+        if not text:
+            continue
+        if text in KNOWN_HEADS:
+            out.append((text, []))
+        elif out:
+            out[-1][1].append(text)
+    return out
+
+
+def merge_sections(old_lines: list[str], own_heads: tuple[str, ...],
+                   own_lines: list[str]) -> list[str]:
+    """Свои секции заменить, чужие известные сохранить, порядок - канонический.
+
+    Пустая своя секция означает "связей этого типа больше нет" и просто
+    исчезает; если после этого не осталось ни одной секции, блока не будет
+    вовсе - это и есть снятие блока.
+    """
+    kept: list[tuple[str, list[str]]] = []
+    for head, items in parse_sections(old_lines):
+        # Одноименные секции внутри блока сводим в одну, СКЛЕИВАЯ пункты.
+        # Первая редакция этой правки оставляла первую секцию и выбрасывала
+        # остальные - то есть чинила косметику ценой молчаливой потери связей
+        # из второго экземпляра.
+        if head in own_heads:
+            continue
+        same = next((k for k in kept if k[0] == head), None)
+        if same is None:
+            kept.append((head, list(items)))
+            continue
+        # Дедуп по УПОМИНАНИЯМ, а не по тексту строки: короткий тег, который
+        # пишем мы, и развернутый якорь, который отдает Asana, - одна и та же
+        # связь, но побайтно разные строки
+        have = {gid_form(i) for i in same[1]}
+        for i in items:
+            if gid_form(i) not in have:
+                have.add(gid_form(i))
+                same[1].append(i)
+    kept += [sec for sec in parse_sections(own_lines) if sec[1]]
+    kept.sort(key=lambda sec: KNOWN_HEADS.index(sec[0]))
+    out: list[str] = []
+    for head, items in kept:
+        out.append(head)
+        out.extend(items)
+    return out
+
+
+def block_lines(block_txt: str | None) -> list[str]:
+    """Внутренние строки нашего блока (без маркеров) - вход для merge_sections."""
+    if not block_txt:
+        return []
+    lines = block_txt.strip("\n").split("\n")
+    if lines and lines[0].strip() == MARK_START:
+        lines = lines[1:]
+    while lines and lines[-1].strip() in ("", MARK_END):
+        lines = lines[:-1]
+    return [ln for ln in (x.strip() for x in lines) if ln]
 
 
 def gid_form(text: str) -> str:
@@ -553,17 +636,21 @@ def run_board(label: str, cfg: dict, token: str, send: bool) -> tuple[int, bool]
 
     # обход идет по списку задач, а не по by_name: одноименные задачи вне
     # цепочек схлопнулись бы, и на второй из них остался бы висеть старый блок
-    plan: list[tuple[str, str, list[str], str]] = []
+    # own - только наши секции, merged - весь блок вместе с чужими известными.
+    # Храним оба: предпросмотр показывает итоговый блок, а запись пересобирает
+    # его заново поверх свежего описания (чужая секция могла измениться).
+    plan: list[tuple[str, str, list[str], list[str], str]] = []
     for t in tasks:
         name = norm(t.get("name") or "")
-        lines = build_lines(name, chains, blocks, by_name)
+        own = build_lines(name, chains, blocks, by_name)
         notes = body_of(t)
         block_txt, rest = split_block(notes)
-        if not lines and block_txt is None:
+        if not own and block_txt is None:
             continue  # ни связей, ни нашего блока - задача не наша, не трогаем
-        fresh = render(lines, rest)
+        merged = merge_sections(block_lines(block_txt), OWN_HEADS, own)
+        fresh = render(merged, rest)
         if gid_form(fresh) != gid_form(notes):
-            plan.append((t["gid"], name, lines, notes))
+            plan.append((t["gid"], name, own, merged, notes))
 
     # Предпросмотр показывает имена, а не gid: это единственный канал контроля
     # перед записью, а строку из идентификаторов глазами не проверить.
@@ -574,7 +661,7 @@ def run_board(label: str, cfg: dict, token: str, send: bool) -> tuple[int, bool]
             names[assignee["gid"]] = assignee["name"]
 
     print(f"задач с изменениями: {len(plan)}")
-    for _gid, name, lines, notes in plan:
+    for _gid, name, _own, lines, notes in plan:
         print(f"\n--- {name}")
         if not lines:
             print("    СНЯТЬ БЛОК СВЯЗЕЙ (связи убраны из конфига), остается только текст ниже него:")
@@ -596,7 +683,7 @@ def run_board(label: str, cfg: dict, token: str, send: bool) -> tuple[int, bool]
         return len(plan), False
 
     written, skipped = 0, 0
-    for gid, name, lines, notes in plan:
+    for gid, name, own, _merged, notes in plan:
         # Перечитываем задачу прямо перед записью: между предпросмотром и
         # записью ее мог поменять человек, а PUT перезаписывает поле целиком -
         # без этого чужая правка молча терялась бы. У Asana нет ни ETag, ни
@@ -623,8 +710,8 @@ def run_board(label: str, cfg: dict, token: str, send: bool) -> tuple[int, bool]
         if gid_form(cur_notes) != gid_form(notes):
             print(f"описание '{name}' изменилось после предпросмотра - "
                   f"блок накладываем на новую версию", file=sys.stderr)
-        _block, rest = split_block(cur_notes)
-        fresh = render(lines, rest)
+        cur_block, rest = split_block(cur_notes)
+        fresh = render(merge_sections(block_lines(cur_block), OWN_HEADS, own), rest)
         if gid_form(fresh) == gid_form(cur_notes):
             continue  # кто-то уже привел описание к нужному виду
         _request("PUT", f"{API}/tasks/{gid}", token, {"html_notes": wrap(fresh)})
