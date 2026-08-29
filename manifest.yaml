@@ -127,8 +127,8 @@ management:
   - skills/estimate-calibration/SKILL.md # калибровочная оценка трудоемкости: якоря -> рубрика архетипов -> модификаторы -> калибровка по факту
   - skills/asana-comments/SKILL.md      # чтение ленты комментариев задачи Asana целиком: поштучный запрос отдает ее урезанной и молча
   - scripts/asana-comments.py           # постраничное чтение stories задачи Asana через REST (для скилла asana-comments)
-  - skills/asana-project/SKILL.md       # пакетное разворачивание/досыпка доски Asana из JSON-плана, dry-run по умолчанию
-  - scripts/asana-project.py            # создание проекта/секций/задач Asana из JSON, идемпотентная досыпка и синк сроков
+  - skills/asana-project/SKILL.md       # пакетная работа с доской Asana из JSON-плана (разворачивание, досыпка, перенос, закрытие периода, часы), dry-run по умолчанию
+  - scripts/asana-project.py            # создание проекта/секций/задач Asana из JSON, досыпка и синк сроков, перенос в секцию, пакетное закрытие, сводка часов
   - skills/asana-blockers/SKILL.md      # связи задач текстом в описании (чего ждет / что держит, с исполнителем): обход премиум-зависимостей Asana
   - scripts/asana-blockers.py           # проставление обеих сторон связи в описания задач Asana по конфигу цепочек, dry-run по умолчанию
   - scripts/telegram-snapshot.py        # инкрементальный pull новых сообщений Telegram
