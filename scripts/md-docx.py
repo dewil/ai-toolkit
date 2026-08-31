@@ -165,10 +165,17 @@ def styles_xml(separators: bool = False) -> str:
 </w:tblBorders></w:tblPr></w:style>
 </w:styles>"""
 
-# Две нумерации: numId=1 - маркированный список, numId=2 - нумерованный.
+# Нумераций столько, сколько нумерованных списков в документе, плюс одна на
+# маркеры: abstractNum описывает ВИД списка (0 - маркер, 1 - цифры), а w:num -
+# отдельный экземпляр счета. Word перезапускает нумерацию с единицы на каждом
+# w:num, и только на нем: w:start внутри abstractNum на это не влияет, потому
+# что abstractNum общий. Один numId на все нумерованные списки давал Word'у
+# один список, разорванный на куски, - второй список начинался с 5, третий с 11.
 # Настоящие списки Word (а не символ в тексте) нужны потому, что документ идет
 # на правки: получатель дописывает пункт, и нумерация продолжается сама.
-NUMBERING = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+BULLET_NUMID = 1        # маркированные списки делят один numId: счета у них нет
+FIRST_OL_NUMID = 2      # нумерованные начинаются отсюда, по одному на список
+NUMBERING_HEAD = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
 <w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/>
 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="&#8226;"/>
@@ -177,9 +184,16 @@ NUMBERING = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:abstractNum w:abstractNumId="1"><w:multiLevelType w:val="hybridMultilevel"/>
 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>
 <w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>
-<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
-<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>
-</w:numbering>"""
+"""
+
+
+def numbering_xml(ol_count: int) -> str:
+    """numbering.xml под фактическое число нумерованных списков в документе."""
+    nums = [f'<w:num w:numId="{BULLET_NUMID}"><w:abstractNumId w:val="0"/></w:num>']
+    for i in range(ol_count):
+        nums.append(f'<w:num w:numId="{FIRST_OL_NUMID + i}">'
+                    f'<w:abstractNumId w:val="1"/></w:num>')
+    return NUMBERING_HEAD + "\n" + "\n".join(nums) + "\n</w:numbering>"
 
 # A4 (11906x16838 twips) с полями примерно как в DEFAULT_CSS у md-pdf.py
 SECT_PR = (
@@ -379,6 +393,7 @@ class DocxBody(html.parser.HTMLParser):
         self.ppr_extra = ""        # прямое форматирование текущего абзаца
         self.numid = 0             # нумерация ТЕКУЩЕГО абзаца: 1 - bullet, 2 - decimal
         self.list_num = 0          # нумерация открытого списка; 0 - список не открыт
+        self.ol_count = 0          # сколько нумерованных списков встретилось
         self.fmt: list[str] = []   # активные inline-стили: b, i, code
         self.links: list[str] = []  # стек rId открытых гиперссылок
         self.in_pre = False
@@ -541,7 +556,13 @@ class DocxBody(html.parser.HTMLParser):
             self.in_quote = True
         elif tag in ("ul", "ol"):
             self.flush()
-            self.list_num = 1 if tag == "ul" else 2
+            if tag == "ul":
+                self.list_num = BULLET_NUMID
+            else:
+                # свой numId на каждый список - иначе Word считает их одним
+                # списком и продолжает счет сквозь весь документ
+                self.ol_count += 1
+                self.list_num = FIRST_OL_NUMID + self.ol_count - 1
         elif tag == "table":
             self.flush()
             self.rows, self.width = [], 0
@@ -773,7 +794,7 @@ def build(
         z.writestr("word/document.xml", doc)
         z.writestr("word/_rels/document.xml.rels", doc_rels)
         z.writestr("word/styles.xml", styles_xml(separators))
-        z.writestr("word/numbering.xml", NUMBERING)
+        z.writestr("word/numbering.xml", numbering_xml(parser.ol_count))
         for _, name, data in parser.media:
             # картинки уже сжаты своим кодеком - deflate только тратит время
             z.writestr(f"word/media/{name}", data, zipfile.ZIP_STORED)

@@ -304,6 +304,60 @@ RPR_ORDER = [
 ]
 
 
+class ListNumbering(unittest.TestCase):
+    """Нумерация списков. Один numId на все нумерованные списки Word понимал
+    как ОДИН список, разорванный на куски: второй список начинался с 5, третий
+    с 11. Заметил это получатель документа при вычитке, не разработчик."""
+
+    THREE = ("1. раз\n2. два\n\nТекст между.\n\n1. снова раз\n2. снова два\n\n"
+             "- маркер\n- еще\n\n1. третий список\n")
+
+    def numids(self, md):
+        """numId по абзацам документа и объявленные в numbering.xml."""
+        z = pack(md)
+        doc = ET.fromstring(z.read("word/document.xml"))
+        used = [e.get(W + "val") for e in doc.iter(W + "numId")]
+        num = ET.fromstring(z.read("word/numbering.xml"))
+        declared = [e.get(W + "numId") for e in num.iter(W + "num")]
+        return used, declared
+
+    def test_each_ordered_list_gets_own_numid(self):
+        used, _ = self.numids(self.THREE)
+        # три нумерованных списка -> три разных numId, маркеры отдельно
+        ordered = [u for u in used if u != "1"]
+        self.assertEqual(len(set(ordered)), 3, used)
+
+    def test_bullets_share_one_numid(self):
+        used, _ = self.numids(self.THREE)
+        self.assertEqual(used.count("1"), 2, used)
+
+    def test_every_used_numid_is_declared(self):
+        """Главный инвариант: ссылка на необъявленный numId - это документ,
+        который Word открывает со сбитой или пропавшей нумерацией."""
+        used, declared = self.numids(self.THREE)
+        self.assertTrue(set(used) <= set(declared), (used, declared))
+
+    def test_no_lists_declares_only_bullets(self):
+        """Без списков лишние w:num не пишем - в файле не должно быть мусора,
+        на который никто не ссылается."""
+        used, declared = self.numids("просто текст\n")
+        self.assertEqual(used, [])
+        self.assertEqual(declared, ["1"])
+
+    def test_single_list_starts_from_first_ol_numid(self):
+        used, declared = self.numids("1. раз\n2. два\n")
+        self.assertEqual(set(used), {"2"})
+        self.assertEqual(declared, ["1", "2"])
+
+    def test_numbering_xml_is_valid_and_abstract_kept(self):
+        """abstractNum описывает ВИД списка и остается в двух экземплярах;
+        размножается только w:num - он и дает перезапуск счета."""
+        num = ET.fromstring(pack(self.THREE).read("word/numbering.xml"))
+        self.assertEqual(len(list(num.iter(W + "abstractNum"))), 2)
+        for e in num.iter(W + "num"):
+            self.assertIsNotNone(e.find(W + "abstractNumId"))
+
+
 class SchemaOrder(unittest.TestCase):
     """Регресс на находки adversarial-ревью (codex, 2026-07-26): порядок в
     w:pPr стилей Quote/Code и в w:rPr рана со ссылкой нарушал схему."""
