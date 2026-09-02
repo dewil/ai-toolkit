@@ -118,6 +118,8 @@ management:
   - rules/name-cross-check.md           # сверка имен из транскрипций по справочнику команды
   - rules/google-sheets-mcp.md          # работа с Google Sheets через MCP google-workspace
   - scripts/gsheets.py                  # прямой доступ к Sheets API на stdlib: фолбэк, когда MCP потерял регистрацию инструментов, плюс чтение формул и больших диапазонов
+  - skills/gdocs/SKILL.md               # ведение живого документа в Google Docs: грабли API, невидимые снаружи, и порядок правок
+  - scripts/gdocs.py                    # нормализация стилей, пустые строки, проверка нумерации и ссылок, снимок документа в markdown
   - rules/estimates-in-hours.md         # оценки в часах, не в человеко-днях
   - rules/billing-ai-work.md            # раскрытие при биллинге AI-работы: human-equiv часы, без wall-clock и cache_read, без фиктивных строк
   - agents/tracker.md                   # контроль статусов, дедлайнов, владельцев задач
