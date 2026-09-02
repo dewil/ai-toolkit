@@ -354,6 +354,37 @@ class AdversarialFindings(unittest.TestCase):
         extra, _ = gd.blanks_plan(body)
         self.assertEqual(len(extra), 1)
 
+    def test_unmarked_subpoint_is_a_valid_target(self):
+        """16 ложных срабатываний из 16 на живом ТЗ: цели искались только среди
+        размеченных заголовков, а половина подпунктов разметку потеряла. Гейт
+        был красным всегда, то есть перестал быть проверкой."""
+        problems = gd.check_report(paras(
+            para("1. РАЗДЕЛ", "HEADING_1"),
+            para("1.7. Порядок сдачи", "NORMAL_TEXT"),
+            para("Текст, см. 1.7.")))
+        self.assertEqual([x for x in problems if "в никуда" in x], [])
+        self.assertTrue(any("не в заголовке" in x for x in problems), problems)
+
+    def test_truly_dead_reference_still_reported(self):
+        problems = gd.check_report(paras(
+            para("1. РАЗДЕЛ", "HEADING_1"), para("Текст, см. 9.9.")))
+        self.assertTrue(any("в никуда" in x for x in problems), problems)
+
+    def test_unmarked_subpoint_is_not_a_gap(self):
+        """Пункт существует в документе независимо от разметки: считать его
+        дырой значит завести новое ложное срабатывание вместо убранного."""
+        problems = gd.check_report(paras(
+            para("10. ЭТАПЫ", "HEADING_1"), para("10.5. А", "HEADING_2"),
+            para("10.6. неразмеченный", "NORMAL_TEXT"),
+            para("10.7. Б", "HEADING_2")))
+        self.assertEqual([x for x in problems if "дыра" in x], [])
+
+    def test_real_gap_still_reported(self):
+        problems = gd.check_report(paras(
+            para("10. ЭТАПЫ", "HEADING_1"), para("10.5. А", "HEADING_2"),
+            para("10.7. Б", "HEADING_2")))
+        self.assertTrue(any("10.6" in x for x in problems), problems)
+
     def test_snapshot_marks_dropped_content(self):
         """Молча потерянная картинка делает диф снимка ложным."""
         md = gd.to_markdown(doc(para("1. РАЗДЕЛ", "HEADING_1"), obj_para()))

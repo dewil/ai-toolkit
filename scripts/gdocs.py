@@ -389,26 +389,61 @@ def cmd_blanks(token: str, doc_id: str, send: bool) -> int:
 
 # --- check -------------------------------------------------------------------
 
+def canon_num(num: str) -> str:
+    """Номер без ведущих нулей: "01.1" и "1.1" - один и тот же пункт."""
+    try:
+        return ".".join(str(int(x)) for x in num.split("."))
+    except ValueError:
+        return num
+
+
 def check_report(paras: list[Para]) -> list[str]:
     """Дыры в нумерации и ссылки в никуда. Только отчет - чинит человек."""
     problems = []
-    numbers = []
+    numbers = []          # номера размеченных заголовков - основа нумерации
+    unmarked = set()      # номера абзацев, заголовками не ставших
     for p in paras:
         head = p.heading()
         if head:
             numbers.append(head[0])
-    known = {".".join(str(int(x)) for x in n.split(".")) for n in numbers}
+            continue
+        # Цель ссылки ищем ШИРЕ, чем заголовок: подпункт, потерявший разметку
+        # или написанный не капсом, остается законной целью. Иначе на живом
+        # документе гейт красный всегда, а проверка, дающая один и тот же
+        # ответ при исправном и сломанном, проверкой быть перестает
+        m = HEAD_RE.match(p.text.strip())
+        if m and "." in m.group(1):
+            unmarked.add(canon_num(m.group(1)))
+    known = {canon_num(n) for n in numbers}
 
+    # Непрерывность считаем по заголовкам И неразмеченным подпунктам: пункт
+    # существует в документе независимо от разметки, и считать его дырой
+    # значит завести новое ложное срабатывание вместо убранного
     by_parent: dict[str, list[int]] = {}
-    for num in numbers:
+    for num in sorted(set(canon_num(n) for n in numbers) | unmarked):
         parent, _, last = num.rpartition(".")
-        # Ведущие нули убираем у обеих частей: иначе "01." и "1." расходятся
-        # по разным родителям и дубль не виден
-        parent = ".".join(str(int(x)) for x in parent.split(".")) if parent else ""
+        # Ведущие нули убираем: иначе "01." и "1." расходятся по разным
+        # родителям и дубль не виден
+        parent = canon_num(parent) if parent else ""
         try:
             by_parent.setdefault(parent, []).append(int(last))
         except ValueError:
             continue
+    # Повторы считаем ОТДЕЛЬНО и только по заголовкам: множество выше их
+    # схлопывает, а два заголовка с одним номером - настоящий дефект
+    dupes_by_parent: dict[str, list[int]] = {}
+    for num in (canon_num(n) for n in numbers):
+        parent, _, last = num.rpartition(".")
+        try:
+            dupes_by_parent.setdefault(parent, []).append(int(last))
+        except ValueError:
+            continue
+    for parent, items in sorted(dupes_by_parent.items()):
+        dupes = sorted({n for n in items if items.count(n) > 1})
+        if dupes:
+            problems.append(f"повтор номера ({parent or 'верхний уровень'}): "
+                            + ", ".join(str(n) for n in dupes))
+
     for parent, items in sorted(by_parent.items()):
         seq = sorted(items)
         where = f"{parent}." if parent else "верхний уровень"
@@ -421,16 +456,19 @@ def check_report(paras: list[Para]) -> list[str]:
             problems.append(f"дыра в нумерации ({where}): нет "
                             + ", ".join(f"{parent + '.' if parent else ''}{n}"
                                         for n in gaps))
-        dupes = sorted({n for n in seq if seq.count(n) > 1})
-        if dupes:
-            problems.append(f"повтор номера ({parent or 'верхний уровень'}): "
-                            + ", ".join(str(n) for n in dupes))
-
     for p in paras:
         for ref in REF_RE.findall(p.text):
-            if ".".join(str(int(x)) for x in ref.split(".")) not in known:
-                problems.append(f"ссылка в никуда: 'см. {ref}' в "
-                                f"{p.text.strip()[:60]!r}")
+            num = canon_num(ref)
+            if num in known:
+                continue
+            where = f"{p.text.strip()[:60]!r}"
+            if num in unmarked:
+                # Цель есть, но не размечена: это не битая ссылка, а работа
+                # для normalize - молчать о ней все равно нельзя
+                problems.append(f"цель ссылки 'см. {ref}' найдена не в заголовке "
+                                f"(подпункт без разметки) - в {where}")
+            else:
+                problems.append(f"ссылка в никуда: 'см. {ref}' в {where}")
     return problems
 
 
