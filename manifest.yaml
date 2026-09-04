@@ -85,6 +85,7 @@ coding:
   - agents/debugger.md                  # воспроизведение и локализация багов
   - agents/test-writer.md               # тесты с чистого листа по спеке, без чтения реализации (SDD)
   - agents/implementer.md               # реализация по готовому плану
+  - skills/codex-implement/SKILL.md     # реализация небольшой/средней фичи по спеке и красным тестам внешней моделью с правом записи, только в отдельном worktree
   - agents/code-reviewer.md             # ревью изменений
   - skills/minimal-code/SKILL.md        # минимальный код: лестница ступеней сложности
   - skills/requirements/SKILL.md        # сбор размытых бизнес-требований в ТЗ + user stories до кода
