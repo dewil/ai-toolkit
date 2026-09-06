@@ -16,6 +16,13 @@
 Перед записью существующий JSON копируется в `result.prev.json` для
 расчета дельт (telegram-deltas.py).
 
+Инкремент по id не видит правок и удалений старых сообщений, поэтому на
+каждом прогоне дополнительно перечитываются последние EDIT_WINDOW (50,
+переменная TELEGRAM_SNAPSHOT_EDIT_WINDOW) сообщений: отредактированное
+обновляется, прежний текст уходит в `edit_history`, удаленное помечается
+`deleted: true` (из зеркала не стирается). Счетчики правок и удалений
+печатаются всегда, в том числе нулевые.
+
 Если найден старый формат (сырой TG Desktop экспорт без `topics[]` в
 шапке) - делается миграция: топик-события извлекаются в `topics[]`,
 по reply-цепочкам проставляется `topic_id`, исходный файл сохраняется
@@ -122,6 +129,9 @@ MEDIA_CACHE = _env_path("TELEGRAM_SNAPSHOT_MEDIA", Path.home() / ".cache" / "tel
 MEDIA_TTL_HOURS = int(os.environ.get("TELEGRAM_SNAPSHOT_MEDIA_TTL", "168"))
 MEDIA_CACHE_DEFAULT = MEDIA_CACHE
 MEDIA_TTL_DEFAULT = MEDIA_TTL_HOURS
+# Сколько последних сообщений перечитывать на каждом прогоне ради правок и
+# удалений: инкремент по id их не видит (см. fetch_recent / merge_edits).
+EDIT_WINDOW = int(os.environ.get("TELEGRAM_SNAPSHOT_EDIT_WINDOW", "50"))
 PROJECT_CONFIG_PATH = PROJECT_ROOT / ".telegram-snapshot.json"
 
 ENTITY_MAP = {
@@ -611,33 +621,49 @@ def entities_to_text_entities(text: str, entities) -> list[dict]:
 
     Возвращает массив сегментов, покрывающих весь text. Несовпадения и
     непокрытые промежутки идут как {"type": "plain", "text": "..."}.
+
+    Смещения и длины entities Telegram считает в единицах UTF-16, а не в
+    символах: эмодзи вне BMP занимает две единицы, и срез Python-строки по
+    offset после него выделяет не тот текст (ревью 06.09.2026: "😀AB" с жирной
+    A размечалось как жирная B). Поэтому режем UTF-16-представление.
     """
     if not text:
         return []
     if not entities:
         return [{"type": "plain", "text": text}]
 
+    u16 = text.encode("utf-16-le")
+    total = len(u16) // 2
+
+    def unit_slice(a: int, b: int) -> str:
+        return u16[a * 2:b * 2].decode("utf-16-le")
+
     out: list[dict] = []
     cursor = 0
     sorted_entities = sorted(entities, key=lambda e: (e.offset, e.length))
-    for ent in sorted_entities:
-        start = ent.offset
-        end = ent.offset + ent.length
-        if start < cursor:
-            continue
-        if start > cursor:
-            out.append({"type": "plain", "text": text[cursor:start]})
-        segment = text[start:end]
-        etype = ENTITY_MAP.get(type(ent), "plain")
-        item: dict = {"type": etype, "text": segment}
-        if isinstance(ent, MessageEntityTextUrl):
-            item["href"] = ent.url
-        elif isinstance(ent, MessageEntityMentionName):
-            item["user_id"] = f"user{ent.user_id}"
-        out.append(item)
-        cursor = end
-    if cursor < len(text):
-        out.append({"type": "plain", "text": text[cursor:]})
+    try:
+        for ent in sorted_entities:
+            start = ent.offset
+            end = min(ent.offset + ent.length, total)
+            if start < cursor or start >= total:
+                continue
+            if start > cursor:
+                out.append({"type": "plain", "text": unit_slice(cursor, start)})
+            segment = unit_slice(start, end)
+            etype = ENTITY_MAP.get(type(ent), "plain")
+            item: dict = {"type": etype, "text": segment}
+            if isinstance(ent, MessageEntityTextUrl):
+                item["href"] = ent.url
+            elif isinstance(ent, MessageEntityMentionName):
+                item["user_id"] = f"user{ent.user_id}"
+            out.append(item)
+            cursor = end
+        if cursor < total:
+            out.append({"type": "plain", "text": unit_slice(cursor, total)})
+    except UnicodeDecodeError:
+        # Telegram границы пар суррогатов не режет; если срез все же попал в
+        # середину пары - разметка недостоверна, отдаем сообщение целиком plain
+        return [{"type": "plain", "text": text}]
     return out
 
 
@@ -982,6 +1008,89 @@ async def fetch_new(client: TelegramClient, entity, min_id: int,
     return out, new_topics, topic_edits, downloaded
 
 
+async def fetch_recent(client: TelegramClient, entity, limit: int) -> tuple[dict[int, dict], set[int]]:
+    """Перечитывает последние `limit` сообщений чата ради правок и удалений.
+
+    Инкремент по id (fetch_new) не видит ни отредактированного, ни удаленного
+    сообщения: прогон отвечал "новых нет", а текст в зеркале уже не совпадал с
+    тем, что у собеседника (HR, 18.08.2026: пять правок за три прогона, одна
+    содержательная). Возвращает (records_by_id, seen_ids): записи обычных
+    сообщений по id и множество ВСЕХ id в окне, включая service-сообщения -
+    их в зеркале нет, но для сверки удалений они "присутствуют".
+    """
+    records: dict[int, dict] = {}
+    seen: set[int] = set()
+    async for msg in client.iter_messages(entity, limit=limit):
+        seen.add(msg.id)
+        if msg.action is not None:
+            continue
+        rec = await message_to_record(client, msg)
+        if rec:
+            records[msg.id] = rec
+    return records, seen
+
+
+EDIT_TEXT_KEYS = ("text", "text_entities", "edited", "edited_unixtime")
+EDIT_MEDIA_KEYS = ("file_name", "file_size", "mime_type")
+
+
+def merge_edits(messages: list[dict], fresh: dict[int, dict], seen_ids: set[int],
+                complete: bool = False) -> tuple[int, int]:
+    """Сверяет зеркало с перечитанным окном. Чистая функция, без сети.
+
+    - правка: в API `edited_unixtime` новее, чем в зеркале (или в зеркале его
+      нет), либо равен ему при другом содержимом (две правки в одну секунду) -
+      обновляются текст и метаданные вложения (EDIT_TEXT_KEYS, EDIT_MEDIA_KEYS),
+      а прежние значения, если отличались, уходят в `edit_history`: правка
+      задним числом должна быть видна, а не затирать прошлое молча. Сам файл
+      замененного вложения заново не скачивается - только метаданные;
+    - удаление: id внутри окна, которого в API больше нет, получает
+      `deleted: true`; из зеркала запись не удаляется. Нижняя граница окна -
+      `min(seen_ids)`; `complete=True` (история короче окна, API отдал меньше,
+      чем просили) опускает ее до нуля - иначе удаление начала короткого чата
+      не видно никогда.
+
+    Пустое окно - "ничего не известно", а не "все удалено": (0, 0). Сообщения
+    ниже окна не трогаются. Повторный прогон по тому же окну ничего не меняет.
+    Возвращает (edits, deletions).
+    """
+    if not seen_ids:
+        return 0, 0
+    floor = 0 if complete else min(seen_ids)
+    edits = deletions = 0
+    for m in messages:
+        mid = m.get("id")
+        if not isinstance(mid, int) or mid < floor:
+            continue
+        if mid in fresh:
+            f = fresh[mid]
+            new_e = int(f.get("edited_unixtime") or 0)
+            old_e = int(m.get("edited_unixtime") or 0)
+            changed = [k for k in EDIT_TEXT_KEYS[:2] + EDIT_MEDIA_KEYS if k in f and f.get(k) != m.get(k)]
+            if new_e < old_e or (new_e == old_e and not changed):
+                continue
+            if new_e == 0:
+                # сообщение никем не правилось (нет edit_date), а содержимое
+                # разошлось - это дрейф нашего конвертера против Desktop-экспорта,
+                # не правка: верную запись зеркала не трогаем
+                continue
+            if changed:
+                entry = {"edited": m.get("edited") or m.get("date"),
+                         "text": m.get("text", ""), "text_entities": m.get("text_entities", [])}
+                for k in EDIT_MEDIA_KEYS:
+                    if k in changed:
+                        entry[k] = m.get(k)
+                m.setdefault("edit_history", []).append(entry)
+            for key in EDIT_TEXT_KEYS + EDIT_MEDIA_KEYS:
+                if key in f:
+                    m[key] = f[key]
+            edits += 1
+        elif mid not in seen_ids and m.get("type") == "message" and not m.get("deleted"):
+            m["deleted"] = True
+            deletions += 1
+    return edits, deletions
+
+
 async def message_to_record(client: TelegramClient, msg) -> dict | None:
     if msg.action is not None:
         return None
@@ -1143,6 +1252,29 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
 
     new_msgs, new_topics, topic_edits, downloaded_media = await fetch_new(client, entity, min_id, download_media)
 
+    # Второй запрос - последние EDIT_WINDOW сообщений: правки и удаления, которых
+    # инкремент по id не видит. Сверяются только уже зазеркаленные сообщения
+    # (новые еще не в data["messages"] и в окно попадают как есть). На bootstrap
+    # сверять не с чем.
+    edits = deletions = 0
+    edits_checked = False
+    if not is_bootstrap and EDIT_WINDOW > 0:
+        try:
+            fresh, seen_ids = await fetch_recent(client, entity, EDIT_WINDOW)
+        except Exception as exc:  # noqa: BLE001 - сеть; инкремент выше уже забран и должен сохраниться
+            sys.stderr.write(f"  {label}: правки и удаления не проверены ({type(exc).__name__}: {exc})\n")
+        else:
+            if seen_ids:
+                # сверяются и уже зазеркаленные, и только что забранные: новое
+                # сообщение могло быть правлено или удалено между двумя запросами
+                edits, deletions = merge_edits(
+                    data["messages"] + new_msgs, fresh, seen_ids,
+                    complete=len(seen_ids) < EDIT_WINDOW,
+                )
+                edits_checked = True
+            else:
+                sys.stderr.write(f"  {label}: окно сверки пустое - правки и удаления не проверены\n")
+
     for t in new_topics:
         topics_by_id[t["id"]] = t
     for root_id, new_title in topic_edits.items():
@@ -1152,11 +1284,14 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
     data["topics"] = sorted(topics_by_id.values(), key=lambda t: t["id"])
 
     has_changes = bool(new_msgs or new_topics or topic_edits)
-    needs_save = is_bootstrap or migrated or repaired or has_changes
+    needs_save = is_bootstrap or migrated or repaired or has_changes or edits or deletions
 
     if not needs_save:
         last_date = data["messages"][-1]["date"] if data.get("messages") else "?"
-        print(f"  {label}: новых нет (последнее {last_date})")
+        # нули печатаются намеренно: "проверил, правок нет" должно отличаться
+        # от "не проверял" (silent-failure.md)
+        note = "правок: 0, удалений: 0" if edits_checked else "правки не проверены"
+        print(f"  {label}: новых нет, {note} (последнее {last_date})")
         return 0, last_date
 
     # baseline для дельт обновляем ТОЛЬКО при реальных новых сообщениях.
@@ -1174,7 +1309,8 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
 
     last_date = new_msgs[-1]["date"] if new_msgs else (data["messages"][-1]["date"] if data.get("messages") else "?")
     prefix = "bootstrap " if is_bootstrap else ""
-    print(f"  {label}: {prefix}+{len(new_msgs)} (последнее {last_date}, тем: {len(data['topics'])})")
+    edits_note = "" if is_bootstrap else (f"правок: {edits}, удалений: {deletions}, " if edits_checked else "правки не проверены, ")
+    print(f"  {label}: {prefix}+{len(new_msgs)} ({edits_note}последнее {last_date}, тем: {len(data['topics'])})")
     if downloaded_media:
         print(f"  {label}: вложений скачано в кэш: {len(downloaded_media)} -> {MEDIA_CACHE / str(chat_id)}")
     return len(new_msgs), last_date

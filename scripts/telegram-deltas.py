@@ -194,11 +194,12 @@ def filter_new(cur: list[dict], prev: list[dict], hours_fallback: int,
         prev = [m for m in prev if m.get("topic_id") == topic_id]
     prev_ids = {m["id"] for m in prev if isinstance(m.get("id"), int)}
     if prev_ids:
-        return [m for m in cur if m["id"] not in prev_ids and m.get("type") == "message"]
+        # удаленное после baseline в "новое" не идет: зеркало его хранит с deleted: true
+        return [m for m in cur if m["id"] not in prev_ids and m.get("type") == "message" and not m.get("deleted")]
     cutoff = datetime.now() - timedelta(hours=hours_fallback)
     out = []
     for m in cur:
-        if m.get("type") != "message":
+        if m.get("type") != "message" or m.get("deleted"):
             continue
         dt = parse_dt(m.get("date", ""))
         if dt and dt >= cutoff:
