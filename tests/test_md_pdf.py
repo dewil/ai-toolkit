@@ -262,6 +262,31 @@ class InlineCode(unittest.TestCase):
         self.assertNotIn("\x02", h)
         self.assertNotIn("\x03", h)
 
+class HtmlEntities(unittest.TestCase):
+    """HTML-сущности из markdown проходят в PDF как есть (HR, 06.09.2026:
+    &nbsp; печатался буквально), одиночный & и код остаются экранированными."""
+
+    def test_named_and_numeric_entities_pass_through(self):
+        self.assertEqual(md_pdf.inline("a&nbsp;b &mdash; c"), "a&nbsp;b &mdash; c")
+        self.assertEqual(md_pdf.inline("&#8212; &#x2014; &#X2014;"), "&#8212; &#x2014; &#X2014;")
+
+    def test_bare_ampersand_stays_escaped(self):
+        self.assertEqual(md_pdf.inline("Tom & Jerry"), "Tom &amp; Jerry")
+        self.assertEqual(md_pdf.inline("a &b c"), "a &amp;b c")           # без ';' - не сущность
+        self.assertEqual(md_pdf.inline("x & y;"), "x &amp; y;")            # пробел после & - не сущность
+
+    def test_entity_inside_code_is_literal(self):
+        self.assertEqual(md_pdf.inline("`&nbsp;`"), "<code>&amp;nbsp;</code>")
+
+    def test_ampersand_in_link_href_and_text(self):
+        html = md_pdf.inline("[a &amp; b](https://e.x/?a=1&b=2)")
+        self.assertIn('href="https://e.x/?a=1&amp;b=2"', html)
+        self.assertIn(">a &amp; b</a>", html)
+
+    def test_entity_next_to_markup(self):
+        self.assertEqual(md_pdf.inline("**жирный**&nbsp;текст"), "<strong>жирный</strong>&nbsp;текст")
+
+
 class FindChrome(unittest.TestCase):
     """Резолв Chrome: скрипт раскатан и на macOS, и на Linux."""
 
