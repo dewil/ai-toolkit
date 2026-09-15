@@ -1,6 +1,6 @@
 ---
 name: telegram-snapshot
-description: Настроить или починить инкрементальный pull Telegram-чатов проекта (telegram-snapshot) на устройстве. Использовать когда пользователь говорит "настрой telegram-snapshot", "не получается зарегистрировать приложение в telegram", "my.telegram.org выдает ERROR", "telethon не видит чаты", "PeerUser ошибка", или когда первый запуск `scripts/telegram-snapshot.py` упал на авторизации/резолвинге чатов.
+description: Настроить или починить инкрементальный pull Telegram-чатов на устройстве: "my.telegram.org выдает ERROR", "telethon не видит чаты". НЕ для отправки сообщений - скилл `telegram-send`.
 ---
 
 # telegram-snapshot

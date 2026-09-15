@@ -1,6 +1,6 @@
 ---
 name: redmine-snapshot
-description: Настроить или починить локальное зеркало открытых задач Redmine (redmine-snapshot) на устройстве. Использовать когда пользователь говорит "настрой redmine-snapshot", "подключи redmine к проекту", "где взять api-ключ redmine", "redmine-snapshot падает на SSL / сертификате", "как узнать user_id исполнителя в redmine", или когда первый запуск scripts/redmine-snapshot.py упал на авторизации/конфиге.
+description: Настроить или починить локальное зеркало открытых задач Redmine на устройстве: "где взять api-ключ redmine", "падает на SSL / сертификате", "как узнать user_id исполнителя".
 ---
 
 # redmine-snapshot
