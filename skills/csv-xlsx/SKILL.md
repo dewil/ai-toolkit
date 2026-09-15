@@ -1,6 +1,6 @@
 ---
 name: csv-xlsx
-description: Собрать .xlsx из CSV/TSV через scripts/csv-xlsx.py (stdlib, без openpyxl). Использовать когда таблицу нужно отдать в Excel/Numbers - "сделай xlsx", "собери таблицу для заказчика", "переведи csv в excel", "нужна книга с несколькими листами". Несколько входных файлов = несколько листов. Для документов - md-docx, для PDF - md-pdf, для презентаций - md-pptx.
+description: Собрать .xlsx из CSV/TSV - таблица в Excel, несколько файлов = несколько листов: "сделай xlsx", "переведи csv в excel", "книга с листами". Документы - `md-docx`, слайды - `md-pptx`.
 ---
 
 # csv-xlsx
