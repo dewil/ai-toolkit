@@ -60,6 +60,23 @@ def read_seen() -> set[str]:
         return set()
 
 
+STATE_LOST = STATE.with_name(STATE.stem + ".lost.json")
+
+
+def read_lost() -> set[str]:
+    try:
+        return set(json.loads(STATE_LOST.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return set()
+
+
+def write_lost(names: set[str]) -> None:
+    STATE_LOST.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_LOST.with_suffix(".tmp")
+    tmp.write_text(json.dumps(sorted(names), ensure_ascii=False), encoding="utf-8")
+    tmp.replace(STATE_LOST)
+
+
 def write_seen(names: set[str]) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE.with_suffix(".tmp")
@@ -214,15 +231,20 @@ def main() -> int:
         # Непроверенный проект молчит так же, как чистый - назовем его вслух
         log("ПРОВЕРКА НЕ ВЫПОЛНЕНА", "; ".join(broken))
 
+    # Расхождение докладывается один раз, а не каждые полчаса, пока оно висит
+    # (17.09.2026: один недоставленный бриф дал десятки одинаковых сообщений
+    # в избранное). Новое - то, о чем еще не докладывали; исчезло - забываем.
+    new_lost = [name for name in lost if name not in read_lost()]
     rc = queue_rc
-    if fresh or lost:
-        rc = notify(fresh, args.dry_run, lost) or rc
+    if fresh or new_lost:
+        rc = notify(fresh, args.dry_run, new_lost) or rc
     if broken and rc == 0:
         rc = 2
     # Запоминаем только успешно доложенное: сорвавшаяся отправка не должна
     # прятать бриф от следующего прогона
     if not args.dry_run and rc == 0:
         write_seen(current)
+        write_lost(set(lost))
     return rc
 
 
