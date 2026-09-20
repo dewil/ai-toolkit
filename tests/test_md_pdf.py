@@ -188,6 +188,37 @@ class ModeInteraction(unittest.TestCase):
         self.assertIn("<p>абзац</p>", h)
 
 
+class OrderedListRenumber(unittest.TestCase):
+    """Регресс на находку 20.09.2026 (canon-inbox): абзац-пояснение без
+    markdown-отступа между пунктами нумерованного списка закрывал <ol>, и
+    список из пяти вопросов уходил в PDF пронумерованным 1, 2, 1, 2, 1."""
+
+    def test_continuation_paragraph_keeps_single_list(self):
+        h = body(
+            "1. первый\n2. второй\n\nПояснение без отступа.\n\n"
+            "3. третий\n4. четвертый\n5. пятый\n"
+        )
+        self.assertEqual(h.count("<ol>"), 1)
+        self.assertEqual(h.count("</ol>"), 1)
+        self.assertEqual(h.count("<li>"), 5)
+        self.assertIn("<p>Пояснение без отступа.</p>", h)
+
+    def test_two_real_lists_split_by_paragraph_stay_separate(self):
+        """Абзац-НЕ-продолжение: второй список начинается заново с 1, а не
+        продолжает нумерацию первого - это два разных списка, не один."""
+        h = body(
+            "1. первый\n2. второй\n\nОбычный абзац, не пояснение к пункту.\n\n"
+            "1. новый первый\n2. новый второй\n"
+        )
+        self.assertEqual(h.count("<ol>"), 2)
+        self.assertEqual(h.count("</ol>"), 2)
+
+    def test_two_real_lists_split_by_heading_stay_separate(self):
+        h = body("1. первый\n2. второй\n\n## Заголовок\n\n1. новый первый\n2. новый второй\n")
+        self.assertEqual(h.count("<ol>"), 2)
+        self.assertEqual(h.count("</ol>"), 2)
+
+
 class InlineCode(unittest.TestCase):
     """Регресс на находку adversarial-ревью (codex, 2026-07-26): содержимое
     `code` повторно разбиралось как markdown, и "`[x](y)`" теряло скобки с url."""
