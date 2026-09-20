@@ -357,6 +357,16 @@ class ListNumbering(unittest.TestCase):
         for e in num.iter(W + "num"):
             self.assertIsNotNone(e.find(W + "abstractNumId"))
 
+    def test_continuation_paragraph_keeps_one_numid(self):
+        """Регресс 20.09.2026: абзац-пояснение без отступа, после которого
+        список продолжает нумерацию (3 идет за 2), - это ОДИН numId, а не
+        разрыв на второй список (см. test_md_pdf.OrderedListRenumber)."""
+        md = "1. раз\n2. два\n\nПояснение без отступа.\n\n3. три\n4. четыре\n5. пять\n"
+        used, _ = self.numids(md)
+        ordered = [u for u in used if u != "1"]
+        self.assertEqual(len(ordered), 5, used)
+        self.assertEqual(len(set(ordered)), 1, used)
+
 
 class SchemaOrder(unittest.TestCase):
     """Регресс на находки adversarial-ревью (codex, 2026-07-26): порядок в
