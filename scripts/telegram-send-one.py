@@ -43,6 +43,9 @@ async def amain(args) -> int:
     # применимы гейты про живого получателя (outbound-timing.md: "на том конце
     # нет человека" - точнее, там сам отправитель)
     chat_id = SAVED if str(args.chat_id).strip().lower() == SAVED else int(args.chat_id)
+    # getattr, не args.schedule: старые вызовы amain() (тесты) не знают об
+    # этом поле и не должны из-за него ломаться.
+    schedule_dt = getattr(args, "schedule", None)
     # None и "" различаются: --file "$VAR" с пустой переменной - это заданный
     # файловый режим, а не его отсутствие; молча уйти текстом было бы враньем
     if args.file is not None and not args.file:
@@ -115,6 +118,8 @@ async def amain(args) -> int:
         if not args.send:
             print("DRY-RUN (без --send отправка не сделана)")
             print(f"  -> \"{title}\" (@{actual_username or '?'}, {kind}, id={chat_id})")
+            if schedule_dt is not None:
+                print(f"  отложено до: {tgs.format_schedule(schedule_dt)}")
             print(f"  ответ на: {args.reply_to if args.reply_to is not None else '-'}   формат: {'html' if args.html else 'сырой текст'}   аккаунт: {args.account}   звук: {'нет' if args.silent else 'да'}")
             if file_path:
                 # полный резолвленный путь и точный размер: dry-run - это
@@ -126,31 +131,91 @@ async def amain(args) -> int:
                     print(f"  | {ln}")
             else:
                 print("  подпись: нет (файл уйдет без текста)")
-            wait, required = tgs.pace_check(args.account, entity)
+            wait, required = tgs.pace_check(args.account, entity, at=schedule_dt)
             if wait > 0:
                 print(f"  темп: рано - после прошлого сообщения нужно {required:.0f} сек, осталось {wait:.0f}")
             return 0
 
-        rc = tgs.pace_guard(args.account, entity, args.no_pace_check)
+        rc = tgs.pace_guard(args.account, entity, args.no_pace_check, at=schedule_dt)
         if rc:
             return rc
+
+        if schedule_dt is not None:
+            # Второй раз, как в telegram-send.py: connect, is_user_authorized
+            # и прогрев диалогов уже потратили время, запас мог схлопнуться.
+            lead = (schedule_dt - tgs.datetime.now(tgs.timezone.utc)).total_seconds()
+            if lead < tgs.SCHEDULE_MIN_LEAD:
+                sys.stderr.write(
+                    f"До назначенного времени осталось {lead:.0f} сек - меньше "
+                    f"{tgs.SCHEDULE_MIN_LEAD} (минимальный запас). Подключение и "
+                    f"прогрев диалогов съели время; Telegram отправляет "
+                    f"немедленно, если до срока меньше 10 сек, а такой запас "
+                    f"граничит с этим. Отправка отменена, ничего не отправлено - "
+                    f"повтори с более поздним временем.\n"
+                )
+                return 2
 
         reply_to = tgs.build_reply_to(args.topic, args.reply_to)
         parse_mode = "html" if args.html else None
         if file_path:
+            file_to_send = str(file_path)
+            if schedule_dt is not None:
+                # Telethon грузит файл ВНУТРИ send_file, до постановки в
+                # очередь - большой файл может съесть весь запас между второй
+                # проверкой выше и фактической отправкой. Грузим отдельно и
+                # проверяем запас еще раз, уже после загрузки (см. telegram-send.py).
+                file_to_send = await client.upload_file(str(file_path))
+                lead = (schedule_dt - tgs.datetime.now(tgs.timezone.utc)).total_seconds()
+                if lead < tgs.SCHEDULE_MIN_LEAD:
+                    sys.stderr.write(
+                        f"До назначенного времени осталось {lead:.0f} сек после "
+                        f"загрузки файла - меньше {tgs.SCHEDULE_MIN_LEAD} (минимальный "
+                        f"запас). Отправка отменена, ничего не отправлено - "
+                        f"повтори с более поздним временем или файлом поменьше.\n"
+                    )
+                    return 2
             # voice_note - проигрываемое голосовое; force_document отправил бы
             # тот же ogg вложением, которое в дороге не послушать
             sent = await client.send_file(
-                entity, str(file_path), caption=text, reply_to=reply_to,
+                entity, file_to_send, caption=text, reply_to=reply_to,
                 force_document=not args.voice, voice_note=args.voice,
-                parse_mode=parse_mode, silent=args.silent,
+                parse_mode=parse_mode, silent=args.silent, schedule=schedule_dt,
             )
         else:
             sent = await client.send_message(
                 entity, text, reply_to=reply_to, parse_mode=parse_mode, silent=args.silent,
+                schedule=schedule_dt,
             )
-        tgs.pace_record(args.account, entity, len(text or ""))
-        print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
+        tgs.pace_record(
+            args.account, entity, len(text or ""),
+            at=schedule_dt, scheduled=schedule_dt is not None,
+        )
+        if schedule_dt is not None:
+            # См. tgs.verify_scheduled: до срока сообщение живет в очереди
+            # отложенных, а не в обычной истории чата. Сверяем с тем, что
+            # вернула САМА отправка (sent.date, sent.message), а не с нашим
+            # входом - при --html Telegram сохраняет уже разобранный текст.
+            found, verify_exc = await tgs.verify_scheduled(
+                client, entity, sent.id, expected_date=sent.date, expected_text=sent.message,
+            )
+            if not found:
+                # Неподтвержденная постановка - НЕ успех, см. telegram-send.py.
+                reason = (
+                    f"причина: {type(verify_exc).__name__}: {verify_exc}"
+                    if verify_exc is not None else "не нашлось в очереди отложенных"
+                )
+                sys.stderr.write(
+                    f"НЕОПРЕДЕЛЕННО: отправка вернула id {sent.id}, но в очереди "
+                    f"отложенных не найдено - проверь \"Отложенные\" руками, "
+                    f"повторно не отправляй ({reason}).\n"
+                )
+                return 4
+            print(
+                f"OK: поставлено в очередь на {tgs.format_schedule(schedule_dt)} "
+                f"- \"{title}\" (id {sent.id})"
+            )
+        else:
+            print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
         await tgs.disconnect_quietly(client)
@@ -189,7 +254,20 @@ def main() -> int:
                         help="слать как HTML (жирный/код/ссылки). Без флага - сырой текст. "
                              "HTML, а не MarkdownV2: тот требует экранировать точки/дефисы/скобки, "
                              "на русском тексте это грабли. Спецсимволы < > & в HTML-режиме экранируй сам.")
+    parser.add_argument("--schedule",
+                        help="отложить до времени, ISO с оффсетом или без (без оффсета - "
+                             "зона машины): 2026-09-22T09:30+03:00 или 2026-09-22T09:30. "
+                             "Сообщение ляжет в очередь на серверах Telegram и уйдет само - "
+                             "см. rules/outbound-timing.md и скилл telegram-send. Прошлое "
+                             "и дальше года вперед отклоняются сразу, до сети")
     args = parser.parse_args()
+    if args.schedule is not None:
+        # Разбор и все проверки - ДО asyncio.run/сети, как в telegram-send.py.
+        try:
+            args.schedule = tgs.parse_schedule(args.schedule)
+        except ValueError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 2
     return asyncio.run(amain(args))
 
 

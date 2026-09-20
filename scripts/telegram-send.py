@@ -52,9 +52,11 @@ import json
 import math
 import os
 import random
+import re
 import sqlite3
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -138,37 +140,126 @@ def pace_required(prev_chars: int) -> float:
     return max(PACE_MIN_GAP, need * (1 - random.uniform(0, PACE_JITTER)))
 
 
-def pace_check(account: str, chat_id) -> tuple[float, float]:
-    """(сколько еще ждать, сколько требовалось всего) в секундах; (0.0, 0.0) - можно слать."""
+def _pace_candidates(entry: dict) -> list[tuple[float, float, bool]]:
+    """(ts, required, is_scheduled) для каждой релевантной записи чата: сама
+    верхнеуровневая (последняя ОБЫЧНАЯ отправка - прежний формат, ts/chars/
+    required) и каждая еще не вычищенная отложенная из entry["scheduled"].
+
+    Несколько отложенных не заменяют друг друга (см. pace_record) - сверяться
+    нужно со всеми разом, иначе вторая отложенная пройдет мимо первой, про
+    которую состояние "забыло". Мусор в записи (не число, inf/nan) молча
+    отбрасывается - как отбрасывался раньше в pace_check, только теперь на
+    уровне одной записи, а не всего чата.
+    """
+    out: list[tuple[float, float, bool]] = []
+
+    def add(ts_raw, required_raw, chars_raw, is_scheduled: bool) -> None:
+        try:
+            ts = float(ts_raw)
+            required = float(required_raw)
+            if required <= 0:
+                # Запись старого формата: паузу берем БЕЗ разброса, иначе она
+                # пересчитывалась бы на каждой проверке - и повтором команды
+                # можно было бы вымучить значение поменьше.
+                required = pace_base(int(chars_raw or 0))
+        except (TypeError, ValueError, OverflowError):
+            return
+        if math.isfinite(ts) and math.isfinite(required):
+            out.append((ts, required, is_scheduled))
+
+    if "ts" in entry:
+        add(entry.get("ts", 0), entry.get("required", 0), entry.get("chars", 0), False)
+
+    scheduled = entry.get("scheduled")
+    if isinstance(scheduled, list):
+        for rec in scheduled:
+            if isinstance(rec, dict):
+                add(rec.get("ts", 0), rec.get("required", 0), rec.get("chars", 0), True)
+
+    return out
+
+
+def pace_check(account: str, chat_id, at: datetime | None = None) -> tuple[float, float]:
+    """(сколько еще ждать, сколько требовалось - для самой строгой из
+    конфликтующих записей) в секундах; (0.0, 0.0) - можно слать.
+
+    at - момент, для которого проверяем темп: None - "сейчас" (обычная
+    немедленная отправка), aware datetime - назначенное время доставки
+    отложенной. Сверяется со ВСЕМИ записями чата разом (см. _pace_candidates),
+    а не только с последней: обычная отправка прямо сейчас обязана видеть уже
+    поставленные в очередь отложенные, а не только предыдущую обычную.
+    """
     entry = pace_load().get(pace_key(account, chat_id))
     if not isinstance(entry, dict):
         return 0.0, 0.0
-    try:
-        prev_ts = float(entry.get("ts", 0))
-        required = float(entry.get("required", 0))
-        if required <= 0:
-            # Запись старого формата: паузу берем БЕЗ разброса, иначе она
-            # пересчитывалась бы на каждой проверке - и повтором команды можно
-            # было бы вымучить значение поменьше.
-            required = pace_base(int(entry.get("chars", 0)))
-    except (TypeError, ValueError, OverflowError):
+    candidates = _pace_candidates(entry)
+    if not candidates:
         return 0.0, 0.0
-    # Мусор в состоянии (inf/nan от чужой записи) держал бы чат вечно.
-    if not (math.isfinite(prev_ts) and math.isfinite(required)):
-        return 0.0, 0.0
+
+    target = None
+    if at is not None:
+        try:
+            target = at.timestamp()
+        except (OverflowError, OSError, ValueError):
+            return 0.0, 0.0
+        if not math.isfinite(target):
+            return 0.0, 0.0
+
     now = time.time()
-    if prev_ts > now:
-        # Часы съехали назад или состояние из бэкапа: держать чат на величину
-        # сдвига нельзя, это часы врут, а не человек торопится.
-        return 0.0, 0.0
-    elapsed = now - prev_ts
-    if elapsed >= required:
-        return 0.0, required
-    return required - elapsed, required
+    worst_wait, worst_required = 0.0, 0.0
+    for ts, required, is_scheduled in candidates:
+        if target is not None:
+            # Кандидат на конкретный момент доставки (отложенная отправка):
+            # сравниваем с уже записанным временем в обе стороны - неважно,
+            # раньше оно или позже кандидата, и неважно, что за запись
+            # (обычная или тоже отложенная) - планируется доставка близко к
+            # уже занятому времени, значит будет залп в момент доставки.
+            diff = abs(target - ts)
+        elif not is_scheduled:
+            # Обычная проверка "сейчас" против прежней ОБЫЧНОЙ записи: старое
+            # поведение байт в байт - съехавшие вперед часы (запись из бэкапа
+            # или чужого будущего) не держат чат, это врут часы, а не человек
+            # торопится.
+            if ts > now:
+                continue
+            diff = now - ts
+        else:
+            # Обычная проверка "сейчас" против отложенной: ts - назначенное
+            # время доставки, оно законно в будущем и это не перекос часов.
+            # Сверяем в обе стороны - если через 30 секунд уйдет отложенное,
+            # немедленная отправка сейчас все равно даст залп в момент доставки.
+            diff = abs(now - ts)
+        if diff >= required:
+            continue
+        wait = required - diff
+        if wait > worst_wait:
+            worst_wait, worst_required = wait, required
+    return worst_wait, worst_required
 
 
-def pace_record(account: str, chat_id, chars: int) -> None:
-    """Запомнить момент отправки и паузу, которую он требует. Сбой записи отправку не отменяет.
+def pace_record(
+    account: str, chat_id, chars: int, *, at: datetime | None = None, scheduled: bool = False
+) -> None:
+    """Запомнить момент отправки (или назначенное время доставки для
+    отложенной) и паузу, которую он требует. Сбой записи отправку не отменяет.
+
+    Формат с обратной совместимостью. Верхнеуровневые ts/chars/required -
+    последняя ОБЫЧНАЯ отправка, ключ и семантика прежние байт в байт: старая
+    версия скрипта на другой машине, ничего не знающая про отложенные,
+    прочитает их как раньше и ключ "scheduled" не заметит вовсе. Отложенные
+    хранятся отдельным списком entry["scheduled"] и друг друга не заменяют -
+    иначе постановки 09:00 -> 12:00 -> 09:00 все проходят (третья мимо занятого
+    09:00, о котором состояние уже "забыло"), а обычная отправка стирала бы
+    единственное свидетельство будущей доставки.
+
+    at - для отложенной отправки: назначенное время доставки, а не момент
+    постановки в очередь - гейт темпа должен видеть, КОГДА сообщение реально
+    появится в чате, а не когда была вызвана команда. Без at - "сейчас"
+    (обычная немедленная отправка).
+
+    Список отложенных чистится от записей старше, чем "сейчас минус
+    наибольший required среди оставшихся" - более старые уже ни с чем не
+    могут конфликтовать ни при какой проверке.
 
     Состояние читается и пишется без блокировки: два параллельных прогона в
     разные чаты могут затереть записи друг друга. Для последовательной отправки
@@ -177,11 +268,37 @@ def pace_record(account: str, chat_id, chars: int) -> None:
     try:
         PACE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         state = pace_load()
-        state[pace_key(account, chat_id)] = {
-            "ts": time.time(),
-            "chars": int(chars),
-            "required": pace_required(int(chars)),
-        }
+        key = pace_key(account, chat_id)
+        entry = state.get(key)
+        if not isinstance(entry, dict):
+            entry = {}
+        now_ts = time.time()
+
+        if scheduled:
+            record = {
+                "ts": at.timestamp() if at is not None else now_ts,
+                "chars": int(chars),
+                "required": pace_required(int(chars)),
+            }
+            sched_list = entry.get("scheduled")
+            if not isinstance(sched_list, list):
+                sched_list = []
+            sched_list.append(record)
+            max_required = max(
+                (float(r.get("required", 0)) for r in sched_list if isinstance(r, dict)),
+                default=0.0,
+            )
+            cutoff = now_ts - max_required
+            entry["scheduled"] = [
+                r for r in sched_list
+                if isinstance(r, dict) and float(r.get("ts", 0)) >= cutoff
+            ]
+        else:
+            entry["ts"] = at.timestamp() if at is not None else now_ts
+            entry["chars"] = int(chars)
+            entry["required"] = pace_required(int(chars))
+
+        state[key] = entry
         # Уникальное имя + O_EXCL + O_NOFOLLOW: предсказуемый tmp можно
         # подменить симлинком и через нас усечь чужой файл.
         tmp = PACE_STATE_PATH.with_name(f"{PACE_STATE_PATH.name}.{os.getpid()}.tmp")
@@ -196,15 +313,18 @@ def pace_record(account: str, chat_id, chars: int) -> None:
         sys.stderr.write(f"Предупреждение: не удалось записать состояние темпа ({exc}).\n")
 
 
-def pace_guard(account: str, chat_id, skip: bool) -> int:
+def pace_guard(account: str, chat_id, skip: bool, *, at: datetime | None = None) -> int:
     """Проверка перед отправкой. 0 - можно слать, 3 - слишком рано.
+
+    at - см. pace_check: None для обычной немедленной отправки, назначенное
+    время доставки для отложенной.
 
     Возврат 3 - это отказ, а не ожидание: пауза должна быть решением
     отправителя, а не молчаливым сном скрипта внутри чужого прогона.
     """
     if skip:
         return 0
-    wait, required = pace_check(account, chat_id)
+    wait, required = pace_check(account, chat_id, at=at)
     if wait <= 0:
         return 0
     sys.stderr.write(
@@ -215,6 +335,173 @@ def pace_guard(account: str, chat_id, skip: bool) -> int:
         f"  (обход уместен, когда на том конце не человек или есть срочность по существу)\n"
     )
     return 3
+
+
+# Отложенная отправка на серверах Telegram (--schedule): сообщение ложится в
+# очередь и уходит в назначенное время без участия отправителя - client.session
+# для этого к моменту доставки уже не нужен. Лимит Telegram - около года вперед.
+SCHEDULE_MAX_DAYS = 366
+# Telegram отправляет немедленно, если до назначенного времени осталось меньше
+# 10 секунд (документированное поведение) - запас в 120с держит дистанцию от
+# этой границы заметно раньше, чем сеть и обвязка успеют ее съесть. Проверяется
+# минимум дважды: здесь (до сети) и еще раз в amain() прямо перед send_message/
+# send_file, потому что подключение и прогрев диалогов время тоже тратят. Для
+# файла - еще и третий раз, после upload_file: сама загрузка файла тоже тратит
+# время, и большой файл может успеть съесть весь оставшийся запас.
+SCHEDULE_MIN_LEAD = 120
+_SCHEDULE_RE = re.compile(
+    r"^(?P<y>\d{4})-(?P<mo>\d{2})-(?P<d>\d{2})"
+    r"[T ](?P<h>\d{2}):(?P<mi>\d{2})(?::(?P<s>\d{2}))?"
+    r"(?P<tz>Z|[+-]\d{2}:?\d{2})?$"
+)
+
+
+def parse_schedule(value: str, *, now: datetime | None = None) -> datetime:
+    """--schedule: ISO-время с оффсетом или без. Без оффсета - зона машины.
+
+    Возвращает aware datetime. Ручной разбор регэкспом, а не
+    datetime.fromisoformat: та до Python 3.11 не берет время без секунд
+    ("09:30"), а нам нужна именно эта форма из примера в задаче.
+    """
+    raw = value.strip()
+    m = _SCHEDULE_RE.match(raw)
+    if not m:
+        raise ValueError(
+            f"не разобрать время {value!r}: жду ISO вида 2026-09-22T09:30 "
+            f"или 2026-09-22T09:30+03:00"
+        )
+    y, mo, d = int(m["y"]), int(m["mo"]), int(m["d"])
+    h, mi = int(m["h"]), int(m["mi"])
+    s = int(m["s"]) if m["s"] else 0
+    try:
+        naive = datetime(y, mo, d, h, mi, s)
+    except ValueError as exc:
+        raise ValueError(f"некорректная дата/время {value!r}: {exc}") from exc
+
+    tz_raw = m["tz"]
+    if tz_raw is None:
+        # Без оффсета время считается локальным временем машины - astimezone()
+        # без аргумента интерпретирует наивный datetime так и подставляет зону
+        # системы, не сдвигая часы. Дальше dry-run обязан напечатать оффсет
+        # явно, чтобы рассинхрон зон был виден ДО --send.
+        #
+        # Переход на летнее/зимнее время дает в этой зоне час, у которого нет
+        # решения (пропущенный при переводе вперед) или два решения
+        # (повторенный при переводе назад) - astimezone() в обоих случаях
+        # молча выберет одно по fold=0, а это ровно тот тихий выбор, который
+        # нужно превратить в отказ. fold=0/fold=1 - единственные два
+        # прочтения наивного времени; если они дают один и тот же оффсет,
+        # переход тут ни при чем.
+        a0 = naive.replace(fold=0).astimezone()
+        a1 = naive.replace(fold=1).astimezone()
+        if a0.utcoffset() == a1.utcoffset():
+            dt = a0
+        else:
+            wall0 = (a0.year, a0.month, a0.day, a0.hour, a0.minute, a0.second)
+            wall_naive = (naive.year, naive.month, naive.day, naive.hour, naive.minute, naive.second)
+            if wall0 != wall_naive:
+                # Обратное преобразование (fold=0 -> UTC -> назад в зону
+                # машины) поменяло настенное время - значит запрошенного
+                # момента в этой зоне не бывает.
+                raise ValueError(
+                    f"несуществующее локальное время {naive.strftime('%Y-%m-%d %H:%M:%S')}: "
+                    f"в зоне машины в этот момент переводят стрелки вперед "
+                    f"(пропущенный час) - задай оффсет явно"
+                )
+            raise ValueError(
+                f"неоднозначное локальное время {naive.strftime('%Y-%m-%d %H:%M:%S')}: "
+                f"в зоне машины в этот момент переводят стрелки назад "
+                f"(повторенный час) - задай оффсет явно"
+            )
+    elif tz_raw == "Z":
+        dt = naive.replace(tzinfo=timezone.utc)
+    else:
+        sign = 1 if tz_raw[0] == "+" else -1
+        digits = tz_raw[1:].replace(":", "")
+        oh, om = int(digits[:2]), int(digits[2:])
+        # timedelta нормализует минуты/часы вне обычного диапазона в
+        # действительное время ("+03:99" молча стало бы "+04:39") - оффсет
+        # это заявленный часовой пояс, а не арифметика, поэтому мусор в нем
+        # отклоняем явно, а не подставляем то, что получилось после переноса.
+        if not (0 <= om <= 59):
+            raise ValueError(f"некорректный оффсет {tz_raw!r}: минуты вне 00-59")
+        if not (0 <= oh <= 14):
+            raise ValueError(f"некорректный оффсет {tz_raw!r}: часы вне 00-14 (реальный максимум UTC - +14:00)")
+        dt = naive.replace(tzinfo=timezone(sign * timedelta(hours=oh, minutes=om)))
+
+    now = now or datetime.now(timezone.utc)
+    if dt <= now:
+        raise ValueError(f"время в прошлом: {format_schedule(dt)}")
+    lead = (dt - now).total_seconds()
+    if lead < SCHEDULE_MIN_LEAD:
+        raise ValueError(
+            f"время слишком близко к текущему моменту ({lead:.0f} сек, нужно "
+            f"минимум {SCHEDULE_MIN_LEAD}): {format_schedule(dt)} - Telegram "
+            f"отправляет немедленно, если до срока меньше 10 сек, а такой запас "
+            f"слишком мал, чтобы доверять этому после подключения к сети"
+        )
+    if dt > now + timedelta(days=SCHEDULE_MAX_DAYS):
+        raise ValueError(
+            f"время дальше {SCHEDULE_MAX_DAYS} дней вперед: {format_schedule(dt)} "
+            f"(лимит отложенной отправки в Telegram - около года)"
+        )
+    return dt
+
+
+def format_schedule(dt: datetime) -> str:
+    """"2026-09-22 09:30:59 +03:00" - секунды печатаются всегда, а не только
+    когда ненулевые: превью обязано совпадать с тем, что реально уйдет
+    (send_message получает dt целиком, включая секунды из --schedule)."""
+    offset = dt.utcoffset() or timedelta(0)
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    oh, om = divmod(abs(total_minutes), 60)
+    return f"{dt.strftime('%Y-%m-%d %H:%M:%S')} {sign}{oh:02d}:{om:02d}"
+
+
+def _schedule_dates_match(a: datetime, b: datetime) -> bool:
+    """Секундная точность: Telegram может округлить дату в очереди, наш dt -
+    нет. Разница больше секунды - это уже не округление, а другое время."""
+    try:
+        return abs((a - b).total_seconds()) <= 1
+    except (TypeError, OverflowError):
+        return False
+
+
+async def verify_scheduled(
+    client: TelegramClient, entity, msg_id: int, *,
+    expected_date: datetime, expected_text: str,
+) -> tuple[bool, Exception | None]:
+    """Отложенное сообщение не появляется в обычной истории до срока - оно в
+    очереди client.get_messages(entity, scheduled=True). Проверять его там же,
+    иначе честно поставленное в очередь читалось бы как ненайденное.
+
+    Совпадения по одному id недостаточно: id из обычной истории и id из
+    очереди отложенных живут в разных пространствах, и случайное совпадение
+    читалось бы как найденное сообщение. Поэтому сверяем еще назначенную дату
+    доставки и текст (подпись - для файла).
+
+    Возврат (найдено, исключение) - НЕ bool. И пустая очередь, и упавший
+    запрос - оба неопределенный результат снаружи (см. amain): разница только
+    в диагностике, которую вызывающий код печатает пользователю.
+    """
+    try:
+        pending = await client.get_messages(entity, scheduled=True)
+    except Exception as exc:
+        return False, exc
+    for m in pending:
+        if getattr(m, "id", None) != msg_id:
+            continue
+        m_date = getattr(m, "date", None)
+        if m_date is None or not _schedule_dates_match(m_date, expected_date):
+            continue
+        m_text = getattr(m, "message", None)
+        if m_text is None:
+            m_text = getattr(m, "text", None)
+        if (m_text or "") != (expected_text or ""):
+            continue
+        return True, None
+    return False, None
 
 
 def load_auth(account: str = "default") -> dict:
@@ -521,6 +808,9 @@ async def amain(args) -> int:
     chat_id = entry["id"]
     topic_id = args.topic if args.topic is not None else entry["topic_id"]
     reply_id = args.reply_to
+    # getattr, не args.schedule: старые вызовы amain() (тесты, чужой код) не
+    # знают об этом поле, и им не нужно его заводить, чтобы остаться рабочими.
+    schedule_dt = getattr(args, "schedule", None)
 
     text = read_text(args, allow_empty=bool(args.file))
 
@@ -571,6 +861,8 @@ async def amain(args) -> int:
         if not args.send:
             print("DRY-RUN (без --send отправка не сделана)")
             print(f"  -> \"{title}\" ({kind}, id={chat_id})")
+            if schedule_dt is not None:
+                print(f"  отложено до: {format_schedule(schedule_dt)}")
             # от какого аккаунта уйдет - часть гейта: при нескольких номерах
             # ошибиться отправителем так же легко, как чатом
             print(f"  от аккаунта: {entry['account']}")
@@ -585,28 +877,99 @@ async def amain(args) -> int:
                     print(f"  | {ln}")
             else:
                 print("  подпись: нет (файл уйдет без текста)")
-            wait, required = pace_check(entry["account"], entity)
+            wait, required = pace_check(entry["account"], entity, at=schedule_dt)
             if wait > 0:
                 print(f"  темп: рано - после прошлого сообщения нужно {required:.0f} сек, осталось {wait:.0f}")
             return 0
 
-        rc = pace_guard(entry["account"], entity, args.no_pace_check)
+        rc = pace_guard(entry["account"], entity, args.no_pace_check, at=schedule_dt)
         if rc:
             return rc
 
+        if schedule_dt is not None:
+            # Второй раз, а не полагаясь на проверку из parse_schedule: connect,
+            # is_user_authorized и прогрев диалогов (iter_dialogs) уже потратили
+            # время, и запас, который был достаточным на старте, мог схлопнуться.
+            lead = (schedule_dt - datetime.now(timezone.utc)).total_seconds()
+            if lead < SCHEDULE_MIN_LEAD:
+                sys.stderr.write(
+                    f"До назначенного времени осталось {lead:.0f} сек - меньше "
+                    f"{SCHEDULE_MIN_LEAD} (минимальный запас). Подключение и "
+                    f"прогрев диалогов съели время; Telegram отправляет "
+                    f"немедленно, если до срока меньше 10 сек, а такой запас "
+                    f"граничит с этим. Отправка отменена, ничего не отправлено - "
+                    f"повтори с более поздним временем.\n"
+                )
+                return 2
+
         reply_to = build_reply_to(topic_id, reply_id)
         if file_path:
+            file_to_send = str(file_path)
+            if schedule_dt is not None:
+                # Telethon грузит файл ВНУТРИ send_file, до постановки в
+                # очередь - большой файл может съесть весь запас между второй
+                # проверкой выше и фактической отправкой, и Telegram отправит
+                # немедленно (граница - 10 сек). Грузим отдельно и проверяем
+                # запас еще раз, уже после загрузки.
+                file_to_send = await client.upload_file(str(file_path))
+                lead = (schedule_dt - datetime.now(timezone.utc)).total_seconds()
+                if lead < SCHEDULE_MIN_LEAD:
+                    sys.stderr.write(
+                        f"До назначенного времени осталось {lead:.0f} сек после "
+                        f"загрузки файла - меньше {SCHEDULE_MIN_LEAD} (минимальный "
+                        f"запас). Отправка отменена, ничего не отправлено - "
+                        f"повтори с более поздним временем или файлом поменьше.\n"
+                    )
+                    return 2
             # файл с подписью-текстом; force_document - имя и расширение как есть
             sent = await client.send_file(
-                entity, str(file_path), caption=text, reply_to=reply_to,
+                entity, file_to_send, caption=text, reply_to=reply_to,
                 force_document=True, parse_mode=None, silent=args.silent,
+                schedule=schedule_dt,
             )
         else:
             sent = await client.send_message(
                 entity, text, reply_to=reply_to, parse_mode=None, silent=args.silent,
+                schedule=schedule_dt,
             )
-        pace_record(entry["account"], entity, len(text or ""))
-        print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
+        pace_record(
+            entry["account"], entity, len(text or ""),
+            at=schedule_dt, scheduled=schedule_dt is not None,
+        )
+        if schedule_dt is not None:
+            # Отложенное лежит в очереди, а не в обычной истории - см.
+            # verify_scheduled. id из send_message тут же валиден только внутри
+            # этой очереди и сменится, когда Telegram доставит сообщение.
+            # Сверяем с тем, что вернула САМА отправка (sent.date, sent.message),
+            # а не с нашим входом (schedule_dt, text): при --html или подписи
+            # к файлу Telegram сохраняет уже разобранный текст, и сравнение с
+            # сырым HTML на входе не совпало бы никогда.
+            found, verify_exc = await verify_scheduled(
+                client, entity, sent.id, expected_date=sent.date, expected_text=sent.message,
+            )
+            if not found:
+                # Неподтвержденная постановка - НЕ успех: id, который вернул
+                # send_message, доказывает лишь то, что запрос приняли, а не
+                # то, что сообщение легло в очередь под назначенное время
+                # (rules/silent-failure.md, "Успех отправки относится к факту
+                # передачи, а не к продукту"). Автоповтора нет - решение,
+                # слать ли снова, за человеком.
+                reason = (
+                    f"причина: {type(verify_exc).__name__}: {verify_exc}"
+                    if verify_exc is not None else "не нашлось в очереди отложенных"
+                )
+                sys.stderr.write(
+                    f"НЕОПРЕДЕЛЕННО: отправка вернула id {sent.id}, но в очереди "
+                    f"отложенных не найдено - проверь \"Отложенные\" руками, "
+                    f"повторно не отправляй ({reason}).\n"
+                )
+                return 4
+            print(
+                f"OK: поставлено в очередь на {format_schedule(schedule_dt)} "
+                f"- \"{title}\" (id {sent.id})"
+            )
+        else:
+            print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
         await disconnect_quietly(client)
@@ -632,7 +995,21 @@ def main() -> int:
                              "Нужно, когда отправляем вне рабочего окна получателя - см. "
                              "rules/outbound-timing.md: звук ночью выдает автомат, но метка "
                              "времени остается видимой, поэтому это не обход правила")
+    parser.add_argument("--schedule",
+                        help="отложить до времени, ISO с оффсетом или без (без оффсета - "
+                             "зона машины): 2026-09-22T09:30+03:00 или 2026-09-22T09:30. "
+                             "Сообщение ляжет в очередь на серверах Telegram и уйдет само - "
+                             "см. rules/outbound-timing.md и скилл telegram-send. Прошлое "
+                             "и дальше года вперед отклоняются сразу, до сети")
     args = parser.parse_args()
+    if args.schedule is not None:
+        # Разбор и все проверки - ДО asyncio.run/сети: ошибка зоны или
+        # прошлое время видны немедленно, а не после подключения к Telegram.
+        try:
+            args.schedule = parse_schedule(args.schedule)
+        except ValueError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 2
     return asyncio.run(amain(args))
 
 
