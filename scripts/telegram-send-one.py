@@ -120,6 +120,9 @@ async def amain(args) -> int:
             print(f"  -> \"{title}\" (@{actual_username or '?'}, {kind}, id={chat_id})")
             if schedule_dt is not None:
                 print(f"  отложено до: {tgs.format_schedule(schedule_dt)}")
+                if tgs.is_round_minute(schedule_dt):
+                    # Дошло сюда только через --exact-minute - см. telegram-send.py.
+                    print("  ровная минута: разрешена явно")
             print(f"  ответ на: {args.reply_to if args.reply_to is not None else '-'}   формат: {'html' if args.html else 'сырой текст'}   аккаунт: {args.account}   звук: {'нет' if args.silent else 'да'}")
             if file_path:
                 # полный резолвленный путь и точный размер: dry-run - это
@@ -159,7 +162,16 @@ async def amain(args) -> int:
         parse_mode = "html" if args.html else None
         if file_path:
             file_to_send = str(file_path)
+            file_attrs, file_mime = None, None
             if schedule_dt is not None:
+                # См. telegram-send.py: атрибуты вычисляются из исходного
+                # файла ДО загрузки - после upload_file send_file видит только
+                # InputFile-хендл без содержимого, и для голосового вложения
+                # это дало бы DocumentAttributeAudio(voice=True, duration=0)
+                # вместо настоящей длительности.
+                file_attrs, file_mime = tgs.telethon_utils.get_attributes(
+                    str(file_path), force_document=not args.voice, voice_note=args.voice,
+                )
                 # Telethon грузит файл ВНУТРИ send_file, до постановки в
                 # очередь - большой файл может съесть весь запас между второй
                 # проверкой выше и фактической отправкой. Грузим отдельно и
@@ -180,6 +192,7 @@ async def amain(args) -> int:
                 entity, file_to_send, caption=text, reply_to=reply_to,
                 force_document=not args.voice, voice_note=args.voice,
                 parse_mode=parse_mode, silent=args.silent, schedule=schedule_dt,
+                attributes=file_attrs, mime_type=file_mime,
             )
         else:
             sent = await client.send_message(
@@ -260,11 +273,18 @@ def main() -> int:
                              "Сообщение ляжет в очередь на серверах Telegram и уйдет само - "
                              "см. rules/outbound-timing.md и скилл telegram-send. Прошлое "
                              "и дальше года вперед отклоняются сразу, до сети")
+    parser.add_argument("--exact-minute", action="store_true", dest="exact_minute",
+                        help="разрешить ровную минуту (:00/:15/:30/:45, секунды :00) в "
+                             "--schedule (см. тот же флаг в telegram-send.py)")
     args = parser.parse_args()
     if args.schedule is not None:
         # Разбор и все проверки - ДО asyncio.run/сети, как в telegram-send.py.
+        # RoundMinuteRejected - раньше общего ValueError (см. там же).
         try:
-            args.schedule = tgs.parse_schedule(args.schedule)
+            args.schedule = tgs.parse_schedule(args.schedule, exact_minute=args.exact_minute)
+        except tgs.RoundMinuteRejected as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 6
         except ValueError as exc:
             sys.stderr.write(f"{exc}\n")
             return 2

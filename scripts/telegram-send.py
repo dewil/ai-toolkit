@@ -61,6 +61,7 @@ from pathlib import Path
 
 try:
     from telethon import TelegramClient
+    from telethon import utils as telethon_utils
 except ImportError:
     sys.stderr.write(
         "telethon не установлен. Поставь: pip3 install --user telethon\n"
@@ -140,10 +141,27 @@ def pace_required(prev_chars: int) -> float:
     return max(PACE_MIN_GAP, need * (1 - random.uniform(0, PACE_JITTER)))
 
 
-def _pace_candidates(entry: dict) -> list[tuple[float, float, bool]]:
+def pace_scheduled_key(key: str) -> str:
+    """Ключ реестра, под которым лежит СПИСОК отложенных для pace_key key.
+
+    Отдельный от key верхнего уровня, и это не косметика: старая версия
+    скрипта на другой машине, ничего не знающая про отложенные, в pace_record
+    делает state[key] = {...} ЦЕЛИКОМ (полная замена записи, а не merge
+    полей). Если бы список отложенных лежал вложенным полем той же записи
+    (entry["scheduled"]), такая замена стирала бы его вместе с остальным -
+    обычная отправка старой версией между двумя постановками в очередь на
+    09:00 обнулила бы защиту, и третья постановка на 09:00 прошла бы мимо
+    забытой первой. Ключ отдельного пространства имен старый писатель не
+    трогает вовсе - state[key] и state[pace_scheduled_key(key)] независимы.
+    """
+    return f"scheduled:{key}"
+
+
+def _pace_candidates(entry: dict | None, scheduled_list) -> list[tuple[float, float, bool]]:
     """(ts, required, is_scheduled) для каждой релевантной записи чата: сама
     верхнеуровневая (последняя ОБЫЧНАЯ отправка - прежний формат, ts/chars/
-    required) и каждая еще не вычищенная отложенная из entry["scheduled"].
+    required, ключ pace_key) и каждая еще не вычищенная отложенная из
+    отдельного ключа pace_scheduled_key (список записей).
 
     Несколько отложенных не заменяют друг друга (см. pace_record) - сверяться
     нужно со всеми разом, иначе вторая отложенная пройдет мимо первой, про
@@ -167,12 +185,11 @@ def _pace_candidates(entry: dict) -> list[tuple[float, float, bool]]:
         if math.isfinite(ts) and math.isfinite(required):
             out.append((ts, required, is_scheduled))
 
-    if "ts" in entry:
+    if isinstance(entry, dict) and "ts" in entry:
         add(entry.get("ts", 0), entry.get("required", 0), entry.get("chars", 0), False)
 
-    scheduled = entry.get("scheduled")
-    if isinstance(scheduled, list):
-        for rec in scheduled:
+    if isinstance(scheduled_list, list):
+        for rec in scheduled_list:
             if isinstance(rec, dict):
                 add(rec.get("ts", 0), rec.get("required", 0), rec.get("chars", 0), True)
 
@@ -189,10 +206,11 @@ def pace_check(account: str, chat_id, at: datetime | None = None) -> tuple[float
     а не только с последней: обычная отправка прямо сейчас обязана видеть уже
     поставленные в очередь отложенные, а не только предыдущую обычную.
     """
-    entry = pace_load().get(pace_key(account, chat_id))
-    if not isinstance(entry, dict):
-        return 0.0, 0.0
-    candidates = _pace_candidates(entry)
+    state = pace_load()
+    key = pace_key(account, chat_id)
+    entry = state.get(key)
+    scheduled_list = state.get(pace_scheduled_key(key))
+    candidates = _pace_candidates(entry if isinstance(entry, dict) else None, scheduled_list)
     if not candidates:
         return 0.0, 0.0
 
@@ -243,13 +261,16 @@ def pace_record(
     """Запомнить момент отправки (или назначенное время доставки для
     отложенной) и паузу, которую он требует. Сбой записи отправку не отменяет.
 
-    Формат с обратной совместимостью. Верхнеуровневые ts/chars/required -
-    последняя ОБЫЧНАЯ отправка, ключ и семантика прежние байт в байт: старая
-    версия скрипта на другой машине, ничего не знающая про отложенные,
-    прочитает их как раньше и ключ "scheduled" не заметит вовсе. Отложенные
-    хранятся отдельным списком entry["scheduled"] и друг друга не заменяют -
-    иначе постановки 09:00 -> 12:00 -> 09:00 все проходят (третья мимо занятого
-    09:00, о котором состояние уже "забыло"), а обычная отправка стирала бы
+    Формат с обратной совместимостью. Верхнеуровневая запись под pace_key
+    (ts/chars/required) - последняя ОБЫЧНАЯ отправка, ключ и семантика прежние
+    байт в байт: старая версия скрипта на другой машине, ничего не знающая про
+    отложенные, прочитает ее как раньше. Отложенные хранятся СПИСКОМ под
+    ОТДЕЛЬНЫМ ключом pace_scheduled_key, а не вложенным полем той же записи -
+    см. его докстринг про то, почему это важно (старый писатель делает
+    state[pace_key] = {...} целиком, и вложенный список это не пережил бы).
+    Несколько отложенных друг друга не заменяют - иначе постановки
+    09:00 -> 12:00 -> 09:00 все проходят (третья мимо занятого 09:00, о
+    котором состояние уже "забыло"), а обычная отправка стирала бы
     единственное свидетельство будущей доставки.
 
     at - для отложенной отправки: назначенное время доставки, а не момент
@@ -269,36 +290,37 @@ def pace_record(
         PACE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         state = pace_load()
         key = pace_key(account, chat_id)
-        entry = state.get(key)
-        if not isinstance(entry, dict):
-            entry = {}
         now_ts = time.time()
 
         if scheduled:
+            sched_key = pace_scheduled_key(key)
+            sched_list = state.get(sched_key)
+            if not isinstance(sched_list, list):
+                sched_list = []
             record = {
                 "ts": at.timestamp() if at is not None else now_ts,
                 "chars": int(chars),
                 "required": pace_required(int(chars)),
             }
-            sched_list = entry.get("scheduled")
-            if not isinstance(sched_list, list):
-                sched_list = []
             sched_list.append(record)
             max_required = max(
                 (float(r.get("required", 0)) for r in sched_list if isinstance(r, dict)),
                 default=0.0,
             )
             cutoff = now_ts - max_required
-            entry["scheduled"] = [
+            state[sched_key] = [
                 r for r in sched_list
                 if isinstance(r, dict) and float(r.get("ts", 0)) >= cutoff
             ]
         else:
+            entry = state.get(key)
+            if not isinstance(entry, dict):
+                entry = {}
             entry["ts"] = at.timestamp() if at is not None else now_ts
             entry["chars"] = int(chars)
             entry["required"] = pace_required(int(chars))
+            state[key] = entry
 
-        state[key] = entry
         # Уникальное имя + O_EXCL + O_NOFOLLOW: предсказуемый tmp можно
         # подменить симлинком и через нас усечь чужой файл.
         tmp = PACE_STATE_PATH.with_name(f"{PACE_STATE_PATH.name}.{os.getpid()}.tmp")
@@ -356,7 +378,41 @@ _SCHEDULE_RE = re.compile(
 )
 
 
-def parse_schedule(value: str, *, now: datetime | None = None) -> datetime:
+class RoundMinuteRejected(ValueError):
+    """Ровная минута (:00/:15/:30/:45, секунды :00) без --exact-minute.
+
+    Подкласс ValueError - код, ловящий общий ValueError (старый контракт
+    parse_schedule), продолжает его ловить. main() проверяет этот класс
+    ПЕРЕД общим ValueError, чтобы вернуть отдельный код (6, а не 2): причина
+    отказа другая - не разбор и не диапазон времени, а как метка выглядит
+    получателю (rules/outbound-timing.md, "Ровная минута").
+    """
+
+
+def is_round_minute(dt: datetime) -> bool:
+    """Ровная минута - подпись автомата (rules/outbound-timing.md, "Ровная
+    минута"): секунды строго :00 и минута кратна 15 (:00/:15/:30/:45).
+    09:00:30 - НЕ ровная (секунды ненулевые) - гейт ее не трогает.
+    """
+    return dt.second == 0 and dt.minute % 15 == 0
+
+
+def suggest_non_round(dt: datetime) -> datetime:
+    """Соседняя некруглая минута для подсказки в тексте отказа.
+
+    Правило выбора: сдвиг ВПЕРЕД на 7 минут. 7 не делится на 15, поэтому
+    результат математически не может попасть на другую круглую отметку - не
+    нужно перебирать исключения или проверять результат повторно. Секунды
+    обнуляются - подсказка называет минуту, а не секунду. Направление
+    (вперед, а не назад) выбрано произвольно, но фиксировано: подсказка для
+    одного и того же dt всегда одна и та же, а не случайная.
+    """
+    return (dt + timedelta(minutes=7)).replace(second=0, microsecond=0)
+
+
+def parse_schedule(
+    value: str, *, now: datetime | None = None, exact_minute: bool = False
+) -> datetime:
     """--schedule: ISO-время с оффсетом или без. Без оффсета - зона машины.
 
     Возвращает aware datetime. Ручной разбор регэкспом, а не
@@ -444,6 +500,15 @@ def parse_schedule(value: str, *, now: datetime | None = None) -> datetime:
         raise ValueError(
             f"время дальше {SCHEDULE_MAX_DAYS} дней вперед: {format_schedule(dt)} "
             f"(лимит отложенной отправки в Telegram - около года)"
+        )
+    if is_round_minute(dt) and not exact_minute:
+        hint = suggest_non_round(dt)
+        raise RoundMinuteRejected(
+            f"ровная минута {format_schedule(dt)}: читается как подпись автомата, "
+            f"а не человека (rules/outbound-timing.md, \"Ровная минута\") - возьми "
+            f"соседнюю некруглую, например {hint.strftime('%H:%M')} "
+            f"({format_schedule(hint)}). Минуту назвал сам пользователь явно "
+            f"('ровно в 9:00', 'к началу созвона') - обход --exact-minute."
         )
     return dt
 
@@ -863,6 +928,10 @@ async def amain(args) -> int:
             print(f"  -> \"{title}\" ({kind}, id={chat_id})")
             if schedule_dt is not None:
                 print(f"  отложено до: {format_schedule(schedule_dt)}")
+                if is_round_minute(schedule_dt):
+                    # Дошло сюда только через --exact-minute - без флага
+                    # parse_schedule() отказала бы раньше, до сети.
+                    print("  ровная минута: разрешена явно")
             # от какого аккаунта уйдет - часть гейта: при нескольких номерах
             # ошибиться отправителем так же легко, как чатом
             print(f"  от аккаунта: {entry['account']}")
@@ -905,7 +974,18 @@ async def amain(args) -> int:
         reply_to = build_reply_to(topic_id, reply_id)
         if file_path:
             file_to_send = str(file_path)
+            file_attrs, file_mime = None, None
             if schedule_dt is not None:
+                # Атрибуты (имя, длительность и т.п.) вычисляются ИЗ ИСХОДНОГО
+                # файла ДО загрузки: после upload_file в send_file уходит
+                # InputFile-хендл, у которого содержимого уже не прочитать, и
+                # собственная попытка Telethon извлечь их из хендла молча
+                # проваливается (для аудио - нулевая длительность вместо
+                # настоящей). Явные attributes/mime_type в send_file эту
+                # попытку переопределяют.
+                file_attrs, file_mime = telethon_utils.get_attributes(
+                    str(file_path), force_document=True,
+                )
                 # Telethon грузит файл ВНУТРИ send_file, до постановки в
                 # очередь - большой файл может съесть весь запас между второй
                 # проверкой выше и фактической отправкой, и Telegram отправит
@@ -925,7 +1005,7 @@ async def amain(args) -> int:
             sent = await client.send_file(
                 entity, file_to_send, caption=text, reply_to=reply_to,
                 force_document=True, parse_mode=None, silent=args.silent,
-                schedule=schedule_dt,
+                schedule=schedule_dt, attributes=file_attrs, mime_type=file_mime,
             )
         else:
             sent = await client.send_message(
@@ -1001,12 +1081,25 @@ def main() -> int:
                              "Сообщение ляжет в очередь на серверах Telegram и уйдет само - "
                              "см. rules/outbound-timing.md и скилл telegram-send. Прошлое "
                              "и дальше года вперед отклоняются сразу, до сети")
+    parser.add_argument("--exact-minute", action="store_true", dest="exact_minute",
+                        help="разрешить ровную минуту (:00/:15/:30/:45, секунды :00) в "
+                             "--schedule. Без флага такая минута отклоняется до сети "
+                             "(код 6) - она читается как подпись автомата, а не человека "
+                             "(rules/outbound-timing.md, \"Ровная минута\"). Обход - "
+                             "только когда минуту назвал сам пользователь явно "
+                             "('ровно в 9:00', 'к началу созвона')")
     args = parser.parse_args()
     if args.schedule is not None:
-        # Разбор и все проверки - ДО asyncio.run/сети: ошибка зоны или
-        # прошлое время видны немедленно, а не после подключения к Telegram.
+        # Разбор и все проверки - ДО asyncio.run/сети: ошибка зоны, прошлое
+        # время или ровная минута видны немедленно, а не после подключения к
+        # Telegram. RoundMinuteRejected ловится раньше общего ValueError,
+        # которому она подкласс, - иначе гейт вернул бы тот же код 2, что и
+        # разбор/диапазон, и код 6 отличить было бы нечем.
         try:
-            args.schedule = parse_schedule(args.schedule)
+            args.schedule = parse_schedule(args.schedule, exact_minute=args.exact_minute)
+        except RoundMinuteRejected as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 6
         except ValueError as exc:
             sys.stderr.write(f"{exc}\n")
             return 2
