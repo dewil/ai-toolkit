@@ -189,34 +189,91 @@ class ModeInteraction(unittest.TestCase):
 
 
 class OrderedListRenumber(unittest.TestCase):
-    """Регресс на находку 20.09.2026 (canon-inbox): абзац-пояснение без
-    markdown-отступа между пунктами нумерованного списка закрывал <ol>, и
-    список из пяти вопросов уходил в PDF пронумерованным 1, 2, 1, 2, 1."""
+    """Решение пользователя 21.09.2026 (canon-inbox, находка 20.09.2026):
+    списки не склеиваются - каждый фрагмент остается отдельным <ol>.
+    Непрерывность выражается атрибутом start, который считается от числа
+    пунктов предыдущего нумерованного списка документа, а не берется из
+    исходника второго фрагмента: так вставленный в первый фрагмент пункт
+    сдвигает продолжение."""
 
-    def test_continuation_paragraph_keeps_single_list(self):
+    def test_empty_item_counts_toward_continuation_start(self):
+        # "2." без текста - пункт, а не абзац: иначе продолжение получит start=2
+        html = md_pdf.md_to_html("1. А\n2.\n\nПояснение\n\n3. В\n")[1]
+        self.assertEqual(html.count("<ol"), 2)
+        self.assertIn('<ol start="3">', html)
+        self.assertEqual(html.count("<li>"), 3)
+
+    def test_continuation_paragraph_gets_computed_start(self):
         h = body(
             "1. первый\n2. второй\n\nПояснение без отступа.\n\n"
             "3. третий\n4. четвертый\n5. пятый\n"
         )
-        self.assertEqual(h.count("<ol>"), 1)
-        self.assertEqual(h.count("</ol>"), 1)
+        self.assertEqual(h.count("<ol"), 2)
+        self.assertEqual(h.count("</ol>"), 2)
         self.assertEqual(h.count("<li>"), 5)
+        self.assertIn("<ol>", h)
+        self.assertIn('<ol start="3">', h)
         self.assertIn("<p>Пояснение без отступа.</p>", h)
 
     def test_two_real_lists_split_by_paragraph_stay_separate(self):
-        """Абзац-НЕ-продолжение: второй список начинается заново с 1, а не
-        продолжает нумерацию первого - это два разных списка, не один."""
+        """Абзац-НЕ-продолжение: второй список в исходнике начинается заново
+        с 1 - по правилу это новый список независимо от предыдущего."""
         h = body(
             "1. первый\n2. второй\n\nОбычный абзац, не пояснение к пункту.\n\n"
             "1. новый первый\n2. новый второй\n"
         )
-        self.assertEqual(h.count("<ol>"), 2)
+        self.assertEqual(h.count("<ol"), 2)
         self.assertEqual(h.count("</ol>"), 2)
+        self.assertNotIn("start=", h)
 
     def test_two_real_lists_split_by_heading_stay_separate(self):
         h = body("1. первый\n2. второй\n\n## Заголовок\n\n1. новый первый\n2. новый второй\n")
-        self.assertEqual(h.count("<ol>"), 2)
+        self.assertEqual(h.count("<ol"), 2)
         self.assertEqual(h.count("</ol>"), 2)
+        self.assertNotIn("start=", h)
+
+    def test_no_previous_list_uses_literal_start(self):
+        """Нет предыдущего нумерованного списка - start берется буквально
+        из исходника (список начат с 3 - рендерится с 3)."""
+        h = body("3. три\n4. четыре\n5. пять\n")
+        self.assertEqual(h.count("<ol"), 1)
+        self.assertIn('<ol start="3">', h)
+
+    def test_single_item_list_recomputes_start(self):
+        """Случай A1 из ревью: список из одного пункта, продолженный после
+        абзаца, - отдельный <ol> со start, посчитанным как 1+1."""
+        h = body("1. один\n\nабзац\n\n2. два\n")
+        self.assertEqual(h.count("<ol"), 2)
+        self.assertIn("<ol>", h)
+        self.assertIn('<ol start="2">', h)
+
+    def test_recalculation_after_inserted_item(self):
+        """Пункт, вставленный в первый фрагмент, сдвигает start второго -
+        он считается заново, а не берется из (не тронутого) исходника
+        второго фрагмента, где буквально стоит сталое "3"."""
+        md = "1. первый\n2. второй\n3. вставленный\n\nабзац\n\n3. третий\n4. четвертый\n"
+        h = body(md)
+        self.assertEqual(h.count("<li>"), 5)
+        self.assertIn("<ol>", h)
+        self.assertIn('<ol start="4">', h)
+
+    def test_continuation_through_code_block(self):
+        """Блок кода между фрагментами не мешает продолжению - учитывается
+        только номер, не тип содержимого между списками."""
+        h = body("1. один\n2. два\n\n```\nкод\n```\n\n99. три\n")
+        self.assertIn('<ol start="3">', h)
+
+    def test_continuation_through_quote(self):
+        h = body("1. один\n2. два\n\n> цитата\n\n99. три\n")
+        self.assertIn('<ol start="3">', h)
+
+    def test_internal_numbers_ignored_within_fragment(self):
+        """Внутри фрагмента номера исходника игнорируются, как по CommonMark:
+        1,1,1 рендерится 1,2,3 - то есть просто без start и с тремя <li>."""
+        h = body("1. а\n1. б\n1. в\n")
+        self.assertEqual(h.count("<ol"), 1)
+        self.assertNotIn("start=", h)
+        self.assertEqual(h.count("<li>"), 3)
 
 
 class InlineCode(unittest.TestCase):

@@ -39,8 +39,10 @@ GFM-таблицы.
 Отличия от PDF-ветки:
 - Картинка из сети (http://...) не скачивается - в документ идет "[alt]".
   То же при нечитаемом или неизвестном формате файла.
-- Нумерованные списки нумеруются заново с 1 (Word ведет счет сам), исходный
-  номер первого пункта не сохраняется.
+- Нумерованные списки: старт каждого фрагмента - тот же, что в HTML-ветке
+  (md_to_html в md-pdf.py, атрибут <ol start="N">), только записан не в
+  разметку, а в numbering.xml (w:lvlOverride/w:startOverride) - поэтому
+  продолжение нумерации после абзаца, кода или цитаты сохраняется и в docx.
 - Выравнивание колонок таблиц (:--:) не переносится, как и в PDF-ветке.
 """
 
@@ -173,6 +175,10 @@ def styles_xml(separators: bool = False) -> str:
 # один список, разорванный на куски, - второй список начинался с 5, третий с 11.
 # Настоящие списки Word (а не символ в тексте) нужны потому, что документ идет
 # на правки: получатель дописывает пункт, и нумерация продолжается сама.
+# Список, продолжающий нумерацию предыдущего после абзаца/цитаты/кода (start
+# != 1 в HTML-теле от md_to_html), получает свой numId с w:lvlOverride/
+# w:startOverride: abstractNum общий, трогать его w:start нельзя, а свежий
+# w:num с оверрайдом стартует Word ровно с нужного числа.
 BULLET_NUMID = 1        # маркированные списки делят один numId: счета у них нет
 FIRST_OL_NUMID = 2      # нумерованные начинаются отсюда, по одному на список
 NUMBERING_HEAD = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -187,12 +193,24 @@ NUMBERING_HEAD = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 """
 
 
-def numbering_xml(ol_count: int) -> str:
-    """numbering.xml под фактическое число нумерованных списков в документе."""
+def numbering_xml(ol_starts: list[int]) -> str:
+    """numbering.xml под фактические нумерованные списки документа.
+
+    ol_starts - start каждого списка по порядку появления (1 - обычный,
+    иначе - продолжение предыдущего фрагмента или буквальный номер из
+    исходника, см. md_to_html в md-pdf.py). Список со start != 1 получает
+    w:lvlOverride/w:startOverride на своем w:num.
+    """
     nums = [f'<w:num w:numId="{BULLET_NUMID}"><w:abstractNumId w:val="0"/></w:num>']
-    for i in range(ol_count):
-        nums.append(f'<w:num w:numId="{FIRST_OL_NUMID + i}">'
-                    f'<w:abstractNumId w:val="1"/></w:num>')
+    for i, start in enumerate(ol_starts):
+        override = (
+            f'<w:lvlOverride w:ilvl="0"><w:startOverride w:val="{start}"/></w:lvlOverride>'
+            if start != 1 else ""
+        )
+        nums.append(
+            f'<w:num w:numId="{FIRST_OL_NUMID + i}">'
+            f'<w:abstractNumId w:val="1"/>{override}</w:num>'
+        )
     return NUMBERING_HEAD + "\n" + "\n".join(nums) + "\n</w:numbering>"
 
 # A4 (11906x16838 twips) с полями примерно как в DEFAULT_CSS у md-pdf.py
@@ -394,6 +412,7 @@ class DocxBody(html.parser.HTMLParser):
         self.numid = 0             # нумерация ТЕКУЩЕГО абзаца: 1 - bullet, 2 - decimal
         self.list_num = 0          # нумерация открытого списка; 0 - список не открыт
         self.ol_count = 0          # сколько нумерованных списков встретилось
+        self.ol_starts: list[int] = []  # их start по порядку появления (см. numbering_xml)
         self.fmt: list[str] = []   # активные inline-стили: b, i, code
         self.links: list[str] = []  # стек rId открытых гиперссылок
         self.in_pre = False
@@ -563,6 +582,9 @@ class DocxBody(html.parser.HTMLParser):
                 # списком и продолжает счет сквозь весь документ
                 self.ol_count += 1
                 self.list_num = FIRST_OL_NUMID + self.ol_count - 1
+                # start уже посчитан в md_to_html (продолжение предыдущего
+                # фрагмента документа или буквальный номер из исходника)
+                self.ol_starts.append(int(a.get("start") or 1))
         elif tag == "table":
             self.flush()
             self.rows, self.width = [], 0
@@ -794,7 +816,7 @@ def build(
         z.writestr("word/document.xml", doc)
         z.writestr("word/_rels/document.xml.rels", doc_rels)
         z.writestr("word/styles.xml", styles_xml(separators))
-        z.writestr("word/numbering.xml", numbering_xml(parser.ol_count))
+        z.writestr("word/numbering.xml", numbering_xml(parser.ol_starts))
         for _, name, data in parser.media:
             # картинки уже сжаты своим кодеком - deflate только тратит время
             z.writestr(f"word/media/{name}", data, zipfile.ZIP_STORED)
