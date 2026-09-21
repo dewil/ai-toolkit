@@ -331,19 +331,18 @@ def md_to_html(md: str) -> tuple[str, str]:
     mode = ""  # "", "ul", "ol", "quote", "pre", "table", "p"
     tbl: list[str] = []   # сырые строки таблицы - до валидации
     para: list[str] = []  # сырые строки абзаца - до склейки
-    # Границы нумерованных списков в out: если между <ol>..</ol> и следующим
-    # <ol> лежат только абзацы (пояснение без отступа - обычный случай) и
-    # нумерация продолжается (первый номер второго = последнему номера
-    # первого + 1), это ОДИН список, разорванный абзацем, а не два - пара
-    # тегов схлопывается ниже. Заголовок/hr/таблица/другой список между ними
-    # не абзац - схлопывания не будет, эти границы остаются настоящими.
-    # Известная граница критерия: второй, самостоятельный список, который в
-    # исходнике начинается ровно с продолжающего номера (1. ... / абзац / 2. ...),
-    # тоже склеится - номер продолжается, а смена темы по тексту не читается.
-    # Это осознанный выбор в пользу живого случая (продолжение без отступа),
-    # а не спецификация markdown; альтернатива - критерий по отступу.
-    ol_ranges: list[dict] = []
-    ol_start = ol_first = ol_last = 0
+    # Продолжение нумерации между фрагментами (решение пользователя,
+    # 21.09.2026): списки НЕ склеиваются - каждый фрагмент остается своим
+    # <ol>. Если первый номер фрагмента в исходнике не 1, это продолжение
+    # предыдущего нумерованного списка ДОКУМЕНТА (что стоит между ними -
+    # абзац, код, цитата, заголовок - значения не имеет): start считается как
+    # start предыдущего плюс число его пунктов, а не берется из исходника -
+    # вставленный в предыдущий фрагмент пункт сдвигает продолжение. Предыдущего
+    # списка нет вовсе - start берется буквально из исходника.
+    prev_ol_start: int | None = None  # start последнего закрытого в документе <ol>
+    prev_ol_count = 0                 # число его пунктов
+    cur_ol_start = 0                  # start открытого сейчас <ol>
+    cur_ol_count = 0                  # число его пунктов до сих пор
 
     def split_row(row: str) -> list[str]:
         """Ячейки строки таблицы: снимает ровно один крайний |, уважает \\|.
@@ -415,14 +414,12 @@ def md_to_html(md: str) -> tuple[str, str]:
             para.clear()
 
     def close() -> None:
-        nonlocal mode
+        nonlocal mode, prev_ol_start, prev_ol_count
         if mode == "ul":
             out.append("</ul>")
         elif mode == "ol":
             out.append("</ol>")
-            ol_ranges.append(
-                {"start": ol_start, "end": len(out) - 1, "first": ol_first, "last": ol_last}
-            )
+            prev_ol_start, prev_ol_count = cur_ol_start, cur_ol_count
         elif mode == "quote":
             out.append("</blockquote>")
         elif mode == "pre":
@@ -475,15 +472,21 @@ def md_to_html(md: str) -> tuple[str, str]:
                 out.append("<ul>")
                 mode = "ul"
             out.append(f"<li>{inline(line[2:])}</li>")
-        elif re.match(r"\d+\. ", line):
-            num = int(re.match(r"(\d+)\. ", line).group(1))
+        elif re.match(r"\d+\.(?: |$)", line):  # пустой пункт "2." - тоже пункт, иначе он выпадает из счета старта
+            num = int(re.match(r"(\d+)\.(?: |$)", line).group(1))
             if mode != "ol":
                 close()
-                out.append("<ol>")
+                if num == 1:
+                    start = 1
+                elif prev_ol_start is not None:
+                    start = prev_ol_start + prev_ol_count  # считаем, не берем из исходника
+                else:
+                    start = num  # нет предыдущего списка - буквально как в исходнике
+                out.append("<ol>" if start == 1 else f'<ol start="{start}">')
                 mode = "ol"
-                ol_start, ol_first = len(out) - 1, num
-            ol_last = num
-            text = re.sub(r"^\d+\. ", "", line)
+                cur_ol_start, cur_ol_count = start, 0
+            cur_ol_count += 1
+            text = re.sub(r"^\d+\.(?: |$)", "", line)
             out.append(f"<li>{inline(text)}</li>")
         elif line.startswith("> "):
             if mode != "quote":
@@ -498,20 +501,7 @@ def md_to_html(md: str) -> tuple[str, str]:
                 mode = "p"
             para.append(line.strip())
     close()
-
-    merged = ol_ranges[:1]
-    for rng in ol_ranges[1:]:
-        prev = merged[-1]
-        between = out[prev["end"] + 1 : rng["start"]]
-        if rng["first"] == prev["last"] + 1 and all(
-            re.fullmatch(r"<p>.*</p>", b, re.S) for b in between
-        ):
-            out[prev["end"]] = out[rng["start"]] = None  # снимаем "</ol>"/"<ol>" - список один
-            prev["end"], prev["last"] = rng["end"], rng["last"]
-        else:
-            merged.append(rng)
-
-    return title, "\n".join(s for s in out if s is not None)
+    return title, "\n".join(out)
 
 
 NB_HYPHEN = "\u2011"

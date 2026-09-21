@@ -321,6 +321,18 @@ class ListNumbering(unittest.TestCase):
         declared = [e.get(W + "numId") for e in num.iter(W + "num")]
         return used, declared
 
+    def start_overrides(self, md):
+        """numId -> start из w:lvlOverride/w:startOverride (нет записи -
+        значит список стартует с 1, оверрайд не нужен)."""
+        z = pack(md)
+        num = ET.fromstring(z.read("word/numbering.xml"))
+        out = {}
+        for n in num.iter(W + "num"):
+            so = n.find(f"{W}lvlOverride/{W}startOverride")
+            if so is not None:
+                out[n.get(W + "numId")] = int(so.get(W + "val"))
+        return out
+
     def test_each_ordered_list_gets_own_numid(self):
         used, _ = self.numids(self.THREE)
         # три нумерованных списка -> три разных numId, маркеры отдельно
@@ -357,15 +369,60 @@ class ListNumbering(unittest.TestCase):
         for e in num.iter(W + "num"):
             self.assertIsNotNone(e.find(W + "abstractNumId"))
 
-    def test_continuation_paragraph_keeps_one_numid(self):
-        """Регресс 20.09.2026: абзац-пояснение без отступа, после которого
-        список продолжает нумерацию (3 идет за 2), - это ОДИН numId, а не
-        разрыв на второй список (см. test_md_pdf.OrderedListRenumber)."""
+    def test_continuation_paragraph_gets_second_numid_with_start(self):
+        """Решение пользователя 21.09.2026: списки больше не склеиваются -
+        абзац-пояснение без отступа дает ВТОРОЙ numId, а непрерывность (3
+        идет за 2) выражена w:startOverride=3, а не общим numId
+        (см. test_md_pdf.OrderedListRenumber)."""
         md = "1. раз\n2. два\n\nПояснение без отступа.\n\n3. три\n4. четыре\n5. пять\n"
         used, _ = self.numids(md)
         ordered = [u for u in used if u != "1"]
         self.assertEqual(len(ordered), 5, used)
-        self.assertEqual(len(set(ordered)), 1, used)
+        self.assertEqual(ordered[:2], [ordered[0]] * 2, used)
+        self.assertEqual(ordered[2:], [ordered[-1]] * 3, used)
+        self.assertNotEqual(ordered[0], ordered[-1], "продолжение обязано быть отдельным numId")
+
+        overrides = self.start_overrides(md)
+        self.assertNotIn(ordered[0], overrides, "первый фрагмент начинается с 1 - оверрайда нет")
+        self.assertEqual(overrides[ordered[-1]], 3)
+
+    def test_two_real_lists_start_fresh_without_override(self):
+        """Оба фрагмента начинаются в исходнике с 1 - это два разных списка,
+        оверрайда старта нет ни у одного."""
+        md = ("1. первый\n2. второй\n\nОбычный абзац, не пояснение к пункту.\n\n"
+              "1. новый первый\n2. новый второй\n")
+        self.assertEqual(self.start_overrides(md), {})
+
+    def test_no_previous_list_start_taken_literally(self):
+        """Нет предыдущего нумерованного списка - start берется буквально
+        из исходника."""
+        md = "3. три\n4. четыре\n5. пять\n"
+        used, _ = self.numids(md)
+        overrides = self.start_overrides(md)
+        numid = used[0]
+        self.assertEqual(overrides[numid], 3)
+
+    def test_recalculation_after_inserted_item(self):
+        """Пункт, вставленный в первый фрагмент, сдвигает start второго
+        numId на пересчитанное значение, а не на сталое "3" из исходника
+        второго фрагмента (см. test_md_pdf.OrderedListRenumber)."""
+        md = "1. первый\n2. второй\n3. вставленный\n\nабзац\n\n3. третий\n4. четвертый\n"
+        used, _ = self.numids(md)
+        ordered = [u for u in used if u != "1"]
+        second_numid = ordered[-1]
+        overrides = self.start_overrides(md)
+        self.assertEqual(overrides[second_numid], 4)
+
+    def test_continuation_through_code_and_quote(self):
+        """Тип содержимого между фрагментами (код, цитата) не влияет на
+        пересчет - только число пунктов предыдущего списка."""
+        for between in ("```\nкод\n```\n", "> цитата\n"):
+            with self.subTest(between=between):
+                md = f"1. один\n2. два\n\n{between}\n99. три\n"
+                used, _ = self.numids(md)
+                ordered = [u for u in used if u != "1"]
+                overrides = self.start_overrides(md)
+                self.assertEqual(overrides[ordered[-1]], 3)
 
 
 class SchemaOrder(unittest.TestCase):
