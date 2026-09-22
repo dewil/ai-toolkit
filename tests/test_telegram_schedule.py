@@ -565,18 +565,23 @@ def send_one_args(**overrides) -> types.SimpleNamespace:
     return types.SimpleNamespace(**base)
 
 
-DATETIME_2026_09_22_0930_MSK = datetime(2026, 9, 22, 9, 30, tzinfo=timezone(timedelta(hours=3)))
+# Время отправки обязано быть в будущем относительно настоящих часов: эти тесты
+# гоняют скрипт без подмены "сейчас". Абсолютная дата здесь уже раз протухла
+# (22.09.2026) и уронила 8 тестов при исправном коде.
+_MSK = timezone(timedelta(hours=3))
+SCHEDULE_AT = (datetime.now(_MSK) + timedelta(days=30)).replace(hour=9, minute=30, second=0, microsecond=0)
+SCHEDULE_AT_STR = SCHEDULE_AT.strftime("%Y-%m-%d %H:%M:%S +03:00")
 
 
 class DryRunShowsSchedule(unittest.TestCase):
     def test_send_py_prints_schedule_line(self):
         with patched_send_env(tgs, tgs, FakeClient):
-            args = send_args(schedule=DATETIME_2026_09_22_0930_MSK)
+            args = send_args(schedule=SCHEDULE_AT)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 code = asyncio.run(tgs.amain(args))
         self.assertEqual(code, 0)
-        self.assertIn("отложено до: 2026-09-22 09:30:00 +03:00", out.getvalue())
+        self.assertIn(f"отложено до: {SCHEDULE_AT_STR}", out.getvalue())
 
     def test_send_py_no_schedule_no_line(self):
         with patched_send_env(tgs, tgs, FakeClient):
@@ -588,12 +593,12 @@ class DryRunShowsSchedule(unittest.TestCase):
 
     def test_send_one_prints_schedule_line(self):
         with patched_send_env(tgs_one, tgs_one.tgs, FakeClient):
-            args = send_one_args(schedule=DATETIME_2026_09_22_0930_MSK)
+            args = send_one_args(schedule=SCHEDULE_AT)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 code = asyncio.run(tgs_one.amain(args))
         self.assertEqual(code, 0)
-        self.assertIn("отложено до: 2026-09-22 09:30:00 +03:00", out.getvalue())
+        self.assertIn(f"отложено до: {SCHEDULE_AT_STR}", out.getvalue())
 
 
 class SendPassesScheduleKwarg(unittest.TestCase):
@@ -610,14 +615,14 @@ class SendPassesScheduleKwarg(unittest.TestCase):
             return c
 
         with patched_send_env(tgs, tgs, factory):
-            args = send_args(send=True, schedule=DATETIME_2026_09_22_0930_MSK)
+            args = send_args(send=True, schedule=SCHEDULE_AT)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 code = asyncio.run(tgs.amain(args))
         self.assertEqual(code, 0)
         client = client_holder["client"]
         self.assertEqual(client.sent_method, "send_message")
-        self.assertEqual(client.sent_kwargs["schedule"], DATETIME_2026_09_22_0930_MSK)
+        self.assertEqual(client.sent_kwargs["schedule"], SCHEDULE_AT)
 
     def test_send_py_file_attachment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -632,14 +637,14 @@ class SendPassesScheduleKwarg(unittest.TestCase):
 
             with patched_send_env(tgs, tgs, factory):
                 args = send_args(send=True, file=str(f), text="подпись",
-                                  schedule=DATETIME_2026_09_22_0930_MSK)
+                                  schedule=SCHEDULE_AT)
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     code = asyncio.run(tgs.amain(args))
         self.assertEqual(code, 0)
         client = client_holder["client"]
         self.assertEqual(client.sent_method, "send_file")
-        self.assertEqual(client.sent_kwargs["schedule"], DATETIME_2026_09_22_0930_MSK)
+        self.assertEqual(client.sent_kwargs["schedule"], SCHEDULE_AT)
 
     def test_send_one_text_message(self):
         client_holder = {}
@@ -650,14 +655,14 @@ class SendPassesScheduleKwarg(unittest.TestCase):
             return c
 
         with patched_send_env(tgs_one, tgs_one.tgs, factory):
-            args = send_one_args(send=True, schedule=DATETIME_2026_09_22_0930_MSK)
+            args = send_one_args(send=True, schedule=SCHEDULE_AT)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 code = asyncio.run(tgs_one.amain(args))
         self.assertEqual(code, 0)
         client = client_holder["client"]
         self.assertEqual(client.sent_method, "send_message")
-        self.assertEqual(client.sent_kwargs["schedule"], DATETIME_2026_09_22_0930_MSK)
+        self.assertEqual(client.sent_kwargs["schedule"], SCHEDULE_AT)
 
     def test_without_schedule_kwarg_is_none(self):
         """Флаг не задан - schedule=None уходит явно (тот же контракт, что у
@@ -684,10 +689,10 @@ class PostSendVerification(unittest.TestCase):
 
     def test_verify_scheduled_finds_message_in_queue(self):
         client = FakeClient()
-        sent = asyncio.run(client.send_message(None, "текст", schedule=DATETIME_2026_09_22_0930_MSK))
+        sent = asyncio.run(client.send_message(None, "текст", schedule=SCHEDULE_AT))
         found, exc = asyncio.run(tgs.verify_scheduled(
             client, None, sent.id,
-            expected_date=DATETIME_2026_09_22_0930_MSK, expected_text="текст",
+            expected_date=SCHEDULE_AT, expected_text="текст",
         ))
         self.assertTrue(found)
         self.assertIsNone(exc)
@@ -696,30 +701,30 @@ class PostSendVerification(unittest.TestCase):
         """id из обычной истории и из очереди живут в разных пространствах -
         совпадение по одному id может быть ложным, поэтому сверяется и дата."""
         client = WrongDateInQueueClient()
-        sent = asyncio.run(client.send_message(None, "текст", schedule=DATETIME_2026_09_22_0930_MSK))
+        sent = asyncio.run(client.send_message(None, "текст", schedule=SCHEDULE_AT))
         found, exc = asyncio.run(tgs.verify_scheduled(
             client, None, sent.id,
-            expected_date=DATETIME_2026_09_22_0930_MSK, expected_text="текст",
+            expected_date=SCHEDULE_AT, expected_text="текст",
         ))
         self.assertFalse(found)
         self.assertIsNone(exc)
 
     def test_verify_scheduled_rejects_text_mismatch(self):
         client = FakeClient()
-        sent = asyncio.run(client.send_message(None, "текст", schedule=DATETIME_2026_09_22_0930_MSK))
+        sent = asyncio.run(client.send_message(None, "текст", schedule=SCHEDULE_AT))
         found, exc = asyncio.run(tgs.verify_scheduled(
             client, None, sent.id,
-            expected_date=DATETIME_2026_09_22_0930_MSK, expected_text="другой текст",
+            expected_date=SCHEDULE_AT, expected_text="другой текст",
         ))
         self.assertFalse(found)
         self.assertIsNone(exc)
 
     def test_verify_scheduled_reports_query_exception(self):
         client = QueueQueryFailsClient()
-        sent = asyncio.run(client.send_message(None, "текст", schedule=DATETIME_2026_09_22_0930_MSK))
+        sent = asyncio.run(client.send_message(None, "текст", schedule=SCHEDULE_AT))
         found, exc = asyncio.run(tgs.verify_scheduled(
             client, None, sent.id,
-            expected_date=DATETIME_2026_09_22_0930_MSK, expected_text="текст",
+            expected_date=SCHEDULE_AT, expected_text="текст",
         ))
         self.assertFalse(found)
         self.assertIsInstance(exc, RuntimeError)
@@ -728,19 +733,19 @@ class PostSendVerification(unittest.TestCase):
         """Обычная история (scheduled=False) для отложенного пуста - тем самым
         показывается, ПОЧЕМУ нужна отдельная ветка проверки, а не общий перечит."""
         client = FakeClient()
-        sent = asyncio.run(client.send_message(None, "текст", schedule=DATETIME_2026_09_22_0930_MSK))
+        sent = asyncio.run(client.send_message(None, "текст", schedule=SCHEDULE_AT))
         plain_history = asyncio.run(client.get_messages(None, scheduled=False))
         self.assertNotIn(sent, plain_history)
 
     def test_send_py_reports_queued_status_in_stdout(self):
         with patched_send_env(tgs, tgs, FakeClient):
-            args = send_args(send=True, schedule=DATETIME_2026_09_22_0930_MSK)
+            args = send_args(send=True, schedule=SCHEDULE_AT)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 asyncio.run(tgs.amain(args))
         text = out.getvalue()
         self.assertIn("поставлено в очередь", text)
-        self.assertIn("2026-09-22 09:30:00 +03:00", text)
+        self.assertIn(SCHEDULE_AT_STR, text)
         self.assertNotIn("предупреждение", text)
 
     def test_send_py_warns_when_missing_from_queue(self):
@@ -749,7 +754,7 @@ class PostSendVerification(unittest.TestCase):
         не rc=0 с предупреждением (было раньше) - тихий отказ по
         rules/silent-failure.md."""
         with patched_send_env(tgs, tgs, NotFoundInQueueClient):
-            args = send_args(send=True, schedule=DATETIME_2026_09_22_0930_MSK)
+            args = send_args(send=True, schedule=SCHEDULE_AT)
             out = io.StringIO()
             err = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -764,7 +769,7 @@ class PostSendVerification(unittest.TestCase):
         """Упавший запрос очереди - тоже неопределенный результат, причина
         исключения печатается, а не глушится."""
         with patched_send_env(tgs, tgs, QueueQueryFailsClient):
-            args = send_args(send=True, schedule=DATETIME_2026_09_22_0930_MSK)
+            args = send_args(send=True, schedule=SCHEDULE_AT)
             err = io.StringIO()
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
                 code = asyncio.run(tgs.amain(args))
@@ -779,7 +784,7 @@ class PostSendVerification(unittest.TestCase):
         вернула сама отправка)."""
         with patched_send_env(tgs_one, tgs_one.tgs, HtmlStrippingClient):
             args = send_one_args(send=True, html=True, text="<b>Привет</b>",
-                                  schedule=DATETIME_2026_09_22_0930_MSK)
+                                  schedule=SCHEDULE_AT)
             out = io.StringIO()
             err = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -790,7 +795,7 @@ class PostSendVerification(unittest.TestCase):
 
     def test_send_one_reports_queued_status(self):
         with patched_send_env(tgs_one, tgs_one.tgs, FakeClient):
-            args = send_one_args(send=True, schedule=DATETIME_2026_09_22_0930_MSK)
+            args = send_one_args(send=True, schedule=SCHEDULE_AT)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 asyncio.run(tgs_one.amain(args))
