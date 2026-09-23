@@ -58,6 +58,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from telethon import TelegramClient
@@ -407,13 +408,38 @@ def suggest_non_round(dt: datetime) -> datetime:
     (вперед, а не назад) выбрано произвольно, но фиксировано: подсказка для
     одного и того же dt всегда одна и та же, а не случайная.
     """
-    return (dt + timedelta(minutes=7)).replace(second=0, microsecond=0)
+    # Сдвиг по абсолютному времени, а не по настенному: у ZoneInfo арифметика
+    # datetime идет по стенке и игнорирует fold, и в ночь перевода часов назад
+    # "+7 минут" от второго 02:00 давало первое 02:07 - на 53 минуты раньше.
+    shifted = (dt.astimezone(timezone.utc) + timedelta(minutes=7)).astimezone(dt.tzinfo)
+    return shifted.replace(second=0, microsecond=0)
+
+
+def load_schedule_zone(tz_name: str) -> ZoneInfo:
+    """--schedule-tz: IANA-имя пояса получателя -> ZoneInfo. Пустая строка,
+    неизвестное или кривое имя - ValueError с понятной строкой (до сети)."""
+    name = (tz_name or "").strip()
+    if not name:
+        raise ValueError("--schedule-tz задан пустой строкой: жду IANA-имя пояса, например Europe/Paris")
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(
+            f"неизвестный часовой пояс {tz_name!r} в --schedule-tz: жду IANA-имя "
+            f"вида Europe/Paris или America/New_York ({exc})"
+        ) from exc
 
 
 def parse_schedule(
-    value: str, *, now: datetime | None = None, exact_minute: bool = False
+    value: str, *, now: datetime | None = None, exact_minute: bool = False,
+    tz_name: str | None = None,
 ) -> datetime:
     """--schedule: ISO-время с оффсетом или без. Без оффсета - зона машины.
+
+    С tz_name (--schedule-tz) время без оффсета - настенное время в этом поясе,
+    оффсет берется из zoneinfo на дату доставки; явный оффсет обязан совпасть
+    с оффсетом пояса на этот момент. Возвращаемый dt тогда несет ZoneInfo,
+    и все сообщения об ошибках печатают время получателя.
 
     Возвращает aware datetime. Ручной разбор регэкспом, а не
     datetime.fromisoformat: та до Python 3.11 не берет время без секунд
@@ -434,6 +460,9 @@ def parse_schedule(
     except ValueError as exc:
         raise ValueError(f"некорректная дата/время {value!r}: {exc}") from exc
 
+    zone = load_schedule_zone(tz_name) if tz_name is not None else None
+    zone_label = f"в поясе {zone.key}" if zone is not None else "в зоне машины"
+
     tz_raw = m["tz"]
     if tz_raw is None:
         # Без оффсета время считается локальным временем машины - astimezone()
@@ -448,8 +477,16 @@ def parse_schedule(
         # нужно превратить в отказ. fold=0/fold=1 - единственные два
         # прочтения наивного времени; если они дают один и тот же оффсет,
         # переход тут ни при чем.
-        a0 = naive.replace(fold=0).astimezone()
-        a1 = naive.replace(fold=1).astimezone()
+        #
+        # С --schedule-tz то же самое, только в поясе получателя: fold=0/1 с
+        # tzinfo=ZoneInfo, а "обратное преобразование" - через UTC обратно в
+        # этот пояс.
+        if zone is None:
+            a0 = naive.replace(fold=0).astimezone()
+            a1 = naive.replace(fold=1).astimezone()
+        else:
+            a0 = naive.replace(tzinfo=zone, fold=0).astimezone(timezone.utc).astimezone(zone)
+            a1 = naive.replace(tzinfo=zone, fold=1).astimezone(timezone.utc).astimezone(zone)
         if a0.utcoffset() == a1.utcoffset():
             dt = a0
         else:
@@ -461,12 +498,12 @@ def parse_schedule(
                 # момента в этой зоне не бывает.
                 raise ValueError(
                     f"несуществующее локальное время {naive.strftime('%Y-%m-%d %H:%M:%S')}: "
-                    f"в зоне машины в этот момент переводят стрелки вперед "
+                    f"{zone_label} в этот момент переводят стрелки вперед "
                     f"(пропущенный час) - задай оффсет явно"
                 )
             raise ValueError(
                 f"неоднозначное локальное время {naive.strftime('%Y-%m-%d %H:%M:%S')}: "
-                f"в зоне машины в этот момент переводят стрелки назад "
+                f"{zone_label} в этот момент переводят стрелки назад "
                 f"(повторенный час) - задай оффсет явно"
             )
     elif tz_raw == "Z":
@@ -484,6 +521,21 @@ def parse_schedule(
         if not (0 <= oh <= 14):
             raise ValueError(f"некорректный оффсет {tz_raw!r}: часы вне 00-14 (реальный максимум UTC - +14:00)")
         dt = naive.replace(tzinfo=timezone(sign * timedelta(hours=oh, minutes=om)))
+
+    if tz_raw is not None and zone is not None:
+        # Явный оффсет плюс пояс: оффсет - утверждение о поясе, и оно обязано
+        # совпасть с тем, что zoneinfo дает на этот момент. Расхождение - это
+        # ровно тот случай, ради которого флаг заведен (команда с +02:00,
+        # повторенная после перевода часов), поэтому отказ, а не молчаливый
+        # выбор одного из двух.
+        local = dt.astimezone(zone)
+        if local.utcoffset() != dt.utcoffset():
+            raise ValueError(
+                f"оффсет {_format_offset(dt)} не совпадает с {zone.key} на "
+                f"{local.strftime('%Y-%m-%d')} ({_format_offset(local)}) - убери "
+                f"оффсет из --schedule или исправь его"
+            )
+        dt = local
 
     now = now or datetime.now(timezone.utc)
     if dt <= now:
@@ -513,15 +565,35 @@ def parse_schedule(
     return dt
 
 
-def format_schedule(dt: datetime) -> str:
-    """"2026-09-22 09:30:59 +03:00" - секунды печатаются всегда, а не только
-    когда ненулевые: превью обязано совпадать с тем, что реально уйдет
-    (send_message получает dt целиком, включая секунды из --schedule)."""
+def _format_offset(dt: datetime) -> str:
     offset = dt.utcoffset() or timedelta(0)
     total_minutes = int(offset.total_seconds() // 60)
     sign = "+" if total_minutes >= 0 else "-"
     oh, om = divmod(abs(total_minutes), 60)
-    return f"{dt.strftime('%Y-%m-%d %H:%M:%S')} {sign}{oh:02d}:{om:02d}"
+    return f"{sign}{oh:02d}:{om:02d}"
+
+
+def format_schedule(dt: datetime) -> str:
+    """"2026-09-22 09:30:59 +03:00" - секунды печатаются всегда, а не только
+    когда ненулевые: превью обязано совпадать с тем, что реально уйдет
+    (send_message получает dt целиком, включая секунды из --schedule)."""
+    return f"{dt.strftime('%Y-%m-%d %H:%M:%S')} {_format_offset(dt)}"
+
+
+def describe_schedule(dt: datetime, tz_name: str | None = None) -> str:
+    """Метка времени доставки для dry-run и строки результата.
+
+    Без tz_name - ровно format_schedule(dt) (вывод прежний, байт в байт).
+    С --schedule-tz - дважды: у получателя (с именем пояса) и в зоне машины,
+    чтобы расхождение было видно до --send.
+    """
+    if tz_name is None:
+        return format_schedule(dt)
+    zone = load_schedule_zone(tz_name)
+    return (
+        f"{format_schedule(dt.astimezone(zone))} {zone.key} "
+        f"(в зоне машины: {format_schedule(dt.astimezone())})"
+    )
 
 
 def _schedule_dates_match(a: datetime, b: datetime) -> bool:
@@ -876,6 +948,7 @@ async def amain(args) -> int:
     # getattr, не args.schedule: старые вызовы amain() (тесты, чужой код) не
     # знают об этом поле, и им не нужно его заводить, чтобы остаться рабочими.
     schedule_dt = getattr(args, "schedule", None)
+    schedule_tz = getattr(args, "schedule_tz", None)
 
     text = read_text(args, allow_empty=bool(args.file))
 
@@ -927,7 +1000,7 @@ async def amain(args) -> int:
             print("DRY-RUN (без --send отправка не сделана)")
             print(f"  -> \"{title}\" ({kind}, id={chat_id})")
             if schedule_dt is not None:
-                print(f"  отложено до: {format_schedule(schedule_dt)}")
+                print(f"  отложено до: {describe_schedule(schedule_dt, schedule_tz)}")
                 if is_round_minute(schedule_dt):
                     # Дошло сюда только через --exact-minute - без флага
                     # parse_schedule() отказала бы раньше, до сети.
@@ -1045,7 +1118,7 @@ async def amain(args) -> int:
                 )
                 return 4
             print(
-                f"OK: поставлено в очередь на {format_schedule(schedule_dt)} "
+                f"OK: поставлено в очередь на {describe_schedule(schedule_dt, schedule_tz)} "
                 f"- \"{title}\" (id {sent.id})"
             )
         else:
@@ -1081,6 +1154,12 @@ def main() -> int:
                              "Сообщение ляжет в очередь на серверах Telegram и уйдет само - "
                              "см. rules/outbound-timing.md и скилл telegram-send. Прошлое "
                              "и дальше года вперед отклоняются сразу, до сети")
+    parser.add_argument("--schedule-tz", dest="schedule_tz", metavar="IANA",
+                        help="пояс получателя по имени (Europe/Paris) для --schedule: "
+                             "время без оффсета читается как настенное в этом поясе, "
+                             "оффсет берется на дату доставки (переход часов учтен); "
+                             "явный оффсет обязан совпасть с поясом. Получатель в "
+                             "поясе с переходом часов - всегда по имени, а не числом")
     parser.add_argument("--exact-minute", action="store_true", dest="exact_minute",
                         help="разрешить ровную минуту (:00/:15/:30/:45, секунды :00) в "
                              "--schedule. Без флага такая минута отклоняется до сети "
@@ -1089,6 +1168,9 @@ def main() -> int:
                              "только когда минуту назвал сам пользователь явно "
                              "('ровно в 9:00', 'к началу созвона')")
     args = parser.parse_args()
+    if args.schedule_tz is not None and args.schedule is None:
+        sys.stderr.write("--schedule-tz без --schedule: пояс задается только вместе со временем доставки\n")
+        return 2
     if args.schedule is not None:
         # Разбор и все проверки - ДО asyncio.run/сети: ошибка зоны, прошлое
         # время или ровная минута видны немедленно, а не после подключения к
@@ -1096,7 +1178,9 @@ def main() -> int:
         # которому она подкласс, - иначе гейт вернул бы тот же код 2, что и
         # разбор/диапазон, и код 6 отличить было бы нечем.
         try:
-            args.schedule = parse_schedule(args.schedule, exact_minute=args.exact_minute)
+            args.schedule = parse_schedule(
+                args.schedule, exact_minute=args.exact_minute, tz_name=args.schedule_tz
+            )
         except RoundMinuteRejected as exc:
             sys.stderr.write(f"{exc}\n")
             return 6

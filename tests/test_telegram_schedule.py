@@ -1228,5 +1228,172 @@ class ScheduleKwargInSource(unittest.TestCase):
                         self.assertIn("schedule", kw, f"{name}: {meth} без schedule")
 
 
+# ---------------------------------------------------------------------------
+# --schedule-tz: пояс получателя по имени, оффсет - на дату доставки.
+# ---------------------------------------------------------------------------
+
+_PARIS = "Europe/Paris"
+
+
+class ScheduleTzParse(unittest.TestCase):
+    """Разбор с tz_name: now передается явно, даты абсолютные безопасны."""
+
+    NOW = datetime(2026, 3, 1, tzinfo=timezone.utc)
+
+    def _p(self, value, **kw):
+        return tgs.parse_schedule(value, now=self.NOW, tz_name=_PARIS, **kw)
+
+    def test_same_wall_time_before_and_after_fall_back(self):
+        before = self._p("2026-10-20T09:06")
+        after = self._p("2026-11-02T09:06")
+        self.assertEqual(tgs.format_schedule(before), "2026-10-20 09:06:00 +02:00")
+        self.assertEqual(tgs.format_schedule(after), "2026-11-02 09:06:00 +01:00")
+        self.assertEqual(after.astimezone(timezone.utc).hour, 8)
+
+    def test_skipped_hour_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            self._p("2026-03-29T02:30")
+        self.assertIn("несуществующее", str(cm.exception))
+        self.assertIn("в поясе Europe/Paris", str(cm.exception))
+
+    def test_repeated_hour_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            self._p("2026-10-25T02:30")
+        self.assertIn("неоднозначное", str(cm.exception))
+        self.assertIn("в поясе Europe/Paris", str(cm.exception))
+
+    def test_matching_explicit_offset_accepted(self):
+        dt = self._p("2026-11-02T09:06+01:00")
+        self.assertEqual(tgs.format_schedule(dt), "2026-11-02 09:06:00 +01:00")
+
+    def test_mismatching_explicit_offset_rejected_with_both_numbers(self):
+        with self.assertRaises(ValueError) as cm:
+            self._p("2026-11-02T09:06+02:00")
+        msg = str(cm.exception)
+        self.assertIn("оффсет +02:00 не совпадает с Europe/Paris на 2026-11-02 (+01:00)", msg)
+
+    def test_unknown_zone_rejected(self):
+        for name in ("Europe/Atlantida", "", "   ", "../etc/passwd"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError) as cm:
+                    tgs.parse_schedule("2026-11-02T09:06", now=self.NOW, tz_name=name)
+                self.assertIn("--schedule-tz", str(cm.exception))
+
+    def test_other_checks_still_apply(self):
+        with self.assertRaises(tgs.RoundMinuteRejected):
+            self._p("2026-11-02T09:00")
+        self.assertEqual(self._p("2026-11-02T09:00", exact_minute=True).minute, 0)
+        with self.assertRaises(ValueError):
+            tgs.parse_schedule("2026-02-01T09:06", now=self.NOW, tz_name=_PARIS)
+
+    def test_send_one_reuses_via_import(self):
+        dt = tgs_one.tgs.parse_schedule("2026-11-02T09:06", now=self.NOW, tz_name=_PARIS)
+        self.assertEqual(tgs.format_schedule(dt), "2026-11-02 09:06:00 +01:00")
+
+
+class ScheduleTzCLI(unittest.TestCase):
+    """main() обоих скриптов: ошибки - код 2 до сети; дата относительная."""
+
+    def _future_iso(self):
+        return (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT09:06")
+
+    def _run(self, mod, argv):
+        err = io.StringIO()
+        with mock.patch.object(mod, "amain", mock.AsyncMock(return_value=0)) as am:
+            with mock.patch.object(sys, "argv", argv):
+                with contextlib.redirect_stderr(err):
+                    code = mod.main()
+        return code, err.getvalue(), am
+
+    def test_tz_without_schedule_rejected_send_py(self):
+        code, err, am = self._run(tgs, ["telegram-send.py", "--to", "чат", "--schedule-tz", _PARIS])
+        self.assertEqual(code, 2)
+        self.assertIn("--schedule-tz без --schedule", err)
+        am.assert_not_called()
+
+    def test_tz_without_schedule_rejected_send_one(self):
+        code, err, am = self._run(tgs_one, ["telegram-send-one.py", "111", "--schedule-tz", _PARIS])
+        self.assertEqual(code, 2)
+        self.assertIn("--schedule-tz без --schedule", err)
+        am.assert_not_called()
+
+    def test_unknown_zone_rejected_both(self):
+        for mod, head in ((tgs, ["telegram-send.py", "--to", "чат"]),
+                          (tgs_one, ["telegram-send-one.py", "111"])):
+            with self.subTest(mod=mod.__name__):
+                code, err, am = self._run(
+                    mod, head + ["--schedule", self._future_iso(), "--schedule-tz", "Mars/Olympus"])
+                self.assertEqual(code, 2)
+                self.assertIn("неизвестный часовой пояс", err)
+                am.assert_not_called()
+
+    def test_tz_reaches_parse_both(self):
+        for mod, head in ((tgs, ["telegram-send.py", "--to", "чат"]),
+                          (tgs_one, ["telegram-send-one.py", "111"])):
+            with self.subTest(mod=mod.__name__):
+                code, _, am = self._run(
+                    mod, head + ["--schedule", self._future_iso(), "--schedule-tz", _PARIS])
+                self.assertEqual(code, 0)
+                args = am.call_args.args[0]
+                self.assertEqual(args.schedule.tzinfo.key, _PARIS)
+                self.assertEqual((args.schedule.hour, args.schedule.minute), (9, 6))
+                self.assertEqual(args.schedule_tz, _PARIS)
+
+
+# Относительная дата: скрипт работает против настоящих часов.
+_TZ_AT = (datetime.now(timezone.utc) + timedelta(days=30)).astimezone(
+    tgs.ZoneInfo(_PARIS)).replace(hour=9, minute=6, second=0, microsecond=0)
+
+
+class ScheduleTzDryRun(unittest.TestCase):
+    def _dry(self, mod, tgs_mod, args):
+        with patched_send_env(mod, tgs_mod, FakeClient):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = asyncio.run(mod.amain(args))
+        self.assertEqual(code, 0)
+        return out.getvalue()
+
+    def _expected(self):
+        return (f"отложено до: {tgs.format_schedule(_TZ_AT)} {_PARIS} "
+                f"(в зоне машины: {tgs.format_schedule(_TZ_AT.astimezone())})")
+
+    def test_send_py_prints_both_labels(self):
+        out = self._dry(tgs, tgs, send_args(schedule=_TZ_AT, schedule_tz=_PARIS))
+        self.assertIn(self._expected(), out)
+
+    def test_send_one_prints_both_labels(self):
+        out = self._dry(tgs_one, tgs_one.tgs, send_one_args(schedule=_TZ_AT, schedule_tz=_PARIS))
+        self.assertIn(self._expected(), out)
+
+    def test_without_flag_output_unchanged(self):
+        out = self._dry(tgs, tgs, send_args(schedule=_TZ_AT))
+        self.assertIn(f"отложено до: {tgs.format_schedule(_TZ_AT)}\n", out)
+        self.assertNotIn("в зоне машины", out)
+
+    def test_send_result_line_prints_both_labels(self):
+        out = self._dry(tgs, tgs, send_args(send=True, schedule=_TZ_AT, schedule_tz=_PARIS))
+        self.assertIn(f"поставлено в очередь на {tgs.format_schedule(_TZ_AT)} {_PARIS} (в зоне машины:", out)
+
+class SuggestNonRoundAcrossDst(unittest.TestCase):
+    """Подсказка ровной минуты сдвигает по абсолютному времени (ночь перевода часов)."""
+
+    def test_second_0200_on_fallback_night_suggests_later_not_earlier(self):
+        from zoneinfo import ZoneInfo
+        paris = ZoneInfo("Europe/Paris")
+        # второе 02:00 25.10.2026 (после перевода, +01:00)
+        dt = datetime(2026, 10, 25, 2, 0, tzinfo=paris, fold=1)
+        self.assertEqual(dt.utcoffset(), timedelta(hours=1))
+        hint = tgs.suggest_non_round(dt)
+        delta = hint.astimezone(timezone.utc) - dt.astimezone(timezone.utc)
+        self.assertEqual(delta, timedelta(minutes=7))
+        self.assertEqual(hint.utcoffset(), timedelta(hours=1))
+
+    def test_fixed_offset_unchanged(self):
+        dt = datetime(2026, 11, 2, 9, 0, tzinfo=timezone(timedelta(hours=3)))
+        self.assertEqual(tgs.suggest_non_round(dt), datetime(2026, 11, 2, 9, 7, tzinfo=timezone(timedelta(hours=3))))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

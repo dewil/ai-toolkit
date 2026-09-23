@@ -46,6 +46,7 @@ async def amain(args) -> int:
     # getattr, не args.schedule: старые вызовы amain() (тесты) не знают об
     # этом поле и не должны из-за него ломаться.
     schedule_dt = getattr(args, "schedule", None)
+    schedule_tz = getattr(args, "schedule_tz", None)
     # None и "" различаются: --file "$VAR" с пустой переменной - это заданный
     # файловый режим, а не его отсутствие; молча уйти текстом было бы враньем
     if args.file is not None and not args.file:
@@ -119,7 +120,7 @@ async def amain(args) -> int:
             print("DRY-RUN (без --send отправка не сделана)")
             print(f"  -> \"{title}\" (@{actual_username or '?'}, {kind}, id={chat_id})")
             if schedule_dt is not None:
-                print(f"  отложено до: {tgs.format_schedule(schedule_dt)}")
+                print(f"  отложено до: {tgs.describe_schedule(schedule_dt, schedule_tz)}")
                 if tgs.is_round_minute(schedule_dt):
                     # Дошло сюда только через --exact-minute - см. telegram-send.py.
                     print("  ровная минута: разрешена явно")
@@ -224,7 +225,7 @@ async def amain(args) -> int:
                 )
                 return 4
             print(
-                f"OK: поставлено в очередь на {tgs.format_schedule(schedule_dt)} "
+                f"OK: поставлено в очередь на {tgs.describe_schedule(schedule_dt, schedule_tz)} "
                 f"- \"{title}\" (id {sent.id})"
             )
         else:
@@ -273,15 +274,23 @@ def main() -> int:
                              "Сообщение ляжет в очередь на серверах Telegram и уйдет само - "
                              "см. rules/outbound-timing.md и скилл telegram-send. Прошлое "
                              "и дальше года вперед отклоняются сразу, до сети")
+    parser.add_argument("--schedule-tz", dest="schedule_tz", metavar="IANA",
+                        help="пояс получателя по имени (Europe/Paris) для --schedule "
+                             "(см. тот же флаг в telegram-send.py)")
     parser.add_argument("--exact-minute", action="store_true", dest="exact_minute",
                         help="разрешить ровную минуту (:00/:15/:30/:45, секунды :00) в "
                              "--schedule (см. тот же флаг в telegram-send.py)")
     args = parser.parse_args()
+    if args.schedule_tz is not None and args.schedule is None:
+        sys.stderr.write("--schedule-tz без --schedule: пояс задается только вместе со временем доставки\n")
+        return 2
     if args.schedule is not None:
         # Разбор и все проверки - ДО asyncio.run/сети, как в telegram-send.py.
         # RoundMinuteRejected - раньше общего ValueError (см. там же).
         try:
-            args.schedule = tgs.parse_schedule(args.schedule, exact_minute=args.exact_minute)
+            args.schedule = tgs.parse_schedule(
+                args.schedule, exact_minute=args.exact_minute, tz_name=args.schedule_tz
+            )
         except tgs.RoundMinuteRejected as exc:
             sys.stderr.write(f"{exc}\n")
             return 6
