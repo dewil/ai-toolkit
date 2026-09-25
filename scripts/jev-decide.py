@@ -13,6 +13,8 @@ Jev не пишет текст: на вход текст и набор вопр�
     echo "текст" | python3 scripts/jev-decide.py --questions <вопросы.json>
 
 Ключ: переменная OPENROUTER_API_KEY или файл ~/.config/openrouter/key (права 600).
+Прокси: --proxy, иначе JEV_PROXY, иначе HTTPS_PROXY окружения. В cron переменных
+профиля нет - прокси передается явно, иначе с заблокированного выхода 403.
 Вывод - JSON ответа сервиса как есть (stdout).
 
 Коды возврата:
@@ -29,6 +31,7 @@ alphadecisions, сверено 25.09.2026); ключ в выводе маски�
 import argparse
 import json
 import os
+import re
 import stat
 import sys
 import threading
@@ -41,15 +44,28 @@ MODEL = "~typesafe/jev-latest"
 KEY_FILE = Path.home() / ".config/openrouter/key"
 DEADLINE = 90          # общий предел вызова, с: сокетный timeout ограничивает одну операцию, не весь ответ
 _KEY = ""              # для маскировки в выводе
+_PROXY = ""            # адрес прокси тоже маскируется: в нем бывают логин и пароль
 
 
 def mask(text: str) -> str:
     """Ключ в любом выводе заменяется: шлюз может отразить заголовок в диагностике."""
-    if not _KEY:
-        return text
-    for form in {_KEY, json.dumps(_KEY)[1:-1]}:   # как есть и в JSON-экранировании
-        text = text.replace(form, "***")
+    for secret in (_KEY, _PROXY):
+        if secret:
+            for form in {secret, json.dumps(secret)[1:-1]}:   # как есть и в JSON-экранировании
+                text = text.replace(form, "***")
     return text
+
+
+def mask_err(text: str) -> str:
+    """Для диагностики (stderr): плюс учетные данные в любом URL и Basic/Bearer-токены.
+
+    Шаблонная маскировка только здесь: на успешном ответе она портила бы данные
+    ("basic knowledge" в варианте choice). Ответ сервиса маскируется по точным
+    значениям ключа и прокси, его содержимое не меняется.
+    """
+    text = mask(text)
+    text = re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*:/{0,2})[^/@\s'\"]+@", r"\1***@", text)
+    return re.sub(r"(?i)(basic|bearer)\s+[A-Za-z0-9+/=._-]{8,}", r"\1 ***", text)
 
 
 def api_key() -> str:
@@ -64,6 +80,21 @@ def api_key() -> str:
         sys.exit(f"не задан ключ: OPENROUTER_API_KEY или {KEY_FILE}")
     _KEY = key
     return key
+
+
+def resolve_proxy(cli: str | None) -> tuple[str, str]:
+    """Прокси и откуда он взят: --proxy > JEV_PROXY > HTTPS_PROXY окружения > без прокси.
+
+    Явный источник нужен для cron: там нет переменных профиля пользователя, и
+    без прокси сервис за Cloudflare отвечает 403 на каждый вызов, тогда как
+    интерактивная проверка зеленая. Адрес в выводе не печатается - в нем бывают
+    логин и пароль; печатается только источник.
+    """
+    for value, src in ((cli, "--proxy"), (os.environ.get("JEV_PROXY"), "JEV_PROXY"),
+                       (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"), "HTTPS_PROXY")):
+        if value and value.strip():
+            return value.strip(), src
+    return "", "не задан"
 
 
 def missing_answers(response, questions: dict) -> list[str] | None:
@@ -108,6 +139,7 @@ def main() -> None:
     ap.add_argument("--questions", required=True, help="JSON с вопросами (поле questions запроса)")
     ap.add_argument("--state-file", help="файл с текстом; без него текст читается из stdin")
     ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--proxy", help="прокси для запроса (иначе JEV_PROXY, иначе HTTPS_PROXY окружения)")
     a = ap.parse_args()
 
     try:
@@ -130,12 +162,29 @@ def main() -> None:
     # по истечении DEADLINE выходим, что бы там ни висело (поток daemon).
     result: dict = {}
 
+    proxy, proxy_src = resolve_proxy(a.proxy)
+    global _PROXY
+    _PROXY = proxy
+    if proxy:
+        # urllib сверяет хост с NO_PROXY и при совпадении идет мимо даже явного
+        # прокси - тогда 403 назвал бы источником прокси то, что не использовалось
+        for var in ("NO_PROXY", "no_proxy"):
+            os.environ.pop(var, None)
+    opener = (urllib.request.build_opener(urllib.request.ProxyHandler({"https": proxy, "http": proxy}))
+              if proxy else urllib.request.build_opener(urllib.request.ProxyHandler({})))
+
     def fetch():
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with opener.open(req, timeout=30) as r:
                 result["raw"] = r.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
-            result["err"] = f"HTTP {e.code}: {e.read().decode(errors='replace')[:500]}"
+            body = e.read().decode(errors="replace")
+            if e.code == 403 and body.lstrip()[:1] == "<":
+                result["err"] = (f"HTTP 403 с html-страницей вместо ответа API: отказал шлюз сервиса "
+                                 f"(обычно - заблокирован выход машины) или сам прокси; прокси: {proxy_src}. "
+                                 f"Без прокси - задайте --proxy или JEV_PROXY; с прокси - проверьте его")
+            else:
+                result["err"] = f"HTTP {e.code}: {body[:500]}"
         except Exception as e:            # сеть, таймаут, TLS - все в код 1
             result["err"] = f"сеть: {getattr(e, 'reason', e)}"
 
@@ -146,7 +195,7 @@ def main() -> None:
         print(f"сеть: ответ не уложился в {DEADLINE} с", file=sys.stderr)
         sys.exit(1)
     if "err" in result:
-        print(mask(result["err"]), file=sys.stderr)
+        print(mask_err(result["err"]), file=sys.stderr)
         sys.exit(1)
     raw = result["raw"]
     try:
@@ -162,7 +211,7 @@ def main() -> None:
         print("формат ответа не распознан (нет answers или есть error) - результат не использовать", file=sys.stderr)
         sys.exit(3)
     if miss:
-        print(mask(f"нет пригодного ответа на: {', '.join(miss)} - результат не использовать"), file=sys.stderr)
+        print(mask_err(f"нет пригодного ответа на: {', '.join(miss)} - результат не использовать"), file=sys.stderr)
         sys.exit(3)
 
 
