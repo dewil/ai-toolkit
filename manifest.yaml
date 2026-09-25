@@ -68,6 +68,8 @@ universal:
   - skills/office-md/SKILL.md           # прочитать офисный файл (docx/xlsx/pptx/odf/rtf/epub) как markdown через anydoc; PDF - штатным чтением
   - skills/pii-mask/SKILL.md            # маскировка ПД перед отправкой текста в облачную LLM и разворот ответа
   - skills/llm-ru/SKILL.md              # прогон документа через российское облако (YandexGPT, GigaChat): маскировка ПД, прайс с датой сверки, свой журнал расхода; замер, а не гейт
+  - skills/jev-decide/SKILL.md          # дешевая классификация публичного текста через Jev (OpenRouter): вопросы да/нет, выбор, шкала; предфильтр, не гейт
+  - scripts/jev-decide.py               # вызов Jev (Decisions API OpenRouter, alpha) со сверкой полноты ответов, stdlib
   - skills/repo-publication/SKILL.md    # аудит приватного репозитория (секреты, ПД, NDA, история) и публикация с проверкой снаружи
   - skills/local-transcription/SKILL.md # локальная (offline) транскрипция записи встречи/лекции: выбор ASR, token-free диаризация, очередь прогонов, грабли
   - skills/local-transcription/transcribe_meeting.py # эталонная реализация движка (ставится на машину один раз, не раскатывается по проектам)
