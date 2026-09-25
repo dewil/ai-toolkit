@@ -193,8 +193,56 @@ def wait_for_memory(need_mb, wait, timeout):
         time.sleep(10)
 
 
-def reexec_in_scope(memory_max):
+def available_cpus():
+    """Ядра, доступные этому процессу (affinity/cgroup cpuset), а не всей машине."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def default_threads():
+    """Фоновый дефолт: половина ядер, не больше 4 и не меньше 1.
+
+    Все ядра по умолчанию (прежнее поведение) на общем сервере кладут машину:
+    три длинных прогона подряд подняли нагрузку до 32 на 6 ядрах.
+    """
+    return max(1, min(4, available_cpus() // 2))
+
+
+def resolve_threads(threads, fast):
+    """Число потоков для прогона - всегда конкретное N > 0.
+
+    --threads 0 = все доступные ядра (осознанно), N > 0 - как задано, отрицательное -
+    ошибка. Явный --threads сильнее --fast; без него --fast дает все ядра, а обычный
+    прогон - фоновый дефолт. Ноль в число превращается здесь, а не "на усмотрение
+    библиотек": иначе OMP_NUM_THREADS из окружения молча оставлял torch один поток.
+    """
+    if threads is not None and threads < 0:
+        die(f"--threads не может быть отрицательным: {threads}")
+    if threads is None:
+        threads = 0 if fast else default_threads()
+    return threads if threads > 0 else available_cpus()
+
+
+def lower_priority():
+    """nice 19 для себя и потомков (ffmpeg). Возвращает фактический nice или None при сбое.
+
+    Это основная защита машины вместе с числом потоков. CPUWeight/IOWeight в scope
+    действуют, только если контроллеры cpu/io делегированы пользовательскому
+    systemd (на части машин их нет), поэтому на них не полагаемся.
+    """
+    try:
+        return os.nice(19 - os.nice(0))
+    except OSError:
+        return None
+
+
+def reexec_in_scope(memory_max, background=True):
     """Перезапуск себя в cgroup с лимитом памяти (systemd-run --user --scope).
+
+    background=True добавляет CPUWeight=20 и IOWeight=20 (дефолт 100): прогон
+    уступает CPU и диск остальным процессам машины, но при простое берет все.
 
     Без лимита превышение памяти обрабатывает ГЛОБАЛЬНЫЙ OOM-killer, и жертву он
     выбирает по всей системе - падает база, докер, что угодно, а не транскрибация.
@@ -229,8 +277,10 @@ def reexec_in_scope(memory_max):
     # перезапускаем через интерпретатор, а не сам файл: скрипт запускают и как
     # "python transcribe_meeting.py" (бита +x нет), и как установленную команду
     cmd = ["systemd-run", "--user", "--scope", "--quiet",
-           "-p", f"MemoryMax={memory_max}", "-p", "MemorySwapMax=0",
-           "--", sys.executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]]
+           "-p", f"MemoryMax={memory_max}", "-p", "MemorySwapMax=0"]
+    if background:
+        cmd += ["-p", "CPUWeight=20", "-p", "IOWeight=20"]
+    cmd += ["--", sys.executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]]
     env = dict(os.environ, TRANSCRIBE_SCOPE="1")
     try:
         os.execvpe(cmd[0], cmd, env)
@@ -391,7 +441,7 @@ def _diar_models_ok(emb):
 def _segment(audio, threads):
     """Временные границы речи (лейблы sherpa игнорируем - кластеризуем сами)."""
     import sherpa_onnx
-    nt = threads if threads > 0 else 1
+    nt = threads   # уже конкретное число, см. resolve_threads
     cfg = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=SEG_MODEL),
@@ -406,7 +456,7 @@ def _segment(audio, threads):
 def _embed_segments(audio, segs, emb_path, threads):
     """Эмбеддинг каждого сегмента (по всему его аудио). Возвращает (матрица, оставленные сегменты)."""
     import numpy as np, sherpa_onnx
-    nt = threads if threads > 0 else 1
+    nt = threads   # уже конкретное число, см. resolve_threads
     ext = sherpa_onnx.SpeakerEmbeddingExtractor(
         sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb_path, num_threads=nt))
     X, kept = [], []
@@ -661,7 +711,12 @@ def main():
                     help="не убирать протечки чужого голоса между дорожками")
     ap.add_argument("--embedding", choices=list(EMB), default="campplus", help="эмбеддинг диаризации")
     ap.add_argument("--title", help="заголовок в md (по умолчанию - имя файла)")
-    ap.add_argument("--threads", type=int, default=0, help="число CPU-потоков (0 = авто/дефолт библиотек)")
+    ap.add_argument("--threads", type=int, default=None,
+                    help=f"число CPU-потоков; по умолчанию {default_threads()} (половина ядер, не больше 4); "
+                         "0 = все ядра")
+    ap.add_argument("--fast", action="store_true",
+                    help="быстрый режим для свободной машины: все ядра, обычный приоритет CPU/IO "
+                         "(лимит памяти остается, его снимает --no-limit)")
     ap.add_argument("--no-wait", action="store_true",
                     help="не ждать очереди и памяти, а сразу выйти, если занято")
     ap.add_argument("--wait-timeout", type=int, default=7200,
@@ -677,9 +732,19 @@ def main():
     # до всего остального: перезапуск себя под лимитом памяти, чтобы промах
     # убивал только транскрибацию, а не случайный процесс на машине
     if not args.no_limit:
-        reexec_in_scope(args.memory_max)
+        reexec_in_scope(args.memory_max, background=not args.fast)
+    niceness = None if args.fast else lower_priority()
+    args.threads = resolve_threads(args.threads, args.fast)
+    if args.fast:
+        print(f"Режим: быстрый, {args.threads} потоков, обычный приоритет", file=sys.stderr, flush=True)
+    elif niceness is None:
+        print(f"Режим: фоновый, {args.threads} потоков; ПОНИЗИТЬ ПРИОРИТЕТ НЕ УДАЛОСЬ - "
+              "машину держит только число потоков", file=sys.stderr, flush=True)
+    else:
+        print(f"Режим: фоновый, {args.threads} потоков, nice {niceness} "
+              "(примерно вдвое дольше; для свободной машины --fast)", file=sys.stderr, flush=True)
 
-    if args.threads and args.threads > 0:
+    if args.threads > 0:
         for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                    "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
             os.environ[_v] = str(args.threads)
