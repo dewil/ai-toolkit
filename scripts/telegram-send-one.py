@@ -11,6 +11,11 @@
 Гейт отправки тот же, что в telegram-send.py: без --send печатается DRY-RUN и
 ничего не уходит; отправка только с --send.
 
+Пустой --file или путь к несуществующему файлу - отказ с кодом 2 до
+создания клиента, как в dry-run, так и с --send. Если expected_username
+задан, несовпадение или отсутствие username у чата - код 2 до отправки.
+Пустой expected_username - ошибка ввода с кодом 2 до создания клиента.
+
 Запуск:
     python3 scripts/telegram-send-one.py <chat_id> [expected_username] --text "..."
     python3 scripts/telegram-send-one.py <chat_id> [expected_username] --send <<'EOF'
@@ -50,6 +55,9 @@ async def amain(args) -> int:
     # этом поле и не должны из-за него ломаться.
     schedule_dt = getattr(args, "schedule", None)
     schedule_tz = getattr(args, "schedule_tz", None)
+    if args.username is not None and not args.username:
+        sys.stderr.write("expected_username задан пустой строкой - проверь значение username.\n")
+        return 2
     # None и "" различаются: --file "$VAR" с пустой переменной - это заданный
     # файловый режим, а не его отсутствие; молча уйти текстом было бы враньем
     if args.file is not None and not args.file:
@@ -106,14 +114,14 @@ async def amain(args) -> int:
 
         # Опциональная сверка username - страховка от отправки не тому адресату.
         actual_username = (getattr(entity, "username", "") or "")
-        if args.username:
+        if args.username is not None:
             want = args.username.lstrip("@").lower()
             if actual_username.lower() != want:
                 sys.stderr.write(
                     f"username чата id {chat_id} = @{actual_username or '?'}, "
                     f"ожидали @{want}. Стоп, ничего не отправлено.\n"
                 )
-                return 1
+                return 2
 
         title = tgs.entity_title(entity, chat_id)
         kind = type(entity).__name__
