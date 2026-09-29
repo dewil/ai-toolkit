@@ -14,6 +14,7 @@ import contextlib
 import io
 import importlib.util
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -726,6 +727,112 @@ class HtmlComments(unittest.TestCase):
         body, err = self.strip("# З\n\nобычный текст\n")
         self.assertIn("обычный текст", body)
         self.assertEqual(err, "")
+
+class TildeFence(unittest.TestCase):
+    """Блок кода с забором из тильд (INV-DOC-03).
+
+    Забор из трех и более ~ открывает блок так же, как из обратных кавычек;
+    закрывает его забор того же символа не короче открывающего (CommonMark).
+    Внутри блока ничего не разбирается.
+
+    Требование: INV-DOC-03
+    """
+
+    @staticmethod
+    def pre_blocks(h):
+        return re.findall(r"<pre>.*?</pre>", h, flags=re.S)
+
+    def test_tilde_block_content_is_code_not_markup(self):
+        """Требование: INV-DOC-03 (критерий 1)"""
+        h = body("~~~\n<!-- x -->\n# y\n~~~\n")
+        blocks = self.pre_blocks(h)
+        self.assertEqual(len(blocks), 1, h)
+        self.assertIn("<code", blocks[0])
+        self.assertIn("&lt;!-- x --&gt;", blocks[0])
+        self.assertIn("# y", blocks[0])
+        self.assertNotIn("<h1", h)
+        self.assertNotIn("<h2", h)
+
+    def test_tilde_block_with_text_around(self):
+        """Требование: INV-DOC-03 (критерий 1)"""
+        h = body("до\n\n~~~\n# y\n- пункт\n~~~\n\nпосле\n")
+        blocks = self.pre_blocks(h)
+        self.assertEqual(len(blocks), 1, h)
+        self.assertIn("# y", blocks[0])
+        self.assertIn("- пункт", blocks[0])
+        self.assertNotIn("<li>", h)
+        self.assertNotIn("<h1", h)
+        self.assertRegex(h, r"</pre>\s*<p>после</p>")
+
+    def test_tilde_block_with_language_matches_backtick(self):
+        """Требование: INV-DOC-03 (язык после забора поддерживается так же)"""
+        tilde = body("~~~python\nprint(1)\n# c\n~~~\n")
+        tick = body("```python\nprint(1)\n# c\n```\n")
+        self.assertEqual(tilde, tick)
+        self.assertEqual(len(self.pre_blocks(tilde)), 1)
+
+    def test_tilde_and_backtick_render_identically(self):
+        """Требование: INV-DOC-03"""
+        content = "<b>x</b>\n# y\n1. z\n"
+        self.assertEqual(body("~~~\n" + content + "~~~\n"),
+                         body("```\n" + content + "```\n"))
+
+    def test_backtick_fence_inside_tilde_block_does_not_close_it(self):
+        """Требование: INV-DOC-03 (критерий 2)"""
+        h = body("~~~\n```\n# inner\n```\n# still code\n~~~\n\n# real\n")
+        blocks = self.pre_blocks(h)
+        self.assertEqual(len(blocks), 1, h)
+        self.assertIn("# inner", blocks[0])
+        self.assertIn("# still code", blocks[0])
+        self.assertEqual(h.count("<h1"), 1, h)
+        self.assertRegex(h, r"</pre>\s*<h1[^>]*>real</h1>")
+
+    def test_tilde_fence_inside_backtick_block_does_not_close_it(self):
+        """Требование: INV-DOC-03 (критерий 2)"""
+        h = body("```\n~~~\n# inner\n~~~\n# still code\n```\n\n# real\n")
+        blocks = self.pre_blocks(h)
+        self.assertEqual(len(blocks), 1, h)
+        self.assertIn("# inner", blocks[0])
+        self.assertIn("# still code", blocks[0])
+        self.assertEqual(h.count("<h1"), 1, h)
+        self.assertRegex(h, r"</pre>\s*<h1[^>]*>real</h1>")
+
+    def test_four_tilde_fence_not_closed_by_three(self):
+        """Требование: INV-DOC-03 (критерий 3)"""
+        h = body("~~~~\n~~~\n# y\n~~~~\n\n# real\n")
+        blocks = self.pre_blocks(h)
+        self.assertEqual(len(blocks), 1, h)
+        self.assertIn("# y", blocks[0])
+        self.assertEqual(h.count("<h1"), 1, h)
+        self.assertRegex(h, r"</pre>\s*<h1[^>]*>real</h1>")
+
+    def test_four_tilde_fence_closed_by_longer(self):
+        """Требование: INV-DOC-03 (критерий 3)"""
+        h = body("~~~~\ncode\n~~~~~~\n\n# real\n")
+        blocks = self.pre_blocks(h)
+        self.assertEqual(len(blocks), 1, h)
+        self.assertIn("code", blocks[0])
+        self.assertRegex(h, r"</pre>\s*<h1[^>]*>real</h1>")
+
+    def test_four_tilde_fence_closed_by_same_length(self):
+        """Требование: INV-DOC-03 (критерий 3)"""
+        h = body("~~~~\ncode\n~~~~\n\n# real\n")
+        self.assertEqual(len(self.pre_blocks(h)), 1, h)
+        self.assertRegex(h, r"</pre>\s*<h1[^>]*>real</h1>")
+
+    def test_two_tildes_do_not_open_a_block(self):
+        """Требование: INV-DOC-03 (забор - три и более ~)"""
+        h = body("~~\ntext\n~~\n")
+        self.assertNotIn("<pre>", h)
+
+    def test_two_tilde_line_does_not_close_three_tilde_block(self):
+        """Требование: INV-DOC-03 (закрывающий забор не короче открывающего)"""
+        h = body("~~~\ncode\n~~\n# y\n~~~\n\n# real\n")
+        blocks = self.pre_blocks(h)
+        self.assertEqual(len(blocks), 1, h)
+        self.assertIn("# y", blocks[0])
+        self.assertEqual(h.count("<h1"), 1, h)
+
 
 class NbHyphen(unittest.TestCase):
     """Дефис внутри слова -> U+2011: иначе перенос строки его съедает."""
