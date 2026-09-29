@@ -695,5 +695,64 @@ class Photo(unittest.TestCase):
         # и с опечаткой в имени тега
         self.assertRegex(doc, r"<a:srcRect [^>]*(?:t|b|l|r)=\"\d+\"")
 
+class TildeFence(unittest.TestCase):
+    """Блок кода с забором из тильд в docx (INV-DOC-03).
+
+    Требование: INV-DOC-03
+    """
+
+    @staticmethod
+    def paragraphs(md):
+        doc = document(md)
+        out = []
+        for p in doc.iter(W + "p"):
+            st = p.find(f"{W}pPr/{W}pStyle")
+            out.append((st.get(W + "val") if st is not None else None, text_of(p)))
+        return out
+
+    def test_tilde_block_is_code_paragraphs(self):
+        """Требование: INV-DOC-03 (критерий 4)"""
+        paras = self.paragraphs("~~~\n<!-- x -->\n# y\n~~~\n")
+        code = [t for st, t in paras if st == "Code"]
+        self.assertIn("<!-- x -->", code)
+        self.assertIn("# y", code)
+        self.assertFalse([1 for st, _ in paras if st and st.startswith("Heading")], paras)
+
+    def test_tilde_block_same_as_backtick_block(self):
+        """Требование: INV-DOC-03 (критерий 4)"""
+        content = "строка один\n# не заголовок\n- не пункт\n"
+        self.assertEqual(self.paragraphs("~~~\n" + content + "~~~\n"),
+                         self.paragraphs("```\n" + content + "```\n"))
+
+    def test_code_style_is_monospace(self):
+        """Требование: INV-DOC-03 (критерий 4: моноширинный абзац)"""
+        z = pack("~~~\n# y\n~~~\n")
+        styles = ET.fromstring(z.read("word/styles.xml"))
+        code = [s for s in styles.iter(W + "style") if s.get(W + "styleId") == "Code"]
+        self.assertEqual(len(code), 1)
+        fonts = code[0].find(f"{W}rPr/{W}rFonts")
+        self.assertIsNotNone(fonts)
+        face = (fonts.get(W + "ascii") or "").lower()
+        self.assertRegex(face, r"mono|courier|consolas|menlo")
+
+    def test_four_tilde_block_not_closed_by_three(self):
+        """Требование: INV-DOC-03 (критерий 3)"""
+        paras = self.paragraphs("~~~~\n~~~\n# y\n~~~~\n\n# real\n")
+        code = [t for st, t in paras if st == "Code"]
+        self.assertIn("~~~", code)
+        self.assertIn("# y", code)
+        headings = [t for st, t in paras if st and st.startswith("Heading")]
+        self.assertEqual(headings, ["real"])
+
+    def test_backtick_fence_inside_tilde_block_does_not_close_it(self):
+        """Требование: INV-DOC-03 (критерий 2)"""
+        paras = self.paragraphs("~~~\n```\n# inner\n```\n~~~\n\n# real\n")
+        code = [t for st, t in paras if st == "Code"]
+        self.assertIn("```", code)
+        self.assertIn("# inner", code)
+        headings = [t for st, t in paras if st and st.startswith("Heading")]
+        self.assertEqual(headings, ["real"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
