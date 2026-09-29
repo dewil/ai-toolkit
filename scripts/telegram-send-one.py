@@ -26,7 +26,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib.util
+import random
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -36,6 +38,7 @@ _SPEC.loader.exec_module(tgs)
 
 
 SAVED = "me"  # Telegram-адрес собственного чата ("Избранное")
+REMIND_LEAD = 180  # --remind: запас до доставки, с (плюс 1-59 случайных секунд)
 
 
 async def amain(args) -> int:
@@ -212,6 +215,20 @@ async def amain(args) -> int:
             found, verify_exc = await tgs.verify_scheduled(
                 client, entity, sent.id, expected_date=sent.date, expected_text=sent.message,
             )
+            if (not found and verify_exc is None and getattr(entity, "is_self", False)
+                    and (schedule_dt - datetime.now(timezone.utc)).total_seconds() <= tgs.SELF_UNLISTED_WINDOW):
+                # Избранное: отложенное себе на близкий срок Telegram доставляет как
+                # напоминание, но в очереди отложенных его не показывает (проверено
+                # 29.09.2026: срок +4 мин - в очереди нет, доставлено в срок; +1 день -
+                # в очереди есть). Сверить нечем - говорим прямо, а не ложным кодом 4.
+                # Только близкий срок: дальше окна запись в очереди видна, и "не
+                # найдено" там - настоящий сбой, код 4.
+                print(
+                    f"OK: поставлено на {tgs.describe_schedule(schedule_dt, schedule_tz)} - \"{title}\" (id {sent.id}); "
+                    f"сверка очереди для Избранного на близком сроке невозможна - "
+                    f"Telegram такие напоминания в ней не показывает"
+                )
+                return 0
             if not found:
                 # Неподтвержденная постановка - НЕ успех, см. telegram-send.py.
                 reason = (
@@ -277,10 +294,32 @@ def main() -> int:
     parser.add_argument("--schedule-tz", dest="schedule_tz", metavar="IANA",
                         help="пояс получателя по имени (Europe/Paris) для --schedule "
                              "(см. тот же флаг в telegram-send.py)")
+    parser.add_argument("--remind", action="store_true",
+                        help="только для me: отложить на ~3 минуты, чтобы Telegram показал "
+                             "уведомление. Сообщение себе напрямую приходит молча - Telegram "
+                             "считает его исходящим; отложенное доставляется как напоминание. "
+                             "Сам снимает гейты темпа и ровной минуты, несовместим с --silent "
+                             "и --schedule")
     parser.add_argument("--exact-minute", action="store_true", dest="exact_minute",
                         help="разрешить ровную минуту (:00/:15/:30/:45, секунды :00) в "
                              "--schedule (см. тот же флаг в telegram-send.py)")
     args = parser.parse_args()
+    if args.remind:
+        # Сообщение себе напрямую Telegram не сопровождает уведомлением (исходящее),
+        # отложенное - доставляет как напоминание, со звуком на всех устройствах.
+        # Запас: SCHEDULE_MIN_LEAD проверяется и перед отправкой, а подключение и
+        # прогрев диалогов съедают десятки секунд - ровные +150 с иногда падали.
+        if str(args.chat_id).strip().lower() != SAVED:
+            sys.stderr.write("--remind только для адреса me: другому получателю уведомление приходит и так\n")
+            return 2
+        if args.silent or args.schedule is not None or args.schedule_tz is not None:
+            sys.stderr.write("--remind несовместим с --silent, --schedule и --schedule-tz: "
+                             "смысл флага - уведомление со звуком через ~3 минуты\n")
+            return 2
+        args.schedule = (datetime.now().astimezone()
+                         + timedelta(seconds=REMIND_LEAD + random.randint(1, 59))).replace(microsecond=0)
+        args.no_pace_check = True   # темп - про живого собеседника, себе он не нужен
+        return asyncio.run(amain(args))
     if args.schedule_tz is not None and args.schedule is None:
         sys.stderr.write("--schedule-tz без --schedule: пояс задается только вместе со временем доставки\n")
         return 2

@@ -605,6 +605,12 @@ def _schedule_dates_match(a: datetime, b: datetime) -> bool:
         return False
 
 
+# Избранное: отложенное себе на срок в пределах окна Telegram в очереди
+# отложенных не показывает, но доставляет (29.09.2026: +4 мин - нет, +1 день -
+# есть). Граница точно не известна - окно взято с запасом от --remind (~3-4 мин).
+SELF_UNLISTED_WINDOW = 600
+
+
 async def verify_scheduled(
     client: TelegramClient, entity, msg_id: int, *,
     expected_date: datetime, expected_text: str,
@@ -1100,6 +1106,20 @@ async def amain(args) -> int:
             found, verify_exc = await verify_scheduled(
                 client, entity, sent.id, expected_date=sent.date, expected_text=sent.message,
             )
+            if (not found and verify_exc is None and getattr(entity, "is_self", False)
+                    and (schedule_dt - datetime.now(timezone.utc)).total_seconds() <= SELF_UNLISTED_WINDOW):
+                # Избранное: отложенное себе на близкий срок Telegram доставляет как
+                # напоминание, но в очереди отложенных его не показывает (проверено
+                # 29.09.2026: срок +4 мин - в очереди нет, доставлено в срок; +1 день -
+                # в очереди есть). Сверить нечем - говорим прямо, а не ложным кодом 4.
+                # Только близкий срок: дальше окна запись в очереди видна, и "не
+                # найдено" там - настоящий сбой, код 4.
+                print(
+                    f"OK: поставлено на {describe_schedule(schedule_dt, schedule_tz)} - \"{title}\" (id {sent.id}); "
+                    f"сверка очереди для Избранного на близком сроке невозможна - "
+                    f"Telegram такие напоминания в ней не показывает"
+                )
+                return 0
             if not found:
                 # Неподтвержденная постановка - НЕ успех: id, который вернул
                 # send_message, доказывает лишь то, что запрос приняли, а не
