@@ -1130,5 +1130,162 @@ class CliParsing(unittest.TestCase):
         self.assertIn("Нет файла с токеном", r.stderr)
 
 
+class DuplicateNamesRefusal(unittest.TestCase):
+    """Дубли имен на доске: отказ до первой записи, со списком кандидатов.
+
+    Требование: INV-TRK-04
+    """
+
+    BOARD = dict(
+        sections=[{"name": "Этап 1", "gid": "s1"}],
+        tasks=[
+            {"name": "Дубль", "gid": "d1", "due_on": "2026-08-01",
+             "memberships": member("P1", "s1", "Этап 1")},
+            {"name": "Дубль", "gid": "d2", "due_on": "2026-09-15",
+             "memberships": member("P1", "s1", "Этап 1")},
+            {"name": "Одна", "gid": "o1", "due_on": "2026-08-01",
+             "memberships": member("P1", "s1", "Этап 1")},
+        ],
+    )
+
+    def attempt(self, fn, rec, plan, **ns):
+        """Возвращает (код, весь текст: stdout + stderr + сообщение отказа).
+        Отказ может быть SystemExit(str) - это код 1 - или SystemExit(int),
+        или возвращенный код."""
+        out, err = io.StringIO(), io.StringIO()
+        rc, msg = 0, ""
+        with patched(rec, plan) as plan_path:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    ret = fn(argparse.Namespace(auth=None, plan=str(plan_path), **ns))
+                    rc = ret if isinstance(ret, int) else 0
+                except SystemExit as e:
+                    if isinstance(e.code, int):
+                        rc = e.code
+                    elif e.code is None:
+                        rc = 0
+                    else:
+                        rc, msg = 1, str(e.code)
+        return rc, "\n".join([out.getvalue(), err.getvalue(), msg])
+
+    def writes(self, rec):
+        return [c for c in rec.calls if c[0] != "GETALL" and c[0] != "GET"]
+
+    def test_send_refuses_without_any_write_and_lists_both_gids(self):
+        """Требование: INV-TRK-04 (критерий 1)"""
+        rec = Recorder(**self.BOARD)
+        rc, text = self.attempt(ap.cmd_tasks, rec,
+                                tasks_plan({"name": "Дубль", "due_on": "2026-10-01"}),
+                                send=True)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.writes(rec), [], "ни одного PUT/POST до отказа")
+        self.assertIn("d1", text)
+        self.assertIn("d2", text)
+
+    def test_refusal_lists_name_section_and_due_of_candidates(self):
+        """Требование: INV-TRK-04 (список кандидатов: имя, gid, секция, срок)"""
+        rec = Recorder(**self.BOARD)
+        rc, text = self.attempt(ap.cmd_tasks, rec, tasks_plan({"name": "Дубль"}), send=True)
+        self.assertNotEqual(rc, 0)
+        for part in ("Дубль", "Этап 1", "2026-08-01", "2026-09-15"):
+            self.assertIn(part, text)
+
+    def test_dry_run_refuses_with_same_code_and_gids(self):
+        """Требование: INV-TRK-04 (критерий 2)"""
+        rec = Recorder(**self.BOARD)
+        rc, text = self.attempt(ap.cmd_tasks, rec,
+                                tasks_plan({"name": "Дубль", "due_on": "2026-10-01"}),
+                                send=False)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.writes(rec), [])
+        self.assertIn("d1", text)
+        self.assertIn("d2", text)
+
+    def test_dry_run_and_send_refuse_with_same_text(self):
+        """Требование: INV-TRK-04 (dry-run показывает ту же неоднозначность тем же текстом)"""
+        plan = tasks_plan({"name": "Дубль", "due_on": "2026-10-01"})
+        rc_dry, dry = self.attempt(ap.cmd_tasks, Recorder(**self.BOARD), plan, send=False)
+        rc_send, sent = self.attempt(ap.cmd_tasks, Recorder(**self.BOARD), plan, send=True)
+        self.assertEqual(rc_dry, rc_send)
+        self.assertNotEqual(rc_dry, 0)
+        self.assertEqual(dry.strip(), sent.strip())
+
+    def test_single_match_behaves_as_before(self):
+        """Требование: INV-TRK-04 (критерий 3)"""
+        rec = Recorder(**self.BOARD)
+        rc, _ = self.attempt(ap.cmd_tasks, rec,
+                             tasks_plan({"name": "Одна", "due_on": "2026-10-01"}),
+                             send=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(rec.sent("PUT", "/tasks/o1"),
+                         [("PUT", "/tasks/o1", {"due_on": "2026-10-01"})])
+        self.assertEqual(rec.sent("PUT", "/tasks/d1") + rec.sent("PUT", "/tasks/d2"), [])
+        self.assertEqual(rec.sent("POST", "/tasks"), [])
+
+    def test_single_match_dry_run_still_shows_due_change(self):
+        """Требование: INV-TRK-04 (критерий 3)"""
+        rec = Recorder(**self.BOARD)
+        rc, text = self.attempt(ap.cmd_tasks, rec,
+                                tasks_plan({"name": "Одна", "due_on": "2026-10-01"}),
+                                send=False)
+        self.assertEqual(rc, 0)
+        self.assertIn("СРОК: 2026-08-01 -> 2026-10-01", text)
+
+    def test_ambiguous_last_task_blocks_earlier_valid_ones(self):
+        """Требование: INV-TRK-04 (критерий 4): валидные задачи плана до
+        неоднозначной не должны успеть записаться."""
+        rec = Recorder(**self.BOARD)
+        plan = tasks_plan({"name": "Одна", "due_on": "2026-10-01"},
+                          {"name": "Совсем новая"},
+                          {"name": "Дубль", "due_on": "2026-10-01"})
+        rc, text = self.attempt(ap.cmd_tasks, rec, plan, send=True)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.writes(rec), [], "ни PUT Одной, ни POST новой")
+        self.assertIn("d1", text)
+        self.assertIn("d2", text)
+
+    def test_ambiguous_first_task_blocks_later_valid_ones(self):
+        """Требование: INV-TRK-04 (критерий 4)"""
+        rec = Recorder(**self.BOARD)
+        plan = tasks_plan({"name": "Дубль"},
+                          {"name": "Одна", "due_on": "2026-10-01"},
+                          {"name": "Совсем новая"})
+        rc, _ = self.attempt(ap.cmd_tasks, rec, plan, send=True)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.writes(rec), [])
+
+    def test_no_new_section_created_before_refusal(self):
+        """Требование: INV-TRK-04 (критерий 4): секция плана, которой нет на
+        доске, не создается, если отказ все равно случится."""
+        rec = Recorder(**self.BOARD)
+        plan = {"project": "P1", "sections": [
+            {"name": "Новая секция", "tasks": [{"name": "Свежая"}]},
+            {"name": "Этап 1", "tasks": [{"name": "Дубль"}]}]}
+        rc, _ = self.attempt(ap.cmd_tasks, rec, plan, send=True)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.writes(rec), [])
+
+    def test_move_and_complete_refuse_on_duplicate_names(self):
+        """Требование: INV-TRK-04 (любая подкоманда с сопоставлением по имени)"""
+        rec = Recorder(**self.BOARD)
+        rc, text = self.attempt(ap.cmd_complete, rec,
+                                {"project": "P1", "tasks": ["Одна", "Дубль"]}, send=True)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.writes(rec), [])
+        self.assertIn("d1", text)
+        self.assertIn("d2", text)
+
+        board = dict(self.BOARD)
+        board["sections"] = self.BOARD["sections"] + [{"name": "Отчет", "gid": "s2"}]
+        rec = Recorder(**board)
+        rc, text = self.attempt(ap.cmd_move, rec,
+                                {"project": "P1", "section": "Отчет",
+                                 "tasks": ["Одна", "Дубль"]}, send=True)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.writes(rec), [])
+        self.assertIn("d1", text)
+        self.assertIn("d2", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
