@@ -3,9 +3,14 @@
 Локальный snapshot открытых задач проекта из Redmine.
 
 Скачивает все открытые задачи команды (список исполнителей - в проектном
-конфиге) и сохраняет в <tasks_root>/_redmine-snapshot.json. Перед записью
-архивирует предыдущий snapshot как _redmine-snapshot.prev.json - он нужен
+конфиге) и сохраняет в <tasks_root>/_redmine-snapshot.json. Пишет файлы через
+временные копии: сперва prev, затем текущий снимок; при ошибке второго шага
+восстанавливает прежний prev. _redmine-snapshot.prev.json нужен
 для расчета дельт между сборками (см. redmine-deltas.py).
+Пропавшие из выборки задачи дозапрашивает по id с текущим статусом
+и исполнителем. При сетевой ошибке дозапроса сохраняет задачу с пометкой
+"статус неизвестен". Некорректный ответ и ошибка загрузки исполнителя
+оставляют прежнюю пару снимков.
 
 Конфиг разделен на две части:
   - Общие credentials (redmine_url, api_key) - в
@@ -25,7 +30,8 @@ curl, который этот CA подхватывает.
 from __future__ import annotations
 
 import json
-import shutil
+import os
+import tempfile
 import subprocess
 import sys
 import urllib.parse
@@ -124,20 +130,34 @@ def fetch_user_issues(auth: dict, project_id, user_id) -> list[dict]:
             + urllib.parse.urlencode(params)
         )
         data = fetch_json(url, auth["api_key"], auth["use_curl"])
-        batch = data.get("issues", [])
+        if not isinstance(data, dict) or "total_count" not in data:
+            raise ValueError("неполный ответ Redmine: нет total_count")
+        total = data["total_count"]
+        batch = data.get("issues")
+        if type(total) is not int or total < 0 or not isinstance(batch, list):
+            raise ValueError("неполный ответ Redmine: некорректная выборка задач")
+        if offset + len(batch) > total or (not batch and offset < total):
+            raise ValueError("неполный ответ Redmine: число задач не совпадает с total_count")
         issues.extend(batch)
-        total = data.get("total_count", len(issues))
         offset += len(batch)
-        if not batch or offset >= total:
+        if offset >= total:
             break
     return issues
 
 
 def slim(issue: dict) -> dict:
+    closed = issue["status"].get("is_closed")
+    if closed is not None and type(closed) is not bool:
+        raise ValueError("некорректный признак status.is_closed")
     return {
         "id": issue["id"],
         "tracker": issue["tracker"]["name"],
         "status": issue["status"]["name"],
+        "is_closed": closed,
+        "status_unknown": closed is None,
+        "status_unknown_reason": (
+            "нет признака закрытия" if closed is None else ""
+        ),
         "subject": issue.get("subject", ""),
         "fixed_version": (issue.get("fixed_version") or {}).get("name", ""),
         "category": (issue.get("category") or {}).get("name", ""),
@@ -174,6 +194,10 @@ def main() -> int:
     snapshot_path = tasks_root / "_redmine-snapshot.json"
     prev_path = tasks_root / "_redmine-snapshot.prev.json"
 
+    old_bytes = snapshot_path.read_bytes() if snapshot_path.exists() else None
+    old_prev_bytes = prev_path.read_bytes() if prev_path.exists() else None
+    old = json.loads(old_bytes) if old_bytes is not None else {"users": {}}
+
     snapshot = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "redmine_url": auth["redmine_url"],
@@ -196,12 +220,48 @@ def main() -> int:
         }
         print(f"   {name} ({uid}): {len(issues)} задач")
 
+    if not errors:
+        current_ids = {
+            issue["id"] for user in snapshot["users"].values() for issue in user["issues"]
+        }
+        for uid, user in old.get("users", {}).items():
+            for issue in user.get("issues", []):
+                if issue["id"] in current_ids:
+                    continue
+                try:
+                    data = fetch_json(
+                        f"{auth['redmine_url']}/issues/{issue['id']}.json",
+                        auth["api_key"], auth["use_curl"],
+                    )
+                except (ValueError, TypeError) as exc:
+                    print(f"ПРЕРВАНО: некорректный ответ для задачи #{issue['id']}: {exc}",
+                          file=sys.stderr)
+                    return 1
+                except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                    print(f"!! задача #{issue['id']}: {exc}", file=sys.stderr)
+                    updated = {**issue, "status": "статус неизвестен",
+                               "is_closed": None, "status_unknown": True,
+                               "status_unknown_reason": "дозапрос не удался"}
+                else:
+                    try:
+                        updated = slim(data["issue"])
+                    except (KeyError, TypeError, ValueError) as exc:
+                        print(f"ПРЕРВАНО: некорректный ответ для задачи #{issue['id']}: {exc}",
+                              file=sys.stderr)
+                        return 1
+                bucket = snapshot["users"].setdefault(uid, {
+                    "name": user["name"], "total": 0, "issues": [],
+                })
+                bucket["issues"].append(updated)
+                bucket["total"] += 1
+                current_ids.add(issue["id"])
+
     # Fail-closed: снепшот без части сотрудников выдал бы их задачи за
-    # "закрытые" в redmine-deltas (closed = prev_ids - cur_ids). Лучше
+    # "закрытые" в redmine-deltas. Лучше
     # сохранить последнюю валидную пару, чем записать неполный снепшот.
     if errors:
         print(
-            f"\nПРЕРВАНО: {errors} сотрудник(ов) не загрузились - снепшот не "
+            f"\nПРЕРВАНО: {errors} запрос(ов) не загрузились - снепшот не "
             f"записан (иначе их задачи попадут в дельты как закрытые). "
             f"Устрани ошибку и повтори.",
             file=sys.stderr,
@@ -209,11 +269,42 @@ def main() -> int:
         sys.exit(1)
 
     tasks_root.mkdir(parents=True, exist_ok=True)
-    if snapshot_path.exists():
-        shutil.copy2(snapshot_path, prev_path)
-
-    with snapshot_path.open("w", encoding="utf-8") as f:
-        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    staged = []
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=tasks_root,
+                                         delete=False) as f:
+            new_path = Path(f.name)
+            staged.append(new_path)
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        if old_bytes is not None:
+            with tempfile.NamedTemporaryFile(mode="wb", dir=tasks_root, delete=False) as f:
+                old_path = Path(f.name)
+                staged.append(old_path)
+                f.write(old_bytes)
+                f.flush()
+                os.fsync(f.fileno())
+            if old_prev_bytes is not None:
+                with tempfile.NamedTemporaryFile(mode="wb", dir=tasks_root, delete=False) as f:
+                    rollback_path = Path(f.name)
+                    staged.append(rollback_path)
+                    f.write(old_prev_bytes)
+                    f.flush()
+                    os.fsync(f.fileno())
+            old_path.replace(prev_path)
+        try:
+            new_path.replace(snapshot_path)
+        except Exception:
+            if old_bytes is not None:
+                if old_prev_bytes is not None:
+                    rollback_path.replace(prev_path)
+                else:
+                    prev_path.unlink(missing_ok=True)
+            raise
+    finally:
+        for path in staged:
+            path.unlink(missing_ok=True)
 
     total = sum(u["total"] for u in snapshot["users"].values())
     print(f"\nOK: {total} задач у {len(snapshot['users'])} сотрудников")
