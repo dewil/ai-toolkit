@@ -20,13 +20,18 @@ OAuth-клиенту, а не к MCP, поэтому после копирова
     python3 scripts/gsheets.py read <SPREADSHEET_ID> "'Лист'!A1:D10"
     python3 scripts/gsheets.py read <ID> "'Лист'!A1:D10" --formulas
     echo '[["=SUM(A1:A5)", 42]]' | python3 scripts/gsheets.py write <ID> "'Лист'!B1:C1"
+    echo '[["=SUM(A1:A5)", 42]]' | python3 scripts/gsheets.py write <ID> "'Лист'!B1:C1" --send
     python3 scripts/gsheets.py sheets <ID>
+
+write без --send показывает таблицу, диапазон, размер и первые 5 строк без сети
+и учетных данных. Для записи нужен --send. Ошибка ввода - код 2, успех - код 0.
 
 Запись идет с valueInputOption=USER_ENTERED (формулы и даты интерпретируются,
 как при ручном вводе). Разделитель аргументов в формулах - тот же, что в самой
 таблице (в русской локали - точка с запятой).
 """
 
+import argparse
 import json
 import stat
 import sys
@@ -138,19 +143,35 @@ def cmd_read(token: str, sid: str, rng: str, formulas: bool) -> int:
     return 0
 
 
-def cmd_write(token: str, sid: str, rng: str) -> int:
+def cmd_write(token: str | None, sid: str, rng: str, send: bool = False) -> int:
     raw = sys.stdin.read().strip()
     if not raw:
-        sys.exit("на stdin пусто: ожидается JSON-массив строк, например [[1,2],[3,4]]")
+        print("на stdin пусто: ожидается JSON-массив строк, например [[1,2],[3,4]]",
+              file=sys.stderr)
+        sys.exit(2)
     try:
         values = json.loads(raw)
     except ValueError as exc:
-        sys.exit(f"на stdin не JSON: {exc}")
+        print(f"на stdin не JSON: {exc}", file=sys.stderr)
+        sys.exit(2)
     if not isinstance(values, list) or not all(isinstance(r, list) for r in values):
-        sys.exit("ожидается массив строк: [[\"a\", 1], [\"b\", 2]]")
+        print("ожидается массив строк: [[\"a\", 1], [\"b\", 2]]", file=sys.stderr)
+        sys.exit(2)
+    if not send:
+        columns = max((len(row) for row in values), default=0)
+        print(f"DRY-RUN: таблица {sid}, диапазон {rng}, "
+              f"строк {len(values)}, столбцов {columns}")
+        for row in values[:5]:
+            print(json.dumps(row, ensure_ascii=False))
+        return 0
+    if token is None:
+        token = access_token(load_creds())
     out = api(token, f"{sid}/values/{urllib.parse.quote(rng)}",
               {"valueInputOption": "USER_ENTERED"}, "PUT", {"values": values})
-    print(f"OK: обновлено ячеек {out.get('updatedCells')} в {out.get('updatedRange')}")
+    updated = out.get("updatedCells")
+    if not isinstance(updated, int) or isinstance(updated, bool):
+        sys.exit("ответ Sheets API не содержит числа updatedCells")
+    print(f"OK: обновлено ячеек {updated}")
     return 0
 
 
@@ -168,17 +189,24 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 1
     cmd = argv[1]
+    if cmd == "write":
+        parser = argparse.ArgumentParser(
+            prog=f"{argv[0]} write",
+            description="Запись JSON-массива строк из stdin. По умолчанию - dry-run без сети.")
+        parser.add_argument("sid", help="ID таблицы")
+        parser.add_argument("range", help="диапазон записи")
+        parser.add_argument("--send", action="store_true", help="записать значения в таблицу")
+        args = parser.parse_args(argv[2:])
+        return cmd_write(None, args.sid, args.range, send=args.send)
     # Аргументы проверяем ДО обращения к сети: на опечатке в команде
     # пользователь должен видеть usage, а не ошибку авторизации.
-    needed = {"read": 4, "write": 4, "sheets": 3}
+    needed = {"read": 4, "sheets": 3}
     if cmd not in needed or len(argv) < needed[cmd]:
         print(__doc__)
         return 1
     token = access_token(load_creds())
     if cmd == "read":
         return cmd_read(token, argv[2], argv[3], "--formulas" in argv)
-    if cmd == "write":
-        return cmd_write(token, argv[2], argv[3])
     return cmd_sheets(token, argv[2])
 
 
