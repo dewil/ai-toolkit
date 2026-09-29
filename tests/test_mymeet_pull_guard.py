@@ -70,3 +70,22 @@ def test_page_failure_preserves_downloaded_meeting_and_reports_partial():
         index = json.loads((root / "Встречи" / "_mymeet-index.json").read_text())
         assert "m1" in index["meetings"]
         assert (root / index["meetings"]["m1"]["file"]).exists()
+
+
+# CI запускает файлы напрямую (python3 tests/test_*.py), а функции pytest
+# unittest не видит - без обертки файл молча проходил бы с нулем тестов.
+import unittest
+
+
+class PullGuard(unittest.TestCase):
+    """Требование: INV-TRK-MYMEET"""
+
+    def test_only_explicitly_ready_statuses_are_downloaded(self):
+        test_only_explicitly_ready_statuses_are_downloaded()
+
+    def test_page_failure_preserves_downloaded_meeting_and_reports_partial(self):
+        test_page_failure_preserves_downloaded_meeting_and_reports_partial()
+
+
+if __name__ == "__main__":
+    unittest.main()

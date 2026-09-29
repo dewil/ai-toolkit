@@ -142,8 +142,6 @@ class MergeEdits(unittest.TestCase):
         self.assertEqual(len(mirror), 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 def load_deltas():
@@ -244,3 +242,7 @@ class Utf16Entities(unittest.TestCase):
         fresh = {2: msg(2, "😀AB", text_entities=[{"type": "plain", "text": "😀A"}, {"type": "bold", "text": "B"}])}
         self.assertEqual(SNAP.merge_edits(mirror, fresh, {2}), (0, 0))
         self.assertEqual(mirror[0]["text_entities"][1], {"type": "bold", "text": "A"})
+
+
+if __name__ == "__main__":
+    unittest.main()
