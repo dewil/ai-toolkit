@@ -3,10 +3,13 @@
 Расчет дельт между текущим и предыдущим snapshot задач Redmine.
 
 Сравнивает <tasks_root>/_redmine-snapshot.json и _redmine-snapshot.prev.json,
-выводит markdown-блок "Дельты со вчера" для вставки в план дейлика / статус.
+выводит markdown-блок "Дельты между снимками" для вставки в план дейлика / статус.
 
 Различает:
-- закрытые задачи (были у кого-то, теперь нет нигде -> ушли в closed/rejected);
+- закрытые задачи (закрыты по статусу или отсутствуют в старом формате снимка);
+- задачи, ушедшие к исполнителю вне users конфига;
+- задачи с неизвестным статусом после неудачного дозапроса;
+- задачи исполнителя, удаленного из проектного конфига;
 - новые задачи (появились у кого-то, не было нигде раньше);
 - смена статуса (id есть в обоих snapshot, status изменился);
 - смена исполнителя (id есть, assigned_to_id поменялся).
@@ -15,6 +18,8 @@
 .redmine-snapshot.json (тот же, что у redmine-snapshot.py). Ссылки на issue
 строятся по redmine_url, записанному в сам snapshot - секретный auth.json
 этому скрипту не нужен.
+
+Коды возврата: 0 - дельты рассчитаны, 2 - снимка нет, 3 - нет базы сравнения.
 
 Запуск:
     python3 scripts/redmine-deltas.py
@@ -56,7 +61,7 @@ def index_by_issue_id(snapshot: dict) -> dict[int, tuple[str, dict]]:
     out: dict[int, tuple[str, dict]] = {}
     for uid, payload in snapshot.get("users", {}).items():
         for issue in payload.get("issues", []):
-            out[issue["id"]] = (uid, issue)
+            out[issue["id"]] = (str(issue.get("assigned_to_id", uid)), issue)
     return out
 
 
@@ -89,6 +94,13 @@ def main() -> int:
     snapshot_path = tasks_root / "_redmine-snapshot.json"
     prev_path = tasks_root / "_redmine-snapshot.prev.json"
 
+    if not snapshot_path.exists():
+        print(f"снимка нет: {snapshot_path}", file=sys.stderr)
+        return 2
+    if not prev_path.exists():
+        print("база для сравнения отсутствует, дельты не посчитаны", file=sys.stderr)
+        return 3
+
     cur = load(snapshot_path)
     prev = load(prev_path)
     redmine_url = (cur.get("redmine_url") or prev.get("redmine_url") or "").rstrip("/")
@@ -99,9 +111,32 @@ def main() -> int:
     cur_ids = set(cur_idx)
     prev_ids = set(prev_idx)
 
-    closed = sorted(prev_ids - cur_ids)
+    watched = {str(uid) for uid in cfg["users"]}
+    removed_issues = {
+        issue["id"]: user.get("name", f"user {uid}")
+        for uid, user in prev.get("users", {}).items() if uid not in watched
+        for issue in user.get("issues", [])
+    }
+    departed = {iid for iid in prev_ids - cur_ids if iid in removed_issues}
+    closed = sorted(prev_ids - cur_ids - departed)
     appeared = sorted(cur_ids - prev_ids)
     common = cur_ids & prev_ids
+    unknown = {iid for iid, (_, issue) in cur_idx.items()
+               if issue.get("status_unknown")}
+    appeared = sorted(set(appeared) - set(unknown))
+    common -= unknown
+
+    left = []
+    for iid in sorted(common):
+        cur_uid, cur_issue = cur_idx[iid]
+        prev_uid, prev_issue = prev_idx[iid]
+        if cur_issue.get("is_closed") and not prev_issue.get("is_closed"):
+            closed.append(iid)
+        elif iid in removed_issues and cur_uid not in watched:
+            departed.add(iid)
+        elif not cur_issue.get("is_closed") and cur_uid not in watched and prev_uid in watched:
+            left.append(iid)
+    common -= set(closed) | set(left) | departed
 
     status_changes = []
     assignee_changes = []
@@ -113,14 +148,40 @@ def main() -> int:
         if cur_uid != prev_uid:
             assignee_changes.append((iid, prev_uid, cur_uid, cur_issue))
 
-    print(f"### Дельты со вчера (snapshot {cur.get('generated_at', '?')})\n")
+    print(f"### Дельты между снимками (snapshot {cur.get('generated_at', '?')})\n")
     print(f"_prev: {prev.get('generated_at', 'нет')}_\n")
 
     if closed:
         print(f"**Закрыты / ушли из открытых ({len(closed)}):**\n")
-        for iid in closed:
+        for iid in sorted(closed):
             uid, issue = prev_idx[iid]
             print(f"- {link(redmine_url, iid)} {format_issue_short(issue)} - был у {user_name(prev, uid)}, статус был {issue['status']}")
+        print()
+
+    for reason in ("дозапрос не удался", "нет признака закрытия"):
+        group = sorted(iid for iid in unknown
+                       if cur_idx[iid][1].get("status_unknown_reason", "нет признака закрытия") == reason)
+        if not group:
+            continue
+        print(f"**Статус неизвестен ({reason}) ({len(group)}):**\n")
+        for iid in group:
+            uid, issue = cur_idx[iid]
+            print(f"- {link(redmine_url, iid)} {format_issue_short(issue)} - был у {user_name(prev, uid)}")
+        print()
+
+    if departed:
+        print(f"**Выбыли вместе с исполнителем ({len(departed)}):**\n")
+        for iid in sorted(departed):
+            issue = cur_idx[iid][1] if iid in cur_idx else prev_idx[iid][1]
+            print(f"- {link(redmine_url, iid)} {format_issue_short(issue)} - "
+                  f"выбыли вместе с исполнителем {removed_issues[iid]}")
+        print()
+
+    if left:
+        print(f"**Ушла из наблюдения ({len(left)}):**\n")
+        for iid in left:
+            uid, issue = cur_idx[iid]
+            print(f"- {link(redmine_url, iid)} {format_issue_short(issue)} - у {user_name(cur, uid)}, {issue['status']}")
         print()
 
     if appeared:
@@ -149,7 +210,7 @@ def main() -> int:
             )
         print()
 
-    if not (closed or appeared or status_changes or assignee_changes):
+    if not (closed or unknown or departed or left or appeared or status_changes or assignee_changes):
         print("_Изменений нет._\n")
 
     return 0
