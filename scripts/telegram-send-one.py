@@ -309,7 +309,7 @@ def main() -> int:
                              "Сам снимает гейты темпа и ровной минуты, несовместим с --silent "
                              "и --schedule")
     parser.add_argument("--exact-minute", action="store_true", dest="exact_minute",
-                        help="разрешить ровную минуту (:00/:15/:30/:45, секунды :00) в "
+                        help="разрешить ровную минуту (:00/:15/:30/:45, независимо от секунд) в "
                              "--schedule (см. тот же флаг в telegram-send.py)")
     args = parser.parse_args()
     if args.remind:

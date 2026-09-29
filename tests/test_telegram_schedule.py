@@ -81,7 +81,7 @@ class ParseSchedule(unittest.TestCase):
         self.assertIsNotNone(dt.tzinfo)
 
     def test_seconds_are_optional(self):
-        dt = tgs.parse_schedule("2026-09-22T09:30:15+03:00", now=self.NOW)
+        dt = tgs.parse_schedule("2026-09-22T09:30:15+03:00", now=self.NOW, exact_minute=True)
         self.assertEqual(dt.second, 15)
         dt2 = tgs.parse_schedule("2026-09-22T09:30+03:00", now=self.NOW, exact_minute=True)
         self.assertEqual(dt2.second, 0)
@@ -213,7 +213,7 @@ class DstTransitions(unittest.TestCase):
 
 class RoundMinuteGate(unittest.TestCase):
     """Гейт на ровную минуту в --schedule (rules/outbound-timing.md, "Ровная
-    минута"): :00/:15/:30/:45 с секундами :00 отклоняются кодом 6 (проверяется
+    минута"): :00/:15/:30/:45 при любых секундах отклоняются кодом 6 (проверяется
     на уровне main() в RoundMinuteGateCLI ниже), обход - exact_minute=True."""
 
     NOW = datetime(2026, 9, 22, 8, 0, tzinfo=timezone.utc)
@@ -244,10 +244,10 @@ class RoundMinuteGate(unittest.TestCase):
         dt = tgs.parse_schedule("2026-09-22T09:00+00:00", now=self.NOW, exact_minute=True)
         self.assertEqual((dt.minute, dt.second), (0, 0))
 
-    def test_nonzero_seconds_is_not_a_round_minute(self):
-        # Пункт задачи: 09:00:30 - секунды ненулевые, не ровная минута, проходит.
-        dt = tgs.parse_schedule("2026-09-22T09:00:30+00:00", now=self.NOW)
-        self.assertEqual(dt.second, 30)
+    def test_nonzero_seconds_is_a_round_minute(self):
+        # Q-69, критерий 6: секунды не меняют видимую круглую минуту.
+        with self.assertRaises(tgs.RoundMinuteRejected):
+            tgs.parse_schedule("2026-09-22T09:00:30+00:00", now=self.NOW)
 
     def test_past_check_precedes_round_minute_gate(self):
         now = datetime(2026, 9, 22, 10, 0, tzinfo=timezone.utc)
@@ -1465,6 +1465,166 @@ class RemindFlag(unittest.TestCase):
         self.assertLess(lead, tgs_one.REMIND_LEAD + 62)
         self.assertTrue(args.no_pace_check)
         self.assertFalse(args.silent)
+
+
+class VisibleMinuteCLI(unittest.TestCase):
+    """Q-69, критерии 1–5: настоящий CLI, только транспорт/окружение подменены."""
+
+    NOW = datetime(2026, 9, 22, 6, 0, tzinfo=timezone.utc)
+    DRIVERS = ((tgs, tgs, ["telegram-send.py", "--to", "чат"]),
+               (tgs_one, tgs_one.tgs, ["telegram-send-one.py", "111"]))
+
+    def run_cli(self, driver, value, *, send=False, exact=False, tz=None, now=None):
+        mod, shared, head = driver
+        argv = head + ["--text", "привет", "--schedule", value]
+        if send:
+            argv += ["--send"]
+        if exact:
+            argv += ["--exact-minute"]
+        if tz:
+            argv += ["--schedule-tz", tz]
+        client = FakeClient()
+        factory = mock.Mock(return_value=client)
+        out, err = io.StringIO(), io.StringIO()
+        frozen = _patched_datetime(_MutableNow(now or self.NOW))
+        with patched_send_env(mod, shared, factory), contextlib.ExitStack() as stack:
+            for target in {mod, shared}:
+                if hasattr(target, "datetime"):
+                    stack.enter_context(mock.patch.object(target, "datetime", frozen))
+            connect = stack.enter_context(mock.patch.object(
+                shared, "connect_with_retry", new=mock.AsyncMock()))
+            record = stack.enter_context(mock.patch.object(
+                shared, "pace_record", wraps=shared.pace_record))
+            stack.enter_context(mock.patch.object(sys, "argv", argv))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            code = mod.main()
+            state_written = shared.PACE_STATE_PATH.exists()
+        effects = (factory.call_count, connect.call_count, client.sent_method,
+                   record.call_count, state_written)
+        return code, out.getvalue(), err.getvalue(), client, effects
+
+    def assert_refused_before_session(self, result, code):
+        self.assertEqual((result[0], result[4]), (code, (0, 0, None, 0, False)),
+                         result[2])
+
+    def test_all_quarters_and_seconds_refused_before_session(self):
+        # Критерий 1: 2 драйвера × 2 режима × 4 минуты × 4 секунды.
+        for driver in self.DRIVERS:
+            for send in (False, True):
+                for minute in (0, 15, 30, 45):
+                    for second in (0, 1, 30, 59):
+                        with self.subTest(driver=driver[2][0], send=send,
+                                          minute=minute, second=second):
+                            result = self.run_cli(driver,
+                                f"2026-09-22T09:{minute:02}:{second:02}+00:00", send=send)
+                            self.assert_refused_before_session(result, 6)
+
+    def test_refusal_explains_seconds_and_later_non_round_hint(self):
+        # Критерий 2: подсказка меняет минуту, а не только секунды.
+        for driver in self.DRIVERS:
+            with self.subTest(driver=driver[2][0]):
+                result = self.run_cli(driver, "2026-09-22T09:00:30+00:00")
+                self.assert_refused_before_session(result, 6)
+                err = result[2]
+                self.assertIn("09:00:30", err)
+                self.assertIn("ровн", err.lower())
+                self.assertIn("--exact-minute", err)
+                labels = re.findall(r"\b(\d{2}):(\d{2})(?::(\d{2}))?", err)
+                hints = [(int(h), int(m), int(s or 0)) for h, m, s in labels
+                         if int(m) not in (0, 15, 30, 45)]
+                self.assertTrue(hints, err)
+                self.assertTrue(any(hint > (9, 0, 30) for hint in hints), err)
+
+    def test_exact_minute_dry_run_preserves_seconds_and_prints_note(self):
+        # Критерий 3.
+        for driver in self.DRIVERS:
+            with self.subTest(driver=driver[2][0]):
+                code, out, err, client, effects = self.run_cli(
+                    driver, "2026-09-22T09:00:30+00:00", exact=True)
+                self.assertEqual(code, 0, err)
+                self.assertIn("09:00:30", out)
+                self.assertIn("ровная минута: разрешена явно", out)
+                self.assertIsNone(client.sent_method)
+                self.assertEqual(effects[3:], (0, False))
+
+    def test_exact_minute_send_preserves_delivery_time(self):
+        # Критерий 3: проходим main(), не подсовываем разобранное время в amain().
+        for driver in self.DRIVERS:
+            with self.subTest(driver=driver[2][0]):
+                code, _, err, client, _ = self.run_cli(
+                    driver, "2026-09-22T09:00:30+03:00", exact=True, send=True,
+                    now=self.NOW - timedelta(hours=1))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(client.sent_method, "send_message")
+                self.assertEqual(client.sent_kwargs["schedule"].isoformat(),
+                                 "2026-09-22T09:00:30+03:00")
+
+    def test_non_round_dry_run_with_offset_and_iana_zone(self):
+        # Критерий 4; оффсет +00:07 дополнительно ловит классификацию в UTC.
+        for driver in self.DRIVERS:
+            for suffix, tz in (("+03:00", None), ("", "Europe/Paris"),
+                               ("+00:07", None)):
+                for second in (0, 30):
+                    with self.subTest(driver=driver[2][0], tz=tz, suffix=suffix, second=second):
+                        code, out, err, client, effects = self.run_cli(driver,
+                            f"2026-09-22T09:07:{second:02}{suffix}", tz=tz)
+                        self.assertEqual(code, 0, err)
+                        self.assertIn(f"09:07:{second:02}", out)
+                        self.assertNotIn("ровная минута: разрешена явно", out)
+                        self.assertIsNone(client.sent_method)
+                        self.assertEqual(effects[3:], (0, False))
+
+    def test_round_classification_uses_delivery_wall_time(self):
+        # Q-69: 09:00+00:02 соответствует 08:58 UTC, но видимая минута круглая.
+        for driver in self.DRIVERS:
+            for value, tz in (("2026-09-22T09:00:30+00:02", None),
+                              ("2026-09-22T09:00:30", "Europe/Paris")):
+                with self.subTest(driver=driver[2][0], value=value, tz=tz):
+                    self.assert_refused_before_session(self.run_cli(driver, value, tz=tz), 6)
+
+    def test_range_errors_precede_round_gate_even_with_exact_minute(self):
+        # Критерий 5: прошлое, запас 30 секунд, более года.
+        cases = (("past", "2026-09-21T09:00:30+00:00", self.NOW),
+                 ("lead", "2026-09-22T09:00:30+00:00",
+                  self.NOW.replace(hour=9)),
+                 ("horizon", "2028-09-22T09:00:30+00:00", self.NOW))
+        for driver in self.DRIVERS:
+            for send in (False, True):
+                for exact in (False, True):
+                    for name, value, now in cases:
+                        with self.subTest(driver=driver[2][0], send=send, exact=exact, case=name):
+                            self.assert_refused_before_session(self.run_cli(
+                                driver, value, send=send, exact=exact, now=now), 2)
+
+    def test_help_explains_round_minutes_independent_of_seconds(self):
+        # Критерий 6: только пользовательский CLI --help, не тексты правил.
+        for mod, _, head in self.DRIVERS:
+            with self.subTest(driver=head[0]):
+                out = io.StringIO()
+                with mock.patch.object(sys, "argv", [head[0], "--help"]), \
+                     contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as cm:
+                    mod.main()
+                self.assertEqual(cm.exception.code, 0)
+                help_text = " ".join(out.getvalue().lower().split())
+                flag_help = help_text.rsplit("--exact-minute", 1)[-1]
+                for minute in ("00", "15", "30", "45"):
+                    self.assertIn(minute, flag_help)
+                self.assertRegex(flag_help,
+                    r"(?:независимо от|при любых) секунд|секунды не (?:влияют|учитываются)")
+
+    def test_exact_minute_does_not_disable_zone_validation(self):
+        # Критерий 5: неизвестная зона, конфликт оффсета, DST gap/fold.
+        cases = (("2026-09-23T09:00:30", "Mars/Olympus"),
+                 ("2026-09-23T09:00:30+03:00", "Europe/Paris"),
+                 ("2026-10-25T02:00:30", "Europe/Paris"),
+                 ("2027-03-28T02:00:30", "Europe/Paris"))
+        for driver in self.DRIVERS:
+            for send in (False, True):
+                for value, tz in cases:
+                    with self.subTest(driver=driver[2][0], send=send, value=value, tz=tz):
+                        self.assert_refused_before_session(self.run_cli(
+                            driver, value, tz=tz, exact=True, send=send), 2)
 
 
 if __name__ == "__main__":
