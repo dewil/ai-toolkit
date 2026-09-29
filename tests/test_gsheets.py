@@ -178,5 +178,157 @@ class ArgOrder(unittest.TestCase):
             self.assertEqual(gs.main(["gsheets.py", "чепуха", "x", "y"]), 1)
 
 
+class WriteDryRun(unittest.TestCase):
+    """write без --send ничего не пишет; с --send - ровно одна запись.
+
+    Требование: INV-DOC-GSHEETS
+
+    Сеть мокается на уровне urllib.request.urlopen: фиксируем каждый запрос,
+    записью считаем любой не-GET (values.update - PUT, batchUpdate - POST).
+    """
+
+    SID = "SID123abc"
+    RNG = "'Лист'!B1:C2"
+    PAYLOAD = [["=SUM(A1:A5)", 42], ["второй-ряд-маркер", 7]]
+
+    def setUp(self):
+        self.requests = []
+        test = self
+
+        class Resp:
+            def __init__(self, data):
+                self._data = json.dumps(data).encode()
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, *a):
+                return self._data
+
+        def fake_urlopen(req, *a, **kw):
+            if isinstance(req, str):
+                method, url, body = "GET", req, None
+            else:
+                method, url, body = req.get_method(), req.full_url, req.data
+            test.requests.append((method, url, body))
+            if method == "GET":
+                return Resp({"spreadsheetId": test.SID, "properties": {"title": "T"},
+                             "sheets": [{"properties": {"title": "Лист", "sheetId": 0}}],
+                             "values": [["a"]]})
+            return Resp({"spreadsheetId": test.SID, "updatedRange": test.RNG,
+                         "updatedRows": 2, "updatedColumns": 2,
+                         "updatedCells": 37, "totalUpdatedCells": 37})
+
+        for target, value in (("urlopen", fake_urlopen),):
+            patcher = mock.patch.object(gs.urllib.request, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name, value in (("access_token", lambda creds: "tok"),
+                            ("load_creds", lambda: dict(FULL))):
+            patcher = mock.patch.object(gs, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_main(self, *extra, payload=None):
+        stdin = io.StringIO(json.dumps(self.PAYLOAD if payload is None else payload))
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(gs.sys, "stdin", stdin), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = gs.main(["gsheets.py", "write", self.SID, self.RNG, *extra])
+        return rc, out.getvalue(), err.getvalue()
+
+    def writes(self):
+        return [r for r in self.requests if r[0] != "GET"]
+
+    def test_dry_run_makes_no_write_request(self):
+        """Требование: INV-DOC-GSHEETS (1)"""
+        rc, out, err = self.run_main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.writes(), [], "dry-run отправил запрос на запись")
+
+    def test_dry_run_shows_range_table_and_values(self):
+        """Требование: INV-DOC-GSHEETS (1) - в выводе таблица, диапазон, что будет записано"""
+        rc, out, err = self.run_main()
+        self.assertEqual(rc, 0)
+        shown = out + err
+        self.assertIn(self.RNG, out)
+        self.assertIn(self.SID, shown)
+        self.assertIn("=SUM(A1:A5)", shown)
+
+    def test_dry_run_does_not_report_updated_cells(self):
+        """Требование: INV-DOC-GSHEETS (1) - в dry-run нет ложного отчета о записи"""
+        rc, out, err = self.run_main()
+        self.assertNotIn("37", out + err)
+
+    def test_dry_run_gets_no_write_even_for_big_payload(self):
+        """Требование: INV-DOC-GSHEETS (1) - большой ввод тоже только показывается"""
+        big = [[i, i * 2] for i in range(200)]
+        rc, out, err = self.run_main(payload=big)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.writes(), [])
+
+    def test_dry_run_network_is_read_only(self):
+        """Требование: INV-DOC-GSHEETS - сеть в dry-run только GET (метаданные)"""
+        self.run_main()
+        for method, url, body in self.requests:
+            self.assertEqual(method, "GET", url)
+
+    def test_send_makes_exactly_one_write_request(self):
+        """Требование: INV-DOC-GSHEETS (2)"""
+        rc, out, err = self.run_main("--send")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.writes()), 1)
+
+    def test_send_writes_same_values(self):
+        """Требование: INV-DOC-GSHEETS (2) - те же значения"""
+        self.run_main("--send")
+        (method, url, body), = self.writes()
+        data = json.loads(body)
+        if "values" in data:
+            values = data["values"]
+        else:  # batchUpdate: {"data": [{"range": ..., "values": ...}]}
+            values = data["data"][0]["values"]
+        self.assertEqual(values, self.PAYLOAD)
+
+    def test_send_targets_given_spreadsheet(self):
+        """Требование: INV-DOC-GSHEETS (2) - запись идет в указанную таблицу"""
+        self.run_main("--send")
+        (method, url, body), = self.writes()
+        self.assertIn(self.SID, url)
+
+    def test_send_reports_updated_cells_from_api_response(self):
+        """Требование: INV-DOC-GSHEETS (2) - число ячеек берется из ответа API (37), не считается"""
+        rc, out, err = self.run_main("--send")
+        self.assertEqual(rc, 0)
+        self.assertIn("37", out)
+
+    def test_send_flag_position_before_positionals_or_after(self):
+        """Требование: INV-DOC-GSHEETS (2) - --send распознается и перед позиционными"""
+        stdin = io.StringIO(json.dumps(self.PAYLOAD))
+        with mock.patch.object(gs.sys, "stdin", stdin), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = gs.main(["gsheets.py", "write", "--send", self.SID, self.RNG])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.writes()), 1)
+
+    def test_read_is_unchanged_and_never_writes(self):
+        """Требование: INV-DOC-GSHEETS - чтение не меняется и не пишет"""
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = gs.main(["gsheets.py", "read", self.SID, self.RNG])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.writes(), [])
+        self.assertTrue(self.requests, "read должен был сходить в API")
+
+    def test_write_help_names_send(self):
+        """Требование: INV-DOC-GSHEETS (3)"""
+        import os
+        import subprocess
+        import sys
+        env = dict(os.environ, HOME=tempfile.mkdtemp())
+        res = subprocess.run([sys.executable, str(SCRIPTS / "gsheets.py"), "write", "--help"],
+                             capture_output=True, text=True, env=env, timeout=30)
+        self.assertIn("--send", res.stdout + res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
