@@ -1394,6 +1394,79 @@ class SuggestNonRoundAcrossDst(unittest.TestCase):
         self.assertEqual(tgs.suggest_non_round(dt), datetime(2026, 11, 2, 9, 7, tzinfo=timezone(timedelta(hours=3))))
 
 
+class SelfScheduledNotListed(unittest.TestCase):
+    """Избранное: отложенное себе на близкий срок Telegram в очереди не показывает
+    (проверено 29.09.2026) - "не найдено" для себя не сбой, код 0 с оговоркой.
+    Для обычного чата "не найдено" по-прежнему код 4."""
+
+    class SelfEmptyQueueClient(FakeClient):
+        async def get_me(self):
+            return types.SimpleNamespace(id="me", title="Избранное", is_self=True)
+
+        async def get_messages(self, entity, scheduled=False):
+            return []
+
+    def test_send_one_self_not_found_is_ok_with_note(self):
+        with patched_send_env(tgs_one, tgs_one.tgs, self.SelfEmptyQueueClient):
+            from datetime import datetime as _dt, timezone as _tz
+            near = _dt.now(_tz.utc) + timedelta(seconds=200)
+            args = send_one_args(send=True, schedule=near, chat_id="me")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = asyncio.run(tgs_one.amain(args))
+        self.assertEqual(code, 0)
+        self.assertIn("сверка очереди для Избранного", out.getvalue())
+
+    def test_send_one_self_far_schedule_not_found_is_4(self):
+        """Дальше окна запись в очереди видна - "не найдено" там настоящий сбой."""
+        with patched_send_env(tgs_one, tgs_one.tgs, self.SelfEmptyQueueClient):
+            args = send_one_args(send=True, schedule=SCHEDULE_AT, chat_id="me")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = asyncio.run(tgs_one.amain(args))
+        self.assertEqual(code, 4)
+
+    def test_send_one_other_chat_not_found_still_4(self):
+        with patched_send_env(tgs_one, tgs_one.tgs, NotFoundInQueueClient):
+            args = send_one_args(send=True, schedule=SCHEDULE_AT)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = asyncio.run(tgs_one.amain(args))
+        self.assertEqual(code, 4)
+
+
+class RemindFlag(unittest.TestCase):
+    """--remind: только me, без --silent/--schedule, срок ~3 минуты вперед, темп снят."""
+
+    def _run(self, argv):
+        with mock.patch.object(sys, "argv", ["telegram-send-one.py", *argv]), \
+             mock.patch.object(tgs_one, "amain", new=mock.AsyncMock(return_value=0)) as am, \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            code = tgs_one.main()
+        return code, am, err.getvalue()
+
+    def test_remind_rejects_other_chat(self):
+        code, am, err = self._run(["123", "--remind", "--text", "x"])
+        self.assertEqual(code, 2)
+        am.assert_not_called()
+
+    def test_remind_rejects_silent_and_schedule(self):
+        for extra in (["--silent"], ["--schedule", "2030-01-01T09:07"]):
+            code, am, _ = self._run(["me", "--remind", "--text", "x", *extra])
+            self.assertEqual(code, 2, extra)
+            am.assert_not_called()
+
+    def test_remind_sets_lead_and_drops_pace(self):
+        from datetime import datetime as _dt
+        before = _dt.now().astimezone()
+        code, am, _ = self._run(["me", "--remind", "--text", "x"])
+        self.assertEqual(code, 0)
+        args = am.call_args.args[0]
+        lead = (args.schedule - before).total_seconds()
+        self.assertGreaterEqual(lead, tgs_one.REMIND_LEAD)
+        self.assertLess(lead, tgs_one.REMIND_LEAD + 62)
+        self.assertTrue(args.no_pace_check)
+        self.assertFalse(args.silent)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

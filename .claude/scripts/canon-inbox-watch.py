@@ -114,10 +114,14 @@ def notify(names: list[str], dry_run: bool, lost: list[str] | None = None) -> in
     if not SENDER.exists():
         log("ОШИБКА", f"нет отправщика {SENDER}")
         return 1
-    cmd = [sys.executable, str(SENDER), "me", "--text", text, "--send", "--no-pace-check"]
+    # Сообщение себе напрямую Telegram не сопровождает уведомлением: днем шлем
+    # отложенным (--remind) - оно приходит напоминанием со звуком. Ночью прямое
+    # сообщение: без уведомления, утром увидится в Избранном.
     hour = datetime.now().hour
     if hour >= QUIET_FROM or hour < QUIET_TO:
-        cmd.append("--silent")
+        cmd = [sys.executable, str(SENDER), "me", "--text", text, "--send", "--no-pace-check", "--silent"]
+    else:
+        cmd = [sys.executable, str(SENDER), "me", "--text", text, "--send", "--remind"]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         # молчать нельзя: отчет "проверил" при неудачной отправке выглядит так
