@@ -44,6 +44,11 @@ JSON-отчет (word_timings / chapters / метаданные) по умолч
 Балк по умолчанию НЕ запускается намеренно: аккаунт mymeet общий на несколько
 проектов, голый прогон не должен нагребать чужое. Рабочий цикл - точечный --pull
 по id из URL (имена спикеров правятся на mymeet до забора).
+В --pull и --all неготовые встречи пропускаются без ошибки со строкой
+"не готова: <id>, статус <статус>" в stdout; только processed и new готовы.
+Итог --all в stdout: OK (код 0), ЧАСТИЧНО со списком ошибок (код 1).
+Если ничего не скачано из-за авторизации или конфига - код 2.
+Обрыв списка после скачивания тоже дает ЧАСТИЧНО: уже скачанное остается в индексе.
 """
 
 from __future__ import annotations
@@ -57,6 +62,7 @@ import sys
 import tempfile
 import time
 import uuid
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -81,10 +87,20 @@ DATE_KEYS = (
 TITLE_KEYS = ("title", "name", "meeting_name", "meeting_title")
 ID_KEYS = ("meeting_id", "id", "uuid")
 STATUS_KEYS = ("status", "state")
-# Статусы, при которых запись реально не готова (обрабатывается / упала).
-# Прочие ("processed", "new" - свежая непросмотренная, MD уже доступен)
-# считаем готовыми: allowlist по "processed" прятал свежие записи даже из review.
-PROCESSING_STATUSES = {"processing", "in_progress", "pending", "failed", "error"}
+# "new" - свежая непросмотренная запись, MD уже доступен.
+READY_STATUSES = {"processed", "new"}
+
+
+def is_auth_error(exc: Exception) -> bool:
+    return isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403)
+
+
+def skip_not_ready(m: dict) -> bool:
+    status = str(pick(m, STATUS_KEYS) or "нет статуса").strip().lower()
+    if status not in READY_STATUSES:
+        print(f"не готова: {pick(m, ID_KEYS)}, статус {status}")
+        return True
+    return False
 
 
 def load_auth() -> dict:
@@ -132,11 +148,15 @@ def _curl_bytes(auth: dict, url: str, timeout: int) -> bytes:
     # Ключ - через stdin-конфиг (-K -), не argv: в argv он виден в ps и
     # утекает в строку CalledProcessError при ошибке curl.
     result = subprocess.run(
-        ["curl", "-sS", "--fail", "-A", "mymeet-snapshot", "-K", "-", url],
+        ["curl", "-sS", "-w", "\n%{http_code}", "-A", "mymeet-snapshot", "-K", "-", url],
         input=f'header = "X-API-KEY: {auth["api_key"]}"\n'.encode(),
         check=True, capture_output=True, timeout=timeout,
     )
-    return result.stdout
+    body, _, code = result.stdout.rpartition(b"\n")
+    status = int(code)
+    if status >= 400:
+        raise urllib.error.HTTPError(url, status, "ошибка HTTP", {}, None)
+    return body
 
 
 def api_get(auth: dict, path: str, params: dict | None = None):
@@ -447,17 +467,19 @@ def cmd_seed(auth: dict, cfg: dict) -> int:
 
 def cmd_pull(auth: dict, cfg: dict, target_id: str) -> int:
     """Точечно скачать одну встречу по meeting_id (для теста или добора из
-    review). Размещение - по тем же правилам, что и обычный pull."""
+    review). Неготовую пропустить без ошибки. Размещение - по правилам проекта."""
     meetings_root = PROJECT_ROOT / cfg["meetings_root"]
     index = load_index(meetings_root)
     for m in iter_meetings(auth):
         if str(pick(m, ID_KEYS)) == target_id:
+            if skip_not_ready(m):
+                return 0
             title = pick(m, TITLE_KEYS) or ""
             try:
                 rel = place_meeting(auth, cfg, meetings_root, index, m)
             except Exception as exc:
                 print(f"!! {target_id} ({title}): {exc}", file=sys.stderr)
-                return 1
+                return 2 if is_auth_error(exc) else 1
             meetings_root.mkdir(parents=True, exist_ok=True)
             save_index(meetings_root, index)
             if rel:
@@ -765,9 +787,21 @@ def cmd_upload(auth: dict, cfg_loader, path: Path, template: str, title: str | N
 
 
 def main(argv: list[str]) -> int:
+    try:
+        return run(argv)
+    except urllib.error.HTTPError as exc:
+        print(f"ОШИБКА: HTTP {exc.code}", file=sys.stdout)
+        return 2 if is_auth_error(exc) else 1
+
+
+def run(argv: list[str]) -> int:
     list_only = "--list" in argv
     all_mode = "--all" in argv
-    auth = load_auth()
+    try:
+        auth = load_auth()
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        print(f"ОШИБКА: конфиг авторизации: {exc}")
+        return 2
 
     if "--upload" in argv:
         i = argv.index("--upload")
@@ -808,7 +842,11 @@ def main(argv: list[str]) -> int:
         print(meeting_status(auth, extract_meeting_id(argv[i + 1])))
         return 0
 
-    cfg = load_project_config()
+    try:
+        cfg = load_project_config()
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        print(f"ОШИБКА: конфиг проекта: {exc}")
+        return 2
 
     if "--seed" in argv:
         return cmd_seed(auth, cfg)
@@ -838,21 +876,37 @@ def main(argv: list[str]) -> int:
     pulled: list[str] = []
     review: list[str] = []
     skipped_known = 0
+    failed: list[str] = []
+    auth_failed = False
+    list_error = None
 
-    for m in iter_meetings(auth):
+    try:
+        meetings = iter(iter_meetings(auth))
+    except Exception as exc:
+        list_error = exc
+        print(f"!! список встреч: {exc}", file=sys.stderr)
+        meetings = iter(())
+    while True:
+        try:
+            m = next(meetings)
+        except StopIteration:
+            break
+        except Exception as exc:
+            list_error = exc
+            print(f"!! список встреч: {exc}", file=sys.stderr)
+            break
         mid = pick(m, ID_KEYS)
         if not mid:
             continue
         mid = str(mid)
         title = pick(m, TITLE_KEYS) or ""
-        status = (pick(m, STATUS_KEYS) or "").lower()
         dt = parse_date(m)
 
         if mid in index.get("meetings", {}):
             skipped_known += 1
             continue
-        if status in PROCESSING_STATUSES:
-            continue  # еще обрабатывается / упала - вернемся на след. прогоне
+        if skip_not_ready(m):
+            continue  # вернемся на след. прогоне
 
         rule = match_rule(title, rules)
         date_str = dt.date().isoformat() if dt else "дата?"
@@ -876,6 +930,8 @@ def main(argv: list[str]) -> int:
             rel = place_meeting(auth, cfg, meetings_root, index, m)
         except Exception as exc:
             print(f"!! {mid} ({title}): {exc}", file=sys.stderr)
+            failed.append(mid)
+            auth_failed = auth_failed or is_auth_error(exc)
             continue
         pulled.append(f"{date_str} | {title}  ->  {rel}")
 
@@ -917,6 +973,22 @@ def main(argv: list[str]) -> int:
     print(f"\nуже было (пропущено): {skipped_known}")
     if not list_only and review:
         print(f"review-файл: {cfg['review_file']}")
+    if list_only and list_error:
+        print(f"ОШИБКА: список встреч: {list_error}")
+        return 2 if is_auth_error(list_error) else 1
+    if not list_only:
+        if failed or list_error:
+            details = []
+            if failed:
+                details.append(f"не скачаны: {', '.join(failed)}")
+            if list_error:
+                details.append(f"список встреч: {list_error}")
+            if not pulled and (auth_failed or (list_error and is_auth_error(list_error))):
+                print(f"ОШИБКА: авторизация, {'; '.join(details)}")
+                return 2
+            print(f"ЧАСТИЧНО: {'; '.join(details)}")
+            return 1
+        print(f"OK: скачано встреч: {len(pulled)}")
     return 0
 
 
