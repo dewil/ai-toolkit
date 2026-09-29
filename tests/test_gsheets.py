@@ -107,10 +107,14 @@ class Creds(unittest.TestCase):
 
 class WriteInput(unittest.TestCase):
     def run_write(self, payload):
-        with mock.patch.object(gs.sys, "stdin", io.StringIO(payload)):
+        # INV-DOC-GSHEETS: ошибка ввода теперь дает код 2, сообщение идет в stderr.
+        err = io.StringIO()
+        with mock.patch.object(gs.sys, "stdin", io.StringIO(payload)), \
+             contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit) as cm:
                 gs.cmd_write("token", "sid", "A1")
-        return str(cm.exception)
+        self.assertEqual(cm.exception.code, 2)
+        return err.getvalue()
 
     def test_empty_stdin_explains_format(self):
         self.assertIn("JSON", self.run_write("   "))
@@ -121,6 +125,26 @@ class WriteInput(unittest.TestCase):
     def test_flat_list_rejected(self):
         # [1,2] вместо [[1,2]] - API принял бы это молча и записал не то.
         self.assertIn("массив строк", self.run_write("[1, 2]"))
+
+
+class WriteSendErrors(unittest.TestCase):
+    def test_invalid_input_precedes_credentials(self):
+        with mock.patch.object(gs.sys, "stdin", io.StringIO("{сломано")), \
+             mock.patch.object(gs, "load_creds", side_effect=AssertionError("доступ к учетным данным")), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                gs.main(["gsheets.py", "write", "sid", "A1", "--send"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_missing_updated_cells_is_an_error(self):
+        out = io.StringIO()
+        with mock.patch.object(gs.sys, "stdin", io.StringIO("[[1]]")), \
+             mock.patch.object(gs, "api", return_value={}), \
+             contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as cm:
+                gs.cmd_write("token", "sid", "A1", send=True)
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertNotIn("OK", out.getvalue())
 
 
 class TokenErrors(unittest.TestCase):
