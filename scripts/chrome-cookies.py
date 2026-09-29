@@ -17,6 +17,12 @@
 
 Порт CDP: 9222 по умолчанию (для машины пользователя через обратный SSH-туннель -
 тот же порт, см. скилл agent-browser), меняется флагом --port.
+Общие флаги принимаются до и после любой подкоманды.
+
+dump --require-cookie li_at проверяет наличие куки после фильтра домена; флаг
+повторяемый. Если любой из указанных кук нет, код 3, файлы не меняются даже
+с --force. При перезаписи прежние байты сохраняются в <файл>.prev; при первом
+dump копия не создается. Оба файла записываются атомарно с правами 600.
 
 ФАЙЛ С КУКАМИ - СЕКРЕТ: это действующая сессия, эквивалент пароля. Кладется вне
 репозитория и вне синкаемых папок, права 600 выставляются скриптом (см.
@@ -38,6 +44,7 @@ import os
 import pathlib
 import re
 import socket
+import tempfile
 import urllib.request
 
 DEFAULT_STORE = pathlib.Path.home() / ".config" / "browser-sessions"
@@ -166,8 +173,15 @@ def profile_id(s: socket.socket, create: bool = False) -> str | None:
     return new_id
 
 
+class _BrowserWsUrl(str):
+    def __new__(cls, version: dict):
+        url = super().__new__(cls, version["webSocketDebuggerUrl"])
+        url.version = version
+        return url
+
+
 def browser_ws(port: int) -> str:
-    return browser_version(port)["webSocketDebuggerUrl"]
+    return _BrowserWsUrl(browser_version(port))
 
 
 def domain_matches(cookie_domain: str, wanted: str) -> bool:
@@ -197,9 +211,25 @@ def dump_target_conflict(existing, profile: str | None) -> str | None:
     return None
 
 
+def atomic_write(path: pathlib.Path, data: bytes) -> None:
+    """Заменить файл целиком, не открывая секрет с широкими правами."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            os.fchmod(fh.fileno(), 0o600)
+            fh.write(data)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def cmd_dump(args) -> int:
-    version = browser_version(args.port)
-    s = _ws_connect(version["webSocketDebuggerUrl"])
+    ws_url = browser_ws(args.port)
+    # В штатном вызове URL и метаданные приходят из одного /json/version.
+    # Простой str поддерживается для подмен browser_ws в тестах и вызывающем коде.
+    version = getattr(ws_url, "version", None) or browser_version(args.port)
+    s = _ws_connect(ws_url)
     try:
         cookies = _cdp(s, 1, "Storage.getCookies").get("cookies", [])
         profile = profile_id(s, create=True)
@@ -209,6 +239,11 @@ def cmd_dump(args) -> int:
         cookies = [c for c in cookies if domain_matches(c.get("domain"), args.domain)]
     # маркер профиля в дамп не кладем: он про браузер, а не про сессию сайта
     cookies = [c for c in cookies if c.get("name") != MARKER_NAME]
+    names = {c.get("name") for c in cookies}
+    for name in args.require_cookie:
+        if name not in names:
+            print(f"сессия не жива: нет куки {name}")
+            return 3
     if not cookies:
         print(f"куки не найдены (domain={args.domain})")
         return 1
@@ -238,18 +273,21 @@ def cmd_dump(args) -> int:
         # падать). Ответственность за расположение там на вызывающем.
         out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(out.parent, 0o700)  # mode у mkdir действует только при создании
-    # Секрет: файл получает 600 ДО записи содержимого. O_NOFOLLOW - чтобы
-    # подсунутый симлинк не увел дамп в чужой файл; fchmod правит режим уже
-    # существовавшего файла (могло остаться 644 от прежней версии).
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        # Дамп сопровождаем меткой источника: restore в чужой браузер - это
-        # утечка живой сессии, и без метки его нечем отличить.
-        json.dump({
-            "source": {"browser": version.get("Browser"), "profile": profile},
-            "cookies": cookies,
-        }, fh, ensure_ascii=False)
+    # Готовим весь JSON до ротации, чтобы ошибка сериализации не меняла бэкап.
+    payload = json.dumps({
+        "source": {"browser": version.get("Browser"), "profile": profile},
+        "cookies": cookies,
+    }, ensure_ascii=False).encode("utf-8")
+    # Не следуем симлинку источника при сохранении прежнего секрета.
+    try:
+        fd = os.open(out, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        pass
+    else:
+        with os.fdopen(fd, "rb") as fh:
+            previous = fh.read()
+        atomic_write(pathlib.Path(str(out) + ".prev"), previous)
+    atomic_write(out, payload)
     names = sorted({c.get("name", "") for c in cookies})
     print(f"ok: {len(cookies)} куки -> {out} (600)")
     print("имена:", ", ".join(names[:12]) + ("..." if len(names) > 12 else ""))
@@ -309,27 +347,32 @@ def cmd_list(args) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Бэкап и восстановление куки через CDP")
-    ap.add_argument("--port", type=int, default=9222, help="порт CDP (по умолчанию 9222)")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--port", type=int, default=argparse.SUPPRESS,
+                        help="порт CDP (по умолчанию 9222)")
+    ap = argparse.ArgumentParser(description="Бэкап и восстановление куки через CDP",
+                                 parents=[common])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    d = sub.add_parser("dump", help="снять куки из живого браузера")
+    d = sub.add_parser("dump", help="снять куки из живого браузера", parents=[common])
     d.add_argument("--force", action="store_true",
                    help="перезаписать файл, даже если в нем дамп другого профиля")
+    d.add_argument("--require-cookie", action="append", default=[], metavar="ИМЯ",
+                   help="обязательная кука; повторяемый, отказ с кодом 3 даже с --force")
     d.add_argument("--domain", help="фильтр по домену, например linkedin.com")
     d.add_argument("--out", help="путь файла (по умолчанию ~/.config/browser-sessions/<domain>.json)")
     d.set_defaults(func=cmd_dump)
 
-    r = sub.add_parser("restore", help="залить куки в браузер")
+    r = sub.add_parser("restore", help="залить куки в браузер", parents=[common])
     r.add_argument("--in", dest="inp", required=True, help="файл с куками")
     r.add_argument("--force", action="store_true",
                    help="залить, даже если браузер не совпал с источником дампа")
     r.set_defaults(func=cmd_restore)
 
-    l = sub.add_parser("list", help="что лежит в хранилище")
+    l = sub.add_parser("list", help="что лежит в хранилище", parents=[common])
     l.set_defaults(func=cmd_list)
 
-    args = ap.parse_args()
+    args = ap.parse_args(namespace=argparse.Namespace(port=9222))
     return args.func(args)
 
 
