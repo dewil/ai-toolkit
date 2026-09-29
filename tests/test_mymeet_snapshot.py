@@ -389,5 +389,135 @@ class UploadSafety(unittest.TestCase):
         self.assertIn("read_total != size", src)
 
 
+class PullStatusAndExitCode(unittest.TestCase):
+    """Забор только готовых встреч и честный код пакетного прогона.
+
+    Требование: INV-TRK-MYMEET
+
+    Сеть не трогаем: подменены load_auth, load_project_config, iter_meetings,
+    meeting_status, api_get, download_md и PROJECT_ROOT. Статус отдается сразу
+    всеми путями, которыми реализация могла бы его спросить.
+    """
+
+    READY = "processed"
+    CFG = {"meetings_root": "Встречи", "review_file": "Встречи/_review.md",
+           "rules": [{"match": ["дейли"], "dest": "{YYYY}/{MM}"}]}
+
+    def meetings(self, statuses):
+        return [
+            {"id": mid, "name": "дейли " + mid, "title": "дейли " + mid,
+             "date": f"2026-07-{27 + i}T10:00:00", "status": st}
+            for i, (mid, st) in enumerate(statuses.items())
+        ]
+
+    @contextlib.contextmanager
+    def env(self, statuses, failing=None, fail_exc=None):
+        """Подмена сети. failing - id, чье скачивание падает; fail_exc - чем."""
+        failing = set(failing or ())
+        items = self.meetings(statuses)
+        by_id = {m["id"]: m for m in items}
+        names = ("PROJECT_ROOT", "load_auth", "load_project_config", "iter_meetings",
+                 "meeting_status", "api_get", "download_md")
+        saved = {n: getattr(mymeet, n) for n in names}
+
+        def download(auth, mid):
+            if mid in failing:
+                raise (fail_exc or RuntimeError("сбой скачивания " + mid))
+            return REAL
+
+        def api_get(auth, path, params=None):
+            for mid, m in by_id.items():
+                if mid in path:
+                    return dict(m)
+            return {"data": [dict(m) for m in items], "items": [dict(m) for m in items]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mymeet.PROJECT_ROOT = Path(tmp)
+            mymeet.load_auth = lambda: {"api_key": "k", "base_url": "http://x"}
+            mymeet.load_project_config = lambda: dict(self.CFG)
+            mymeet.iter_meetings = lambda auth: iter([dict(m) for m in items])
+            mymeet.meeting_status = lambda auth, mid: by_id[mid]["status"]
+            mymeet.api_get = api_get
+            mymeet.download_md = download
+            try:
+                yield Path(tmp)
+            finally:
+                for n, v in saved.items():
+                    setattr(mymeet, n, v)
+
+    def run_main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = mymeet.main(argv)
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, int) else 1
+        return code, out.getvalue() + err.getvalue()
+
+    @staticmethod
+    def written(root):
+        return sorted(p.name for p in root.rglob("2026-*.md"))
+
+    def test_in_progress_pull_is_skipped(self):
+        """Требование: INV-TRK-MYMEET (критерий 1)"""
+        for status in ("processing", "in_progress", "pending"):
+            with self.subTest(status=status), self.env({"m1": status}) as root:
+                code, text = self.run_main(["--pull", "m1"])
+                self.assertEqual(self.written(root), [], "недообработанная не пишется")
+                self.assertIn("не готова: m1", text)
+                self.assertIn(status, text)
+                self.assertEqual(code, 0, "пропуск неготовой не ошибка")
+
+    def test_ready_pull_is_written(self):
+        """Требование: INV-TRK-MYMEET (контроль: готовая по-прежнему забирается)"""
+        with self.env({"m1": self.READY}) as root:
+            code, text = self.run_main(["--pull", "m1"])
+            self.assertEqual(len(self.written(root)), 1)
+            self.assertNotIn("не готова", text)
+            self.assertEqual(code, 0)
+
+    def test_batch_skips_not_ready_without_error(self):
+        """Требование: INV-TRK-MYMEET (критерий 1: неготовая в пакете не ошибка)"""
+        with self.env({"m1": self.READY, "m2": "processing"}) as root:
+            code, text = self.run_main(["--all"])
+            self.assertEqual(len(self.written(root)), 1)
+            self.assertIn("не готова: m2", text)
+            self.assertNotIn("ЧАСТИЧНО:", text)
+            self.assertIn("OK:", text)
+            self.assertEqual(code, 0)
+
+    def test_batch_partial_failure(self):
+        """Требование: INV-TRK-MYMEET (критерий 2)"""
+        with self.env({"m1": self.READY, "m2": self.READY}, failing={"m2"}) as root:
+            code, text = self.run_main(["--all"])
+            self.assertNotEqual(code, 0)
+            self.assertIn("ЧАСТИЧНО:", text)
+            self.assertIn("m2", text.split("ЧАСТИЧНО:", 1)[1])
+            self.assertNotIn("OK:", text)
+            self.assertEqual(len(self.written(root)), 1, "вторая встреча записана")
+
+    def test_batch_all_ok(self):
+        """Требование: INV-TRK-MYMEET (критерий 3)"""
+        with self.env({"m1": self.READY, "m2": self.READY}) as root:
+            code, text = self.run_main(["--all"])
+            self.assertEqual(code, 0)
+            self.assertIn("OK:", text)
+            self.assertNotIn("ЧАСТИЧНО:", text)
+            self.assertEqual(len(self.written(root)), 2)
+
+    def test_auth_failure_has_own_exit_code(self):
+        """Требование: INV-TRK-MYMEET (ни одной из-за авторизации - свой код)"""
+        with self.env({"m1": self.READY, "m2": self.READY}, failing={"m2"}) as root:
+            partial_code, _ = self.run_main(["--all"])
+        denied = urllib.error.HTTPError("http://x", 401, "Unauthorized", {}, io.BytesIO(b""))
+        with self.env({"m1": self.READY, "m2": self.READY},
+                      failing={"m1", "m2"}, fail_exc=denied) as root:
+            code, text = self.run_main(["--all"])
+            self.assertEqual(self.written(root), [])
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("OK:", text)
+        self.assertNotEqual(code, partial_code, "авторизация - отдельный код, не ЧАСТИЧНО")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
