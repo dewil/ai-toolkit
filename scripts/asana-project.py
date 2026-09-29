@@ -22,7 +22,8 @@ asana-project; Asana MCP снят 17.08.2026 и не используется).
   create     - создать проект с секциями и задачами с нуля. НЕ идемпотентна:
                повторный прогон создаст второй проект - досыпка через tasks
   tasks      - досыпать задачи в существующий проект: секции переиспользуются
-               по имени, задачи узнаются по имени (дублей нет), срок
+               по имени, задачи узнаются по имени (две открытые с одним
+               именем - отказ до записи), срок
                существующей задачи подтягивается к плану; поле related у задачи
                пишет в ее описание блок "откуда выросла эта работа"
   move       - перенести существующие задачи в секцию
@@ -337,22 +338,37 @@ def compile_hours_re(pattern: str):
 
 
 def board_index(tasks: list[dict]) -> tuple[dict[str, dict], set[str], dict[str, dict]]:
-    """Индексы доски: по имени, множество неоднозначных имен, по gid."""
+    """По имени выбираем открытую задачу; неоднозначны лишь открытые дубли."""
     by_name: dict[str, dict] = {}
     dupes: set[str] = set()
     by_gid: dict[str, dict] = {}
     for t in tasks:
         name = str(t.get("name") or "").strip()
         if name:
-            if name in by_name:
+            old = by_name.get(name)
+            if old and not old.get("completed") and not t.get("completed"):
                 dupes.add(name)
-            by_name[name] = t
+            if not old or not t.get("completed") or old.get("completed"):
+                by_name[name] = t
         if t.get("gid"):
             by_gid[str(t["gid"])] = t
     # by_gid строится по СЫРОМУ списку, а не по by_name: иначе задача, чье имя
     # совпало с чужим и оказалась не последней, недостижима и по своему gid -
     # то есть совет "укажи gid нужной" не работал ровно там, где он нужен
     return by_name, dupes, by_gid
+
+
+def duplicate_candidates(name: str, tasks: list[dict], pgid: str) -> str:
+    """Открытые одноименные задачи со всеми данными для ручного выбора."""
+    lines = []
+    for t in tasks:
+        if str(t.get("name") or "").strip() != name or t.get("completed"):
+            continue
+        _sgid, section = section_of(t, pgid)
+        lines.append(f"    - '{name}', gid {t.get('gid') or 'нет'}, "
+                     f"секция {section or 'вне секций'}, срок {t.get('due_on') or 'нет'}")
+    return (f"'{name}': на доске несколько задач с таким именем (открытых) - "
+            "неоднозначно; укажи gid нужной:\n" + "\n".join(lines))
 
 
 def resolve_ref(raw, by_name: dict, dupes: set, by_gid: dict) -> tuple[dict | None, str | None]:
@@ -396,7 +412,7 @@ def resolve_ref(raw, by_name: dict, dupes: set, by_gid: dict) -> tuple[dict | No
     return None, f"'{ref}': нет такой задачи на доске"
 
 
-def resolve_refs(refs: list[str], tasks: list[dict], where: str) -> list[dict]:
+def resolve_refs(refs: list[str], tasks: list[dict], where: str, pgid: str) -> list[dict]:
     """Ссылки на задачи (имя или gid) -> задачи доски. Отказ до записи.
 
     Неоднозначность и промах не угадываются: выбор наугад тут означает перенос
@@ -415,10 +431,7 @@ def resolve_refs(refs: list[str], tasks: list[dict], where: str) -> list[dict]:
                 if near:
                     why += "; похожие: " + ", ".join(f"'{n}'" for n in near)
             if ref and ref in dupes:
-                # перечисляем кандидатов: без них совет "укажи gid" не исполним
-                gids = ", ".join(sorted(str(t.get("gid")) for t in tasks
-                                        if str(t.get("name") or "").strip() == ref))
-                why += f" (gid {gids})"
+                why = duplicate_candidates(ref, tasks, pgid)
             problems.append(why or "не резолвится")
             continue
         out.append(found)
@@ -454,7 +467,7 @@ def need_section(pgid: str, name: str, token: str) -> str:
 
 
 # Секция и статус нужны и move (откуда переносим), и complete (что уже закрыто).
-BOARD_FIELDS = ("name,completed,memberships.project.gid,"
+BOARD_FIELDS = ("name,completed,due_on,memberships.project.gid,"
                 "memberships.section.name,memberships.section.gid")
 
 
@@ -496,7 +509,7 @@ def cmd_move(args) -> int:
         sys.exit(f"В плане {args.plan} поле tasks - непустой список имен или gid")
     sgid = need_section(pgid, str(plan["section"]), token)
     board = get_all(f"/projects/{pgid}/tasks?opt_fields={BOARD_FIELDS}", token)
-    targets = dedupe(resolve_refs(refs, board, args.plan))
+    targets = dedupe(resolve_refs(refs, board, args.plan, pgid))
 
     moves = []
     for t in targets:
@@ -564,7 +577,7 @@ def cmd_complete(args) -> int:
         if not isinstance(refs, list) or not refs:
             sys.exit(f"В плане {args.plan} поле tasks - непустой список имен или gid")
         board = get_all(f"/projects/{pgid}/tasks?opt_fields={BOARD_FIELDS}", token)
-        targets = dedupe(resolve_refs(refs, board, args.plan))
+        targets = dedupe(resolve_refs(refs, board, args.plan, pgid))
         where = f"перечень из {len(targets)} задач"
 
     todo = [t for t in targets if not t.get("completed")]
@@ -774,7 +787,7 @@ def related_targets(t: dict, idx: tuple) -> tuple[list, list[str]]:
     return out, problems
 
 
-def check_related(sections: list, board: list, token: str) -> object | None:
+def check_related(sections: list, board: list, token: str, pgid: str) -> object | None:
     """Полный резолв related ДО первой записи. Возвращает модуль блока.
 
     Отдельно от применения именно ради порядка: применение идет после цикла
@@ -798,6 +811,8 @@ def check_related(sections: list, board: list, token: str) -> object | None:
     plan_names = {t["name"].strip() for s_ in sections for t in s_.get("tasks", [])}
     idx = related_index(board, plan_names)
     by_name, dupes, _by_gid = idx
+    ambiguous_refs = sorted({raw.strip() for t in jobs for raw in t["related"]
+                             if isinstance(raw, str) and raw.strip() in dupes})
     problems: list[str] = []
     owners: list[dict] = []
     for t in jobs:
@@ -805,12 +820,12 @@ def check_related(sections: list, board: list, token: str) -> object | None:
         if name in dupes:
             problems.append(f"'{name}': на доске несколько задач с таким именем - "
                             "в какую писать блок связей, неоднозначно")
-            continue
         _refs, why = related_targets(t, idx)
         problems.extend(why)
         owner = by_name.get(name)
-        if owner and owner.get("gid"):
+        if name not in dupes and owner and owner.get("gid"):
             owners.append(owner)
+    problems.extend(duplicate_candidates(n, board, pgid) for n in ambiguous_refs)
     if problems:
         sys.exit("related не будет применен - исправь и повтори:\n  - "
                  + "\n  - ".join(problems))
@@ -935,11 +950,17 @@ def cmd_tasks(args) -> int:
                  + ", ".join(f"'{n}'" for n in ambiguous)
                  + ".\nВ какую писать - неоднозначно; переименуй лишние и повтори.")
     existing = {n: g[0] for n, g in sec_idx.items()}
-    board = get_all(f"/projects/{pgid}/tasks?opt_fields=name,due_on", token)
-    known = {str(t.get("name") or "").strip(): t for t in board}
+    board = get_all(f"/projects/{pgid}/tasks?opt_fields={BOARD_FIELDS}", token)
+    known, dupes, _by_gid = board_index(board)
+    plan_names = {t["name"].strip() for s in sections for t in s.get("tasks", [])}
+    ambiguous_names = sorted(plan_names & dupes)
+    if ambiguous_names:
+        sys.exit("задачи не будут исполнены - исправь и повтори:\n  - "
+                 + "\n  - ".join(duplicate_candidates(n, board, pgid)
+                                   for n in ambiguous_names))
     # Полный резолв related до первой записи: промах, найденный после цикла
     # создания, оставил бы доску с новыми задачами и без связей
-    ab = check_related(sections, board, token)
+    ab = check_related(sections, board, token, pgid)
 
     if not args.send:
         print("DRY-RUN (без --send ничего не создано)")
