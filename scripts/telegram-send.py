@@ -15,6 +15,9 @@
 адресата и печатает, что и куда уйдет, НО не отправляет. Реальная отправка -
 только с флагом --send.
 
+Пустой --file или путь к несуществующему файлу - отказ с кодом 2 до
+создания клиента, как в dry-run, так и с --send.
+
 Второй предохранитель - гейт темпа: отправка слишком рано после предыдущей в
 тот же чат отклоняется с кодом 3 ("нужно N сек, осталось M"). Серия сообщений
 идет с паузами, а не пачкой: залп выдает автоматику вернее содержания текста.
@@ -956,7 +959,18 @@ async def amain(args) -> int:
     schedule_dt = getattr(args, "schedule", None)
     schedule_tz = getattr(args, "schedule_tz", None)
 
-    text = read_text(args, allow_empty=bool(args.file))
+    if args.file is not None and not args.file:
+        sys.stderr.write("--file задан пустой строкой - проверь переменную с путем.\n")
+        return 2
+
+    file_path = None
+    if args.file:
+        file_path = Path(args.file).expanduser().resolve()
+        if not file_path.is_file():
+            sys.stderr.write(f"Файл не найден: {file_path}\n")
+            return 2
+
+    text = read_text(args, allow_empty=args.file is not None)
 
     auth = load_auth(entry["account"])
     session_path = str(AUTH_DIR / auth["session_name"])
@@ -994,13 +1008,6 @@ async def amain(args) -> int:
         title = entity_title(entity, chat_id)
         kind = type(entity).__name__
         lines = text.split("\n")
-
-        file_path = None
-        if args.file:
-            file_path = Path(args.file).expanduser().resolve()
-            if not file_path.is_file():
-                sys.stderr.write(f"Файл не найден: {file_path}\n")
-                return 2
 
         if not args.send:
             print("DRY-RUN (без --send отправка не сделана)")
