@@ -13,6 +13,10 @@
 здесь только тонкая обертка: выбрать чат, задать путь, опционально сверить
 username, поправить шапку личного чата.
 
+Если expected_username задан, несовпадение или отсутствие username у чата
+прерывает работу с кодом 2 до выкачки.
+Пустой expected_username - ошибка ввода с кодом 2 до создания клиента.
+
 Запуск:
     python3 scripts/telegram-pull-one.py <chat_id> <out_path> [expected_username]
     python3 scripts/telegram-pull-one.py <chat_id> <out_path> --account cv
@@ -51,6 +55,10 @@ async def amain(
     chat_id: int, out_path: str, expected_username: str | None, account: str = "default",
     download_media: bool = True,
 ) -> int:
+    if expected_username is not None and not expected_username:
+        sys.stderr.write("expected_username задан пустой строкой - проверь значение username.\n")
+        return 2
+
     if (tgs.PROJECT_ROOT / out_path).resolve().is_relative_to(tgs.PROJECT_ROOT.resolve()):
         sys.stderr.write(
             f"внимание: зеркало пишется внутрь проекта ({(tgs.PROJECT_ROOT / out_path)}).\n"
@@ -81,9 +89,9 @@ async def amain(
         uname = getattr(entity, "username", None)
         print(f"resolved {chat_id}: {display_name(entity)!r} @{uname} (type {type(entity).__name__})")
 
-        if expected_username and uname and uname.lower() != expected_username.lower():
+        if expected_username is not None and (uname or "").lower() != expected_username.lower():
             sys.stderr.write(
-                f"!! username не совпал: ожидали @{expected_username}, получили @{uname}. "
+                f"!! username не совпал: ожидали @{expected_username}, получили @{uname or '?'}. "
                 f"Прерываю, чтобы не выкачать чужой чат.\n"
             )
             return 2
