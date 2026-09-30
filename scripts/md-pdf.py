@@ -10,7 +10,8 @@ Chrome headless + CDP (Page.printToPDF). Нужен только установ�
     python3 scripts/md-pdf.py note.md --css custom.css --title "Отчет"
     python3 scripts/md-pdf.py note.md --author "Имя"   # /Author в метаданные PDF
 
-Chrome сам /Author не пишет - при --author поле дописывается инкрементальным
+Автор - первое непустое значение: --author -> DOC_AUTHOR -> dwl.
+Chrome сам /Author не пишет - выбранное имя дописывается инкрементальным
 обновлением Info-словаря готового PDF (см. add_author).
 
 Поддерживаемый markdown: YAML-frontmatter (пропускается), заголовки H1-H4,
@@ -50,6 +51,8 @@ import sys
 import tempfile
 import time
 import urllib.request
+
+DEFAULT_AUTHOR = "dwl"
 
 # Порядок важен: сначала точные пути (дешевая проверка существования файла),
 # потом PATH - страховка для нестандартных установок (snap, свой префикс).
@@ -192,6 +195,8 @@ def inline(text: str) -> str:
         return f"\x02{len(stash) - 1}\x03"
 
     s = re.sub(r"`([^`]+)`", lambda m: keep(f"<code>{m.group(1)}</code>"), s)
+    # Экранированные маркеры сохраняются буквально; код уже спрятан выше.
+    s = re.sub(r"\\([*`_])", lambda m: keep(m.group(1)), s)
     # HTML-сущности из исходника (&nbsp; &mdash; &#8212; &#x2014;) markdown
     # пропускает как есть, а html.escape выше превратил их в "&amp;nbsp;" -
     # в PDF они печатались буквально (HR, 06.09.2026: опись вложения с &nbsp;
@@ -227,16 +232,18 @@ def inline(text: str) -> str:
 
 
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+ANY_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 
-def closes_fence(line: str, fence: str) -> bool:
+def closes_fence(line: str, fence: str, *, allow_any_indent: bool = False) -> bool:
     """Закрывающий забор: тот же символ, не короче, после только пробелы/табы."""
+    indent = r"\s*" if allow_any_indent else r" {0,3}"
     return re.fullmatch(
-        rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", line
+        rf"{indent}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", line
     ) is not None
 
 
-def strip_html_comments(md: str) -> tuple[str, int]:
+def strip_html_comments(md: str, *, allow_any_indent: bool = True) -> tuple[str, int]:
     """Вырезает HTML-комментарии вне кода. Возвращает (текст, сколько вырезано).
 
     Автор исходника прячет в `<!-- ... -->` служебное, потому что ни один
@@ -245,9 +252,9 @@ def strip_html_comments(md: str) -> tuple[str, int]:
 
     Код не трогаем: там комментарий - пример, а не заметка автора, и вырезать
     его значило бы испортить документацию. "Код" здесь определяется **теми же
-    правилами, что и в основном разборе ниже**, иначе защита оказывается уже
-    обещанной: fenced-блок опознается с отступом до трех пробелов и
-    по обоим видам забора, а inline-код прячется до вырезания. Закрытие учитывает
+    правилами вызывающего конвертера**, иначе защита оказывается уже обещанной:
+    PPTX сохраняет прежние заборы с любым отступом, PDF задает предел в три
+    пробела. Оба вида забора и inline-код защищены. Закрытие учитывает
     символ, длину забора и отсутствие текста после него. Первая версия
     этой функции резала по сегментам `^``` ... ^```` и молча съедала комментарий
     из блока с отступом, из `~~~`-забора и из одинарных бэктиков.
@@ -261,11 +268,11 @@ def strip_html_comments(md: str) -> tuple[str, int]:
     in_comment = False         # многострочный комментарий продолжается
 
     for line in md.split("\n"):
-        m = FENCE_RE.match(line)
+        m = (ANY_FENCE_RE if allow_any_indent else FENCE_RE).match(line)
 
         if fence is not None:            # внутри блока кода - отдаем как есть
             out.append(line)
-            if closes_fence(line, fence):
+            if closes_fence(line, fence, allow_any_indent=allow_any_indent):
                 fence = None
             continue
         if m and not in_comment:         # забор открывается только вне комментария
@@ -328,7 +335,7 @@ def strip_html_comments(md: str) -> tuple[str, int]:
 
 def md_to_html(md: str) -> tuple[str, str]:
     """Возвращает (title из первого H1 или '', html-тело)."""
-    md, stripped = strip_html_comments(md)
+    md, stripped = strip_html_comments(md, allow_any_indent=False)
     if stripped:
         print(f"md-pdf: вырезано HTML-комментариев: {stripped} "
               f"(в документ они не попадают)", file=sys.stderr)
@@ -935,7 +942,7 @@ def main() -> int:
     ap.add_argument("--out", type=pathlib.Path, default=None)
     ap.add_argument("--css", type=pathlib.Path, default=None, help="заменить дефолтные стили")
     ap.add_argument("--title", default=None, help="иначе - первый H1 или имя файла")
-    ap.add_argument("--author", default=None, help="записать /Author в метаданные PDF")
+    ap.add_argument("--author", default=None, help="автор PDF: первое непустое --author, DOC_AUTHOR, иначе " + DEFAULT_AUTHOR)
     ap.add_argument("--photo", type=pathlib.Path, default=None,
                     help="фото в правом верхнем углу первой страницы (для резюме); "
                          "markdown-исходник не трогается")
@@ -992,8 +999,8 @@ def main() -> int:
             # трейсбек из печати выбивался бы из этого стиля
             sys.exit(f"печать не удалась: {exc}")
         out.parent.mkdir(parents=True, exist_ok=True)
-        if args.author:
-            data = add_author(data, args.author)
+        author = args.author or os.environ.get("DOC_AUTHOR") or DEFAULT_AUTHOR
+        data = add_author(data, author)
         out.write_bytes(data)
 
     print(f"ok: {out} ({out.stat().st_size // 1024} KB)")

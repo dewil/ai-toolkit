@@ -29,7 +29,9 @@ python3 scripts/csv-xlsx.py dump.csv --delimiter "|"       # принудите�
 python3 scripts/csv-xlsx.py сырье.csv --no-header          # первая строка - данные
 ```
 
-Автор и заголовок файла - по `rules/document-metadata.md`: `--author` / env `XLSX_AUTHOR` / дефолт из скрипта; `--title` / имя выходного файла. Проверка - распаковать `docProps/core.xml` (`unzip -p out.xlsx docProps/core.xml`).
+Автор и заголовок файла - по `rules/document-metadata.md`: `--author` -> `DOC_AUTHOR` -> `XLSX_AUTHOR` -> `dwl`; `--title` / имя выходного файла. Проверка - распаковать `docProps/core.xml` (`unzip -p out.xlsx docProps/core.xml`).
+
+Автор выбирается по первому непустому значению; пустые строки пропускаются. `XLSX_AUTHOR` - запасная переменная для совместимости. Имя передается без типографической правки в `dc:creator` и `cp:lastModifiedBy`.
 
 ## Что скрипт делает с данными (знать, чтобы не удивляться)
 
