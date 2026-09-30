@@ -1,7 +1,7 @@
 ---
 name: architect
 description: Designs system architecture, evaluates trade-offs, and plans complex refactors. Use when the task requires deep reasoning about structure or design decisions.
-tools: Read, Glob, Grep, Write, Edit
+tools: Read, Glob, Grep
 model: opus
 effort: medium
 color: purple

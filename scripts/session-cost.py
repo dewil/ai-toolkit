@@ -6,7 +6,8 @@ Claude Code пишет транскрипт каждой сессии в
 `~/.claude/projects/<encoded-project>/<session-id>.jsonl`. У каждого
 assistant-сообщения есть `message.usage` с полями input_tokens,
 output_tokens, cache_creation_input_tokens (запись кэша),
-cache_read_input_tokens (чтение кэша). Скрипт суммирует их за сессию.
+cache_read_input_tokens (чтение кэша). Скрипт учитывает последний непустой usage по message.id в каждом
+транскрипте и включает субагентов сессии.
 
 Зачем: заполнять токен-строку в смете кейса (часы + токены, без денег) без
 ручного `/cost`. `/usage` дает только % лимита, а не сырые токены - тут сырые.
@@ -70,10 +71,31 @@ def newest_jsonl(directory: Path) -> Path | None:
     return files[-1] if files else None
 
 
+def summary(paths: list[Path], messages: int, tokens: dict,
+            invalid_lines: int = 0, messages_without_id: int = 0) -> dict:
+    return {
+        "files": [str(p) for p in paths],
+        "messages": messages,
+        "tokens": tokens,
+        "work_tokens": tokens["output"] + tokens["cache_write"],
+        "grand_total": sum(tokens.values()),
+        "invalid_lines": invalid_lines,
+        "messages_without_id": messages_without_id,
+    }
+
+
+def unique_paths(paths: list[Path]) -> list[Path]:
+    return list(dict.fromkeys(p.resolve() for p in paths))
+
+
 def sum_usage(paths: list[Path]) -> dict:
+    paths = unique_paths(paths)
     totals = {k: 0 for k in USAGE_FIELDS}
-    messages = 0
+    messages = invalid_lines = messages_without_id = 0
     for path in paths:
+        by_id = {}
+        without_id = []
+        invalid = 0
         with path.open(encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
@@ -82,14 +104,51 @@ def sum_usage(paths: list[Path]) -> dict:
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
+                    invalid += 1
                     continue
-                usage = (obj.get("message") or {}).get("usage") or {}
-                if not usage:
+                if not isinstance(obj, dict) or obj.get("type") != "assistant":
                     continue
-                messages += 1
-                for key, field in USAGE_FIELDS.items():
-                    totals[key] += usage.get(field, 0) or 0
-    return {"totals": totals, "messages": messages}
+                message = obj.get("message")
+                if not isinstance(message, dict):
+                    continue
+                usage = message.get("usage")
+                if not isinstance(usage, dict) or not usage:
+                    continue
+                message_id = message.get("id")
+                if not message_id:
+                    without_id.append(usage)
+                else:
+                    by_id[message_id] = usage
+        if invalid:
+            sys.stderr.write(
+                f"{path}: invalid_lines={invalid} - битые JSON-строки пропущены, "
+                "сводка неполная.\n"
+            )
+        if without_id:
+            sys.stderr.write(
+                f"{path}: messages_without_id={len(without_id)} - сообщения без ID "
+                "учтены отдельно, дедупликация для них невозможна.\n"
+            )
+        invalid_lines += invalid
+        messages_without_id += len(without_id)
+        messages += len(by_id) + len(without_id)
+        for usage in [*by_id.values(), *without_id]:
+            for key, field in USAGE_FIELDS.items():
+                totals[key] += usage.get(field, 0) or 0
+    return summary(paths, messages, totals, invalid_lines, messages_without_id)
+
+
+def subagent_paths(paths: list[Path]) -> list[Path]:
+    found = []
+    for path in paths:
+        directory = path.with_suffix("") / "subagents"
+        # stat/iterdir сохраняют ошибки доступа; glob может их скрыть.
+        try:
+            directory.stat()
+        except FileNotFoundError:
+            continue
+        found.extend(sorted(p for p in directory.iterdir() if p.suffix == ".jsonl"))
+    return unique_paths(found)
 
 
 def resolve_paths(args) -> list[Path]:
@@ -151,33 +210,44 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="машиночитаемый вывод")
     args = ap.parse_args()
 
-    paths = resolve_paths(args)
-    result = sum_usage(paths)
-    t = result["totals"]
-    work = t["output"] + t["cache_write"]
-    grand = sum(t.values())
+    try:
+        paths = unique_paths(resolve_paths(args))
+        children = subagent_paths(paths)
+        main_paths = [p for p in paths if p not in children]
+        main_result = sum_usage(main_paths)
+        subagents = sum_usage(children)
+    except (OSError, UnicodeError) as exc:
+        sys.stderr.write(f"Ошибка чтения транскриптов: {exc}\n")
+        return 1
 
+    tokens = {k: main_result["tokens"][k] + subagents["tokens"][k]
+              for k in USAGE_FIELDS}
+    result = summary(
+        main_paths + children,
+        main_result["messages"] + subagents["messages"], tokens,
+        main_result["invalid_lines"] + subagents["invalid_lines"],
+        main_result["messages_without_id"] + subagents["messages_without_id"],
+    )
+    result.update(main=main_result, subagents=subagents)
     if args.json:
-        print(json.dumps({
-            "files": [str(p) for p in paths],
-            "messages": result["messages"],
-            "tokens": t,
-            "work_tokens": work,
-            "grand_total": grand,
-        }, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    label = paths[0].name if len(paths) == 1 else f"{len(paths)} сессий проекта"
-    print(f"Транскрипт: {label}")
-    print(f"Assistant-сообщений с usage: {result['messages']}")
-    print("Токены:")
-    print(f"  output (генерация)      : {t['output']:>14,}")
-    print(f"  cache_write (новый ctx) : {t['cache_write']:>14,}")
-    print(f"  cache_read (перечитыв.) : {t['cache_read']:>14,}   <- в основном постоянный контекст, не работа по задаче")
-    print(f"  input (свежий)          : {t['input']:>14,}")
-    print(f"  --")
-    print(f"  work (output+cache_write): {work:>13,}   <- показатель реального труда для сметы")
-    print(f"  всего с кэшем            : {grand:>13,}")
+    for label, group in (("Основной контекст (main)", main_result),
+                         ("Субагенты (subagents)", subagents),
+                         ("Общий итог", result)):
+        t = group["tokens"]
+        print(f"{label}: messages={group['messages']}, "
+              f"input={t['input']}, output={t['output']}, "
+              f"cache_read={t['cache_read']}, cache_write={t['cache_write']}, "
+              f"work={group['work_tokens']}, grand_total={group['grand_total']}")
+        print(f"  invalid_lines={group['invalid_lines']}, "
+              f"messages_without_id={group['messages_without_id']}")
+    if result["invalid_lines"]:
+        print("Сводка неполная: битые JSON-строки пропущены.")
+    if result["messages_without_id"]:
+        print("Дедупликация ограничена: сообщения без ID учтены отдельно.")
+    print("work = output + cache_write; cache_read - перечитывание контекста.")
     return 0
 
 
