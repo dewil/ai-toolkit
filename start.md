@@ -40,12 +40,12 @@
 
 ### 1) Новый проект
 
-- Загрузи `<canon_base>/bootstrap/bootstrap-01-memory.prompt.md` (WebFetch).
+- Следующий промт: `<canon_base>/bootstrap/bootstrap-01-memory.prompt.md`. Получи полный промт командой `curl -fsSL` по этому вычисленному HTTP-URL. `WebFetch` того же URL допустим только при отсутствии или недоступности самого инструмента `curl`. Сетевая ошибка доступного `curl` не разрешает переход на `WebFetch`: если недоступен GitHub raw-хост, получи тот же файл через Contents API: `curl -fsSL -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/<owner>/<repo>/contents/<path>?ref=<branch>"`, где owner, repo, path и branch взяты из исходного URL. Если загрузка не удалась, текст пустой или неполный - сообщи и останови переход, не исполняй его. Локальный клон не ищи. Это исключение для промтов не распространяется на канон-файлы и сравнение хешей.
 - Содержимое - инструкции для тебя. Выполни как продолжение текущей сессии. Дальше цепочка сама проведет через 02-scaffold и 03-<тип>.
 
 ### 2) Синк существующего проекта
 
-- Загрузи `<canon_base>/migrations/sync-from-canon.prompt.md` (WebFetch).
+- Следующий промт: `<canon_base>/migrations/sync-from-canon.prompt.md`. Получи полный промт командой `curl -fsSL` по этому вычисленному HTTP-URL. `WebFetch` того же URL допустим только при отсутствии или недоступности самого инструмента `curl`. Сетевая ошибка доступного `curl` не разрешает переход на `WebFetch`: если недоступен GitHub raw-хост, получи тот же файл через Contents API: `curl -fsSL -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/<owner>/<repo>/contents/<path>?ref=<branch>"`, где owner, repo, path и branch взяты из исходного URL. Если загрузка не удалась, текст пустой или неполный - сообщи и останови переход, не исполняй его. Локальный клон не ищи. Это исключение для промтов не распространяется на канон-файлы и сравнение хешей.
 - Содержимое - инструкции для тебя. Выполни как продолжение текущей сессии.
 
 ### 3) Ничего
