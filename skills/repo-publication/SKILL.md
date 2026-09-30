@@ -57,8 +57,12 @@ try:
         raise ValueError
     pattern = re.compile(source, re.I)
     totals = {"tree_count": 0, "history_count": 0}
+    # AUDIT_PATHS - необязательный фильтр путей (regex): паттерн ищется только в совпавших файлах.
+    only = re.compile(os.environ["AUDIT_PATHS"], re.I) if os.environ.get("AUDIT_PATHS") else None
 
     def scan(path, data, scope):
+        if only and not only.search(path):
+            return
         if names:
             if pattern.search(Path(path).name):
                 emit(file=path, count=1)
@@ -191,7 +195,7 @@ audit_pattern 'filter=lfs'
 
 ```bash
 audit_pattern '(\+7|8)[ (-]?9[0-9]{2}[ )-]?[0-9]{3}[ -]?[0-9]{2}[ -]?[0-9]{2}'
-audit_pattern '\b[0-9]{10,12}\b'
+AUDIT_PATHS='test|fixture' audit_pattern '\b[0-9]{10,12}\b'   # только тесты и фикстуры: по всему дереву это тысячи id и таймстемпов
 audit_pattern '\b(4[0-9]{12,18}|5[1-5][0-9]{14}|2[0-9]{15})\b'
 audit_pattern '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
 ```
