@@ -17,7 +17,7 @@ markdown жил в одном месте) -> OOXML-пакет через zipfile
     python3 scripts/md-docx.py cv.md --photo photo.jpg --separators   # резюме
 
 Свойства файла задаются всегда (rules/document-metadata.md): автор из
---author, иначе из DOCX_AUTHOR, иначе DEFAULT_AUTHOR; заголовок - первый H1
+--author, иначе из DOC_AUTHOR, иначе DOCX_AUTHOR, иначе dwl (DEFAULT_AUTHOR); заголовок - первый H1
 исходника, иначе имя файла; даты - текущие; comments/keywords/category/
 subject пустые. Следов инструмента сборки в свойствах не остается.
 
@@ -829,7 +829,7 @@ def main() -> int:
     ap.add_argument("src", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=None)
     ap.add_argument("--title", default=None, help="иначе - первый H1 или имя файла")
-    ap.add_argument("--author", default=None, help="иначе DOCX_AUTHOR, иначе " + DEFAULT_AUTHOR)
+    ap.add_argument("--author", default=None, help="первое непустое: --author, DOC_AUTHOR, DOCX_AUTHOR, иначе " + DEFAULT_AUTHOR)
     ap.add_argument("--photo", type=pathlib.Path, default=None,
                     help="фото в правом верхнем углу первой страницы (для резюме); "
                          "markdown-исходник не трогается")
@@ -844,7 +844,7 @@ def main() -> int:
         sys.exit(f"нет исходника: {args.src}")
 
     out = args.out or args.src.with_suffix(".docx")
-    author = args.author or os.environ.get("DOCX_AUTHOR") or DEFAULT_AUTHOR
+    author = args.author or os.environ.get("DOC_AUTHOR") or os.environ.get("DOCX_AUTHOR") or DEFAULT_AUTHOR
     h1, body_html = load_md_to_html()(args.src.read_text(encoding="utf-8"))
     title = args.title or plain_title(h1) or args.src.stem
     photo = resolve_photo(args.photo, args.src.parent) if args.photo else None
