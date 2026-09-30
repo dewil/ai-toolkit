@@ -323,7 +323,10 @@ class PptxSharedParsing(CliCase):
                  "**жирный** и *курсив* и `код`"]
         for source in cases:
             with self.subTest(source=source):
-                expected = HtmlRuns(common.inline(source)).chars
+                expected_html = common.inline(source)
+                if source == "[видимый](https://example.invalid)":
+                    expected_html += " (https://example.invalid)"
+                expected = HtmlRuns(expected_html).chars
                 data, _, _, _ = self.built("pptx", source="## Inline\n\n" + source + "\n")
                 slide = xml_parts(data, r"ppt/slides/slide\d+\.xml")[0]
                 paras = [p for p in slide.iter(A + "p") if slide_text(p) != "Inline" and slide_text(p)]

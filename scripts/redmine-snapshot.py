@@ -34,6 +34,7 @@ import os
 import tempfile
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -91,7 +92,7 @@ def fetch_json(url: str, api_key: str, use_curl: bool) -> dict:
         # утекает в строку CalledProcessError при ошибке curl.
         result = subprocess.run(
             [
-                "curl", "-sS", "--fail",
+                "curl", "-sS", "-w", "\n%{http_code}",
                 "-A", "Mozilla/5.0 (redmine-snapshot)",
                 "-K", "-",
                 url,
@@ -101,7 +102,11 @@ def fetch_json(url: str, api_key: str, use_curl: bool) -> dict:
             capture_output=True,
             timeout=30,
         )
-        return json.loads(result.stdout)
+        body, _, code = result.stdout.rpartition(b"\n")
+        status = int(code)
+        if status >= 400:
+            raise urllib.error.HTTPError(url, status, "ошибка HTTP", {}, None)
+        return json.loads(body)
     req = urllib.request.Request(
         url,
         headers={
@@ -238,6 +243,12 @@ def main() -> int:
                           file=sys.stderr)
                     return 1
                 except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                    if isinstance(exc, urllib.error.HTTPError) and exc.code in (403, 404):
+                        snapshot.setdefault("access_lost", []).append(issue["id"])
+                        current_ids.add(issue["id"])
+                        print(f"!! задача #{issue['id']}: выбыла из доступа (HTTP {exc.code})",
+                              file=sys.stderr)
+                        continue
                     print(f"!! задача #{issue['id']}: {exc}", file=sys.stderr)
                     updated = {**issue, "status": "статус неизвестен",
                                "is_closed": None, "status_unknown": True,
