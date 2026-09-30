@@ -55,7 +55,8 @@ async def amain(
     chat_id: int, out_path: str, expected_username: str | None, account: str = "default",
     download_media: bool = True,
 ) -> int:
-    if expected_username is not None and not expected_username:
+    want = expected_username.lstrip("@").lower() if expected_username is not None else None
+    if want is not None and not want:
         sys.stderr.write("expected_username задан пустой строкой - проверь значение username.\n")
         return 2
 
@@ -89,7 +90,7 @@ async def amain(
         uname = getattr(entity, "username", None)
         print(f"resolved {chat_id}: {display_name(entity)!r} @{uname} (type {type(entity).__name__})")
 
-        if expected_username is not None and (uname or "").lower() != expected_username.lower():
+        if want is not None and (not uname or uname.lower() != want):
             sys.stderr.write(
                 f"!! username не совпал: ожидали @{expected_username}, получили @{uname or '?'}. "
                 f"Прерываю, чтобы не выкачать чужой чат.\n"

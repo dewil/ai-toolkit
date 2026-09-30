@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+Код возврата 3 - сводка неполная: invalid_lines > 0.
 session-cost.py - подсчет токенов Claude Code сессии из транскрипта.
 
 Claude Code пишет транскрипт каждой сессии в
@@ -229,9 +230,10 @@ def main() -> int:
         main_result["messages_without_id"] + subagents["messages_without_id"],
     )
     result.update(main=main_result, subagents=subagents)
+    exit_code = 3 if result["invalid_lines"] else 0
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+        return exit_code
 
     for label, group in (("Основной контекст (main)", main_result),
                          ("Субагенты (subagents)", subagents),
@@ -248,7 +250,7 @@ def main() -> int:
     if result["messages_without_id"]:
         print("Дедупликация ограничена: сообщения без ID учтены отдельно.")
     print("work = output + cache_write; cache_read - перечитывание контекста.")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

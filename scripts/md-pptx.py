@@ -86,17 +86,29 @@ class InlineRuns(html.parser.HTMLParser):
         super().__init__(convert_charrefs=True)
         self.styles: list[str] = []
         self.runs: list[tuple[str, str]] = []
+        self.link: tuple[str, list[str]] | None = None
 
     def handle_starttag(self, tag: str, attrs) -> None:
+        if tag == "a":
+            self.link = (dict(attrs).get("href", ""), [])
+        elif tag == "img":
+            self.handle_data(dict(attrs).get("alt", ""))
         if tag in self.STYLES:
             self.styles.append(self.STYLES[tag])
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self.link is not None:
+            url, label = self.link
+            self.link = None
+            if url and "".join(label) != url:
+                self.handle_data(f" ({url})")
         if tag in self.STYLES and self.styles:
             self.styles.pop()
 
     def handle_data(self, data: str) -> None:
         if data:
+            if self.link is not None:
+                self.link[1].append(data)
             style = "".join(c for c in "bic" if c in self.styles)
             if self.runs and self.runs[-1][1] == style:
                 self.runs[-1] = (self.runs[-1][0] + data, style)
