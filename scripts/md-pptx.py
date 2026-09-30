@@ -18,8 +18,12 @@
 костыль - длинную секцию дели на несколько ##. Картинки не поддерживаются
 намеренно (v1); появится нужда - обсуждай расширение, не встраивай молча.
 
+Разбор inline, strip_html_comments и границ fenced-кода загружается из
+соседнего md-pdf.py. Существующий разбор слайдов допускает любой отступ забора.
+Раскладка слайдов и преобразование HTML в PresentationML остаются здесь.
+
 Свойства файла - по rules/document-metadata.md: автор из --author, иначе
-PPTX_AUTHOR, иначе DEFAULT_AUTHOR; заголовок из --title, иначе первый H1,
+DOC_AUTHOR, иначе PPTX_AUTHOR, иначе dwl (DEFAULT_AUTHOR); заголовок из --title, иначе первый H1,
 иначе имя файла.
 
 Примеры:
@@ -31,6 +35,8 @@ from __future__ import annotations
 
 import argparse
 import io
+import html.parser
+import importlib.util
 import os
 import pathlib
 import re
@@ -42,10 +48,6 @@ from xml.sax.saxutils import escape
 DEFAULT_AUTHOR = "dwl"  # личный канон; в форке замени на свой (rules/addressing.md)
 
 BAD_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
-# инлайн-разметка: жирный / курсив / код (как в md-pdf.py, без ссылок - на
-# слайде URL читают глазами, кликать некуда при печати/показе)
-INLINE = re.compile(r"(\*\*.+?\*\*|(?<!\*)\*[^*\n]+\*(?!\*)|`[^`]+`)")
-
 EMU_W, EMU_H = 12192000, 6858000  # 16:9
 
 
@@ -53,148 +55,70 @@ def clean(text: str) -> str:
     return escape(BAD_CHARS.sub("", text))
 
 
-ESCAPED = re.compile(r"\\([*`_])")
-CODE_SPAN = re.compile(r"`([^`\n]+)`")
-_SENT = "\x02"
-_STASH = "\x03"
-_CODE = {"*": "s", "`": "b", "_": "u"}
-_DECODE = {_SENT + v: k for k, v in _CODE.items()}
+def load_markdown():
+    """Загружает общий разбор из соседнего md-pdf.py через stdlib."""
+    path = pathlib.Path(__file__).resolve().with_name("md-pdf.py")
+    if not path.exists():
+        sys.exit(
+            f"нет {path.name} рядом с {pathlib.Path(__file__).name} - "
+            "он нужен для разбора markdown (inline и strip_html_comments).\n"
+            "Скопируй scripts/md-pdf.py из канона проекта в ту же папку "
+            "(см. skills/md-pdf/SKILL.md)."
+        )
+    spec = importlib.util.spec_from_file_location("_md_pdf", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    def closes_slide_fence(line: str, fence: str) -> bool:
+        return mod.closes_fence(line, fence, allow_any_indent=True)
+
+    return mod.inline, mod.strip_html_comments, mod.ANY_FENCE_RE, closes_slide_fence
 
 
-def unescape_md(text: str) -> str:
-    r"""\* -> * для текста, который не идет через runs_of (заголовки)."""
-    return ESCAPED.sub(lambda m: m.group(1), text)
+inline, strip_html_comments, FENCE_RE, closes_fence = load_markdown()
+
+
+class InlineRuns(html.parser.HTMLParser):
+    """HTML общего inline -> текст и стили PresentationML, без разбора markdown."""
+
+    STYLES = {"strong": "b", "em": "i", "code": "c"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.styles: list[str] = []
+        self.runs: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in self.STYLES:
+            self.styles.append(self.STYLES[tag])
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self.STYLES and self.styles:
+            self.styles.pop()
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            style = "".join(c for c in "bic" if c in self.styles)
+            if self.runs and self.runs[-1][1] == style:
+                self.runs[-1] = (self.runs[-1][0] + data, style)
+            else:
+                self.runs.append((data, style))
 
 
 def runs_of(text: str) -> list[tuple[str, str]]:
-    r"""Строка -> [(текст, стиль)], стиль: "" | "b" | "i" | "c".
+    parser = InlineRuns()
+    parser.feed(inline(text))
+    parser.close()
+    return parser.runs
 
-    Код-спаны вырезаются ПЕРВЫМИ: внутри `кода` бэкслеш и маркеры - литералы.
-    Потом кодируются экранированные маркеры (\* и т.п.), потом жирный/курсив.
-    Вложенная разметка (**a *b* c**) не поддерживается: внешний маркер
-    выигрывает, внутренние остаются литералами.
-    """
-    text = text.replace(_SENT, "").replace(_STASH, "")
-    stash: list[str] = []
 
-    def keep(m: re.Match) -> str:
-        stash.append(m.group(1))
-        return f"{_STASH}{len(stash) - 1}{_STASH}"
-
-    text = CODE_SPAN.sub(keep, text)
-    text = ESCAPED.sub(lambda m: _SENT + _CODE[m.group(1)], text)
-
-    def decode(t: str) -> str:
-        for enc, char in _DECODE.items():
-            t = t.replace(enc, char)
-        return t.replace(_SENT, "")
-
-    runs: list[tuple[str, str]] = []
-
-    def emit(piece: str, style: str) -> None:
-        # восстановить код-спаны, разрезав кусок по сентинелам стеша
-        for j, frag in enumerate(re.split(f"{_STASH}(\\d+){_STASH}", piece)):
-            if j % 2:
-                runs.append((stash[int(frag)], "c"))
-            elif frag:
-                runs.append((decode(frag), style))
-
-    for part in INLINE.split(text):
-        if not part:
-            continue
-        if part.startswith("**") and part.endswith("**") and len(part) > 4:
-            emit(part[2:-2], "b")
-        elif part.startswith("*") and part.endswith("*") and len(part) > 2:
-            emit(part[1:-1], "i")
-        else:
-            emit(part, "")
-    return runs
+def unescape_md(text: str) -> str:
+    """Видимый текст заголовка из общего инлайн-разбора."""
+    return "".join(text for text, _ in runs_of(text))
 
 
 BULLET_RE = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$")
 # строка markdown-таблицы: начинается и заканчивается трубой, внутри есть еще одна
 TABLE_ROW_RE = re.compile(r"^\|.*\|$")
-
-
-COMMENT_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
-
-
-def strip_html_comments(text: str) -> tuple[str, int]:
-    """Вырезает HTML-комментарии вне кода. Возвращает (текст, счетчик).
-
-    Дубль такой же функции из md-pdf.py, и это осознанно: парсер здесь свой
-    (слайды, а не поток), зависимости от md-pdf.py у этого скрипта нет, и
-    заводить ее ради одной функции хуже, чем повторить. Расхождением это не
-    грозит: границы кода обе версии берут из своего парсера, а они здесь и
-    там одинаковые (оба вида забора, отступ по `.strip()`, inline-бэктики).
-    """
-    out: list[str] = []
-    total = 0
-    fence: str | None = None
-    in_comment = False
-
-    for line in text.split("\n"):
-        stripped = line.strip()
-        m = COMMENT_FENCE_RE.match(stripped)
-
-        if fence is not None:
-            out.append(line)
-            if m and stripped[0] == fence:
-                fence = None
-            continue
-        if m and not in_comment:
-            fence = stripped[0]
-            out.append(line)
-            continue
-
-        stash: list[str] = []
-
-        def keep(mo: re.Match) -> str:
-            stash.append(mo.group(0))
-            return f"\x00{len(stash) - 1}\x00"
-
-        body = line
-        if not in_comment:
-            body = re.sub(r"`[^`]*`", keep, body)
-            body = re.sub(r"\]\([^)\s]*\)", keep, body)
-
-        i = 0
-        while True:
-            if in_comment:
-                end = body.find("-->", i)
-                if end == -1:
-                    body = body[:i]
-                    break
-                body = body[:i] + body[end + 3:]
-                in_comment = False
-                continue
-            start = body.find("<!--", i)
-            if start == -1:
-                break
-            if start and body[start - 1] == "\\":   # \<!-- - экранированный литерал
-                i = start + 4
-                continue
-            total += 1
-            end = body.find("-->", start + 4)
-            if end == -1:
-                body = body[:start]
-                in_comment = True
-                break
-            body = body[:start] + body[end + 3:]
-            i = start
-
-        # Разворачиваем по кругу: спрятанная ссылка может содержать сентинел
-        # спрятанного до нее inline-кода (тот же прием, что в inline() ниже).
-        for _ in range(len(stash) + 1):
-            grown = body
-            for idx, chunk in enumerate(stash):
-                grown = grown.replace(f"\x00{idx}\x00", chunk)
-            if grown == body:
-                break
-            body = grown
-        out.append(body)
-
-    return "\n".join(out), total
 
 
 def parse_md(text: str) -> tuple[str | None, list[dict]]:
@@ -217,7 +141,7 @@ def parse_md(text: str) -> tuple[str | None, list[dict]]:
         slides.append(current)
         return current
 
-    fence = None  # (символ, длина) открывшего маркера
+    fence = None  # открывающий маркер: символ и длина
     for raw in text.splitlines():
         line = raw.rstrip("\r\n")
         stripped = line.strip()
@@ -225,8 +149,7 @@ def parse_md(text: str) -> tuple[str | None, list[dict]]:
             # внутри кода: закрывает только ТОТ ЖЕ символ той же или большей
             # длины и без хвоста (CommonMark); все прочее - строки кода как
             # есть, с отступами и пустыми строками
-            m = re.fullmatch(r"(`{3,}|~{3,})", stripped)
-            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
+            if closes_fence(line, fence):
                 fence = None
                 continue
             if current is None:
@@ -235,9 +158,9 @@ def parse_md(text: str) -> tuple[str | None, list[dict]]:
             continue
         if not stripped:
             continue
-        m = re.match(r"^(`{3,}|~{3,})", stripped)
+        m = FENCE_RE.match(line)
         if m:  # открытие fence (инфо-строка после маркера допустима)
-            fence = (m.group(1)[0], len(m.group(1)))
+            fence = m.group(1)
             continue
         if stripped.startswith("# ") and not stripped.startswith("## "):
             if title is None and current is None:
@@ -292,11 +215,11 @@ def parse_md(text: str) -> tuple[str | None, list[dict]]:
 
 def run_xml(text: str, style: str, size: int) -> str:
     props = f' lang="ru-RU" sz="{size}"'
-    if style == "b":
+    if "b" in style:
         props += ' b="1"'
-    elif style == "i":
+    if "i" in style:
         props += ' i="1"'
-    font = '<a:latin typeface="Consolas"/>' if style == "c" else ""
+    font = '<a:latin typeface="Consolas"/>' if "c" in style else ""
     space = ' xml:space="preserve"' if text != text.strip() else ""
     return f"<a:r><a:rPr{props}>{font}</a:rPr><a:t{space}>{clean(text)}</a:t></a:r>"
 
@@ -625,14 +548,14 @@ def main() -> int:
     ap.add_argument("src", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=None)
     ap.add_argument("--title", default=None, help="иначе - первый H1 или имя файла")
-    ap.add_argument("--author", default=None, help="иначе PPTX_AUTHOR, иначе " + DEFAULT_AUTHOR)
+    ap.add_argument("--author", default=None, help="первое непустое: --author, DOC_AUTHOR, PPTX_AUTHOR, иначе " + DEFAULT_AUTHOR)
     args = ap.parse_args()
 
     if not args.src.exists():
         sys.exit(f"нет исходника: {args.src}")
 
     out = args.out or args.src.with_suffix(".pptx")
-    author = args.author or os.environ.get("PPTX_AUTHOR") or DEFAULT_AUTHOR
+    author = args.author or os.environ.get("DOC_AUTHOR") or os.environ.get("PPTX_AUTHOR") or DEFAULT_AUTHOR
     h1, slides = parse_md(args.src.read_text(encoding="utf-8"))
     if not slides:
         sys.exit(f"пустой исходник: {args.src} (ни заголовков, ни текста)")

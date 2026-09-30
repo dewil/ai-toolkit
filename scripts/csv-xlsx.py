@@ -21,7 +21,7 @@ Numbers, не поднимая openpyxl (канонические скрипты
   - control-символы, запрещенные в XML, вычищаются.
 
 Свойства файла - по rules/document-metadata.md: автор из --author, иначе
-XLSX_AUTHOR, иначе DEFAULT_AUTHOR; заголовок из --title, иначе имя выхода.
+DOC_AUTHOR, иначе XLSX_AUTHOR, иначе dwl (DEFAULT_AUTHOR); заголовок из --title, иначе имя выхода.
 
 Примеры:
   python3 scripts/csv-xlsx.py data.csv                          # data.xlsx рядом
@@ -427,7 +427,7 @@ def main() -> int:
     ap.add_argument("--out", type=pathlib.Path, default=None,
                     help="иначе - имя первого входа с .xlsx")
     ap.add_argument("--title", default=None, help="иначе - имя выходного файла")
-    ap.add_argument("--author", default=None, help="иначе XLSX_AUTHOR, иначе " + DEFAULT_AUTHOR)
+    ap.add_argument("--author", default=None, help="первое непустое: --author, DOC_AUTHOR, XLSX_AUTHOR, иначе " + DEFAULT_AUTHOR)
     ap.add_argument("--delimiter", default=None, help="разделитель; иначе по расширению (.tsv - таб)")
     ap.add_argument("--no-header", action="store_true", help="первая строка - данные, не шапка")
     ap.add_argument("--formulas", action="store_true",
@@ -439,7 +439,7 @@ def main() -> int:
             sys.exit(f"нет исходника: {src}")
 
     out = args.out or args.src[0].with_suffix(".xlsx")
-    author = args.author or os.environ.get("XLSX_AUTHOR") or DEFAULT_AUTHOR
+    author = args.author or os.environ.get("DOC_AUTHOR") or os.environ.get("XLSX_AUTHOR") or DEFAULT_AUTHOR
     title = args.title or out.stem
 
     taken: set[str] = set()

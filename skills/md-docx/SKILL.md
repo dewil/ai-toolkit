@@ -31,7 +31,7 @@ description: Собрать .docx из markdown, когда документ п�
 python3 scripts/md-docx.py тз.md                       # тз.docx рядом с исходником
 python3 scripts/md-docx.py тз.md --out /path/x.docx    # свой путь
 python3 scripts/md-docx.py тз.md --title "Отчет"       # иначе первый H1, иначе имя файла
-python3 scripts/md-docx.py тз.md --author "Имя"        # иначе $DOCX_AUTHOR, иначе дефолт скрипта
+python3 scripts/md-docx.py тз.md --author "Имя"        # иначе DOC_AUTHOR, иначе DOCX_AUTHOR, иначе dwl
 ```
 
 **Оформление.** Два необязательных флага, симметричных `md-pdf.py` - один markdown собирается в оба формата, поэтому интерфейс общий:
@@ -41,7 +41,9 @@ python3 scripts/md-docx.py тз.md --author "Имя"        # иначе $DOCX_A
 
 ## Метаданные
 
-Свойства файла проставляются **всегда**, без флагов - по правилу `rules/document-metadata.md`: автор (`--author` -> `DOCX_AUTHOR` -> дефолт скрипта), заголовок, текущие даты создания и изменения; `comments`, `keywords`, `category`, `subject` пустые. Следов инструмента сборки в свойствах не остается - именно этот дефект (`author: python-docx`, дата 2013 г.) и породил правило.
+Свойства файла проставляются **всегда**, без флагов - по правилу `rules/document-metadata.md`: автор (`--author` -> `DOC_AUTHOR` -> `DOCX_AUTHOR` -> `dwl`), заголовок, текущие даты создания и изменения; `comments`, `keywords`, `category`, `subject` пустые. Следов инструмента сборки в свойствах не остается - именно этот дефект (`author: python-docx`, дата 2013 г.) и породил правило.
+
+Автор выбирается по первому непустому значению; пустые строки пропускаются. `DOCX_AUTHOR` - запасная переменная для совместимости. Имя передается без типографической правки в `dc:creator` и `cp:lastModifiedBy`.
 
 Проверка после сборки - часть верификации артефакта:
 
