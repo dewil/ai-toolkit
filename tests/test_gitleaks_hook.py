@@ -136,21 +136,47 @@ class HookTest(unittest.TestCase):
         self.stub()
         self.assert_status(self.cli("status", cwd=subdir), 0, "стоит")
 
-    def test_foreign_shell_content_preserved_and_block_appended(self):
+    def test_foreign_shell_content_preserved_and_block_after_shebang(self):
         for shebang in (b"#!/bin/sh", b"#!/bin/bash", b"#!/usr/bin/env bash"):
             with self.subTest(shebang=shebang):
                 original = shebang + b"\n# foreign hook\nprintf 'foreign hook ran\\n' >&2\n"
                 hook = self.write_hook(original)
                 self.install(self.repo)
                 body = hook.read_bytes()
-                self.assertEqual(body[:len(original)], original)
+                # Вставка в конец пропускала сканер, если чужой хук завершался exit 0.
+                self.assertTrue(body.startswith(shebang + b"\n" + START.encode() + b"\n"))
+                self.assertEqual(body[body.index(END.encode()) + len(END):], original[len(shebang):])
                 self.assertEqual(body.count(START.encode()), 1)
-                self.assertTrue(body.rstrip().endswith(END.encode()))
                 self.assertTrue(os.access(hook, os.X_OK))
                 self.stub()
                 result = self.commit()
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("foreign hook ran", result.stderr)
+
+    def test_foreign_exit_zero_cannot_bypass_gitleaks_finding(self):
+        original = b"#!/bin/sh\nset -e\nprintf 'foreign hook ran\\n' >&2\nexit 0\n"
+        hook = self.write_hook(original)
+        self.stub(code=1)
+        before = self.git(self.repo, "rev-parse", "HEAD").stdout
+        self.install(self.repo)
+        result = self.commit()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD").stdout, before)
+        self.assertNotIn("foreign hook ran", result.stderr)
+        self.assertIn(".gitleaksignore", result.stderr)
+        self.assertTrue(hook.read_bytes().endswith(original.split(b"\n", 1)[1]))
+
+    def test_previously_appended_block_is_reported_stale_and_moved(self):
+        hook = self.install(self.repo)
+        block = hook.read_bytes().split(b"\n", 1)[1].rstrip(b"\n")
+        foreign = b"#!/bin/sh\nset -e\nexit 0\n"
+        hook.write_bytes(foreign + block + b"\n")
+        self.stub(code=1)
+        self.assert_status(self.cli("status", self.repo), 1, "устарел")
+        self.install(self.repo)
+        self.assertTrue(hook.read_bytes().startswith(b"#!/bin/sh\n" + START.encode()))
+        self.assertEqual(hook.read_bytes().count(START.encode()), 1)
+        self.assertNotEqual(self.commit().returncode, 0)
 
     def test_stale_block_replaced_without_changing_surroundings(self):
         hook = self.install(self.repo)

@@ -29,3 +29,29 @@ description: Обращение с секретами - токены, ключи
 - В скриншотах, вставках вывода команд, артефактах для пользователя - вырезать секреты перед сохранением.
 - Перед публикацией приватного репозитория - аудит по скиллу `repo-publication` (секреты в рабочем дереве и истории, ПД, следы заказчиков), не точечный греп.
 - Дамп кук браузерной сессии (`scripts/chrome-cookies.py`, скилл `agent-browser`) - секрет, эквивалент пароля: действующая сессия сайта. Хранилище (`~/.config/browser-sessions/`) - вне репозитория и вне синкаемых папок, права 600; содержимое дампа не выводить в чат, коммиты и артефакты.
+
+## Проверка до коммита
+
+В каждом git-репозитории проекта должен стоять хук gitleaks, включая подключенные код-репозитории зонтика:
+
+```bash
+python3 scripts/gitleaks-hook.py install --repo <путь>
+python3 scripts/gitleaks-hook.py status --repo <путь>
+```
+
+Без `--repo` используется текущий git-корень; параметр можно повторять. Бинарник устанавливает пользователь одной командой:
+
+- Linux (x86_64 или arm64), релиз GitHub в `~/.local/bin`:
+
+```bash
+(set -eu; case "$(uname -m)" in x86_64) arch=x64;; aarch64|arm64) arch=arm64;; *) echo "Unsupported architecture" >&2; exit 1;; esac; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT; curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_${arch}.tar.gz" -o "$tmp/gitleaks.tgz"; tar -xzf "$tmp/gitleaks.tgz" -C "$tmp" gitleaks; mkdir -p "$HOME/.local/bin"; install -m 755 "$tmp/gitleaks" "$HOME/.local/bin/gitleaks")
+```
+
+- macOS: `brew install gitleaks`.
+- Windows: `winget install gitleaks`.
+
+На Linux добавь `~/.local/bin` в PATH: `export PATH="$HOME/.local/bin:$PATH"`. Проверка установки: `gitleaks version`.
+
+Хук проверяет staged-изменения с `--redact`. Без бинарника он громко предупреждает в stderr, но не блокирует коммит. Ложные срабатывания заноси в `.gitleaksignore` с комментарием почему. Срочный обход: `SKIP_GITLEAKS=1 git commit ...`; хук сообщит о пропуске.
+
+Хук видит только новые коммиты: история до установки не проверена. Аудит истории перед публикацией остается обязательным.
