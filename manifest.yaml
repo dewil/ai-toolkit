@@ -51,6 +51,7 @@ universal:
   - agents/planner.md                   # декомпозиция задачи в проверяемые шаги с критериями
   - agents/summarizer.md                # сжатие длинного источника в структурированную заметку
   - skills/codex-audit/SKILL.md         # аудит кода/текста вторым мнением через codex exec
+  - scripts/codex-sandbox.py           # запуск codex exec в песочнице bwrap: видит только объект работы (для codex-audit и codex-implement)
   - skills/web-research/SKILL.md        # веб-исследование с проверкой источников
   - skills/md-pdf/SKILL.md              # рендер markdown в PDF (для чтения и рассылки)
   - skills/md-docx/SKILL.md             # сборка .docx из markdown (когда документ пойдет на правки)
