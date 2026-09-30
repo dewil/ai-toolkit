@@ -64,7 +64,8 @@ def index_by_issue_id(snapshot: dict) -> dict[int, tuple[str, dict]]:
     out: dict[int, tuple[str, dict]] = {}
     for uid, payload in snapshot.get("users", {}).items():
         for issue in payload.get("issues", []):
-            out[issue["id"]] = (str(issue.get("assigned_to_id", uid)), issue)
+            assigned = issue.get("assigned_to_id")
+            out[issue["id"]] = (str(uid if assigned is None else assigned), issue)
     return out
 
 
@@ -120,8 +121,9 @@ def main() -> int:
         for uid, user in prev.get("users", {}).items() if uid not in watched
         for issue in user.get("issues", [])
     }
-    departed = {iid for iid in prev_ids - cur_ids if iid in removed_issues}
-    closed = sorted(prev_ids - cur_ids - departed)
+    access_lost = set(cur.get("access_lost", [])) & prev_ids
+    departed = {iid for iid in prev_ids - cur_ids - access_lost if iid in removed_issues}
+    closed = sorted(prev_ids - cur_ids - departed - access_lost)
     appeared = sorted(cur_ids - prev_ids)
     common = cur_ids & prev_ids
     unknown = {iid for iid, (_, issue) in cur_idx.items()
@@ -154,6 +156,12 @@ def main() -> int:
     print(f"### Дельты с прошлого сбора (snapshot {cur.get('generated_at', '?')})\n")
     print(f"_prev: {prev.get('generated_at', 'нет')}_\n")
 
+    if access_lost:
+        print(f"**Выбыли из доступа ({len(access_lost)}):**\n")
+        for iid in sorted(access_lost):
+            print(f"- {link(redmine_url, iid)} {format_issue_short(prev_idx[iid][1])}")
+        print()
+
     if closed:
         print(f"**Закрыты / ушли из открытых ({len(closed)}):**\n")
         for iid in sorted(closed):
@@ -168,7 +176,8 @@ def main() -> int:
             continue
         print(f"**Статус неизвестен ({reason}) ({len(group)}):**\n")
         for iid in group:
-            uid, issue = cur_idx[iid]
+            _, issue = cur_idx[iid]
+            uid, _ = prev_idx.get(iid, cur_idx[iid])
             print(f"- {link(redmine_url, iid)} {format_issue_short(issue)} - был у {user_name(prev, uid)}")
         print()
 
@@ -213,7 +222,7 @@ def main() -> int:
             )
         print()
 
-    if not (closed or unknown or departed or left or appeared or status_changes or assignee_changes):
+    if not (access_lost or closed or unknown or departed or left or appeared or status_changes or assignee_changes):
         print("_Изменений нет._\n")
 
     return 0

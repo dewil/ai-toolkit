@@ -283,6 +283,9 @@ def cmd_dump(args) -> int:
         fd = os.open(out, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
         pass
+    except OSError as exc:
+        print(f"не удалось прочитать прежний дамп {out}: {exc}; проверь путь и симлинки")
+        return 1
     else:
         with os.fdopen(fd, "rb") as fh:
             previous = fh.read()
