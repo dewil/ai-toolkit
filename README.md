@@ -129,7 +129,7 @@ flowchart LR
 - `agents/` - канонические описания субагентов (14).
 - `skills/` - канонические скиллы, папка на скилл (31).
 - `commands/` - канонические слэш-команды (`/canon` = sync).
-- `scripts/` - **две вещи разной природы**: (1) движок канон-синка `build-lock.py` / `canon-delta.py` / `canon-migrate.py` (не распространяется в проекты - это оснастка); (2) канонические скрипты для проектов (`gitleaks-hook.py` - проверка и установка pre-commit gitleaks, `md-pdf.py`, `session-cost.py`, зеркалирование `telegram-*`/`redmine-*`/`mymeet-*`).
+- `scripts/` - **две вещи разной природы**: (1) движок канон-синка `build-lock.py` / `canon-delta.py` / `canon-migrate.py` (не распространяется в проекты - это оснастка); (2) канонические скрипты для проектов (`codex-sandbox.py` - запуск codex только в песочнице bwrap, `gitleaks-hook.py` - проверка и установка pre-commit gitleaks, `md-pdf.py`, `session-cost.py`, зеркалирование `telegram-*`/`redmine-*`/`mymeet-*`).
 - `tests/` - stdlib-тесты (970): движок (110, crash-матрица + регресс на каждую adversarial-находку) и канонические скрипты для проектов.
 - `.github/workflows/` - CI: `canon-tests`, `canon-release`.
 - `templates/` - скелеты с TODO-заглушками, копируются в проект один раз; дальше проект владеет ими сам.
