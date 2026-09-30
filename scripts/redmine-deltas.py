@@ -3,7 +3,10 @@
 Расчет дельт между текущим и предыдущим snapshot задач Redmine.
 
 Сравнивает <tasks_root>/_redmine-snapshot.json и _redmine-snapshot.prev.json,
-выводит markdown-блок "Дельты между снимками" для вставки в план дейлика / статус.
+выводит markdown-блок "Дельты с прошлого сбора" для вставки в план дейлика / статус.
+
+Интервал - от предыдущего успешного сбора до текущего, а не календарные сутки.
+При нескольких сборах за день сравниваются два последних успешных сбора.
 
 Различает:
 - закрытые задачи (закрыты по статусу или отсутствуют в старом формате снимка);
@@ -148,7 +151,7 @@ def main() -> int:
         if cur_uid != prev_uid:
             assignee_changes.append((iid, prev_uid, cur_uid, cur_issue))
 
-    print(f"### Дельты между снимками (snapshot {cur.get('generated_at', '?')})\n")
+    print(f"### Дельты с прошлого сбора (snapshot {cur.get('generated_at', '?')})\n")
     print(f"_prev: {prev.get('generated_at', 'нет')}_\n")
 
     if closed:

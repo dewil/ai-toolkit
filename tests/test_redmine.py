@@ -317,5 +317,211 @@ class SnapshotWriteIsAtomic(unittest.TestCase):
         self.assertEqual({f.name for f in self.p.tasks.iterdir()}, {SNAP_NAME, PREV_NAME})
 
 
+class SnapshotPartialFailure(unittest.TestCase):
+    """REDMINE-FAIL-CLOSED: сбой второго исполнителя после успешного первого."""
+
+    def test_second_user_failure_preserves_existing_pair(self):
+        self.check_failure(existing=True)
+
+    def test_second_user_failure_creates_no_first_pair(self):
+        self.check_failure(existing=False)
+
+    def check_failure(self, existing):
+        from urllib.error import HTTPError, URLError
+        from urllib.parse import parse_qs, urlparse
+        for error in (HTTPError(URL, 503, "test service unavailable", {}, None),
+                      URLError("test connection lost")):
+            with self.subTest(error=type(error).__name__):
+                p = _Project()
+                self.addCleanup(p.close)
+                if existing:
+                    p.put(p.snap, _snapshot({2551: [_issue(101, 2551, "Снимок")]}))
+                    p.put(p.prev, _snapshot({2551: [_issue(102, 2551, "База")]}))
+                before = {path: path.read_bytes() if path.exists() else None for path in (p.snap, p.prev)}
+                module = p.load_snapshot_module()
+                seen = []
+
+                def response(request, *args, **kwargs):
+                    url = request if isinstance(request, str) else request.full_url
+                    uid = parse_qs(urlparse(url).query)["assigned_to_id"][0]
+                    seen.append(uid)
+                    if uid == "2982":
+                        raise error
+                    self.assertEqual(uid, "2551")
+                    data = {"issues": [{"id": 101, "subject": "Загружена",
+                            "status": {"id": 1, "name": "New", "is_closed": False},
+                            "assigned_to": {"id": 2551, "name": "Иванов"},
+                            "priority": {"name": "Normal"}, "tracker": {"name": "Bug"},
+                            "author": {"id": 1}, "created_on": "2026-09-29", "updated_on": "2026-09-30"}],
+                            "total_count": 1, "offset": 0, "limit": 100}
+                    return io.BytesIO(json.dumps(data).encode())
+
+                err = io.StringIO()
+                with mock.patch.object(module, "load_auth", return_value={
+                        "redmine_url": URL, "api_key": "TEST", "use_curl": False}), \
+                        mock.patch("urllib.request.urlopen", side_effect=response), \
+                        mock.patch("socket.socket.connect", side_effect=AssertionError("Сеть запрещена")), \
+                        mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", err):
+                    try:
+                        code = module.main()
+                    except SystemExit as exc:
+                        code = exc.code
+                self.assertEqual(seen, ["2551", "2982"])
+                self.assertEqual(code, 1, err.getvalue())
+                self.assertIn(str(error.reason), err.getvalue())
+                after = {path: path.read_bytes() if path.exists() else None for path in before}
+                self.assertEqual(after, before)
+
+
+class SnapshotRootContract(unittest.TestCase):
+    """REDMINE-ROOT: сбор и чтение одной пары независимо от cwd."""
+
+    def test_absolute_normalized_root(self):
+        self.check_root("absolute")
+
+    def test_tilde_root(self):
+        self.check_root("tilde")
+
+    def test_relative_root_from_script_project(self):
+        self.check_root("relative")
+
+    def check_root(self, kind):
+        p = _Project()
+        self.addCleanup(p.close)
+        home = p.root / "home"
+        cwd = p.root / "elsewhere"
+        home.mkdir()
+        cwd.mkdir()
+        target = (home if kind == "tilde" else p.root) / "storage"
+        # Промежуточный каталог существует и для ОС, не нормализующей '..' сама.
+        target.mkdir()
+        (target / "nested").mkdir()
+        raw = {"absolute": str(target / "nested/.."), "tilde": "~/storage/nested/..",
+               "relative": "storage/nested/.."}[kind]
+        cfg = p.root / ".redmine-snapshot.json"
+        config = json.loads(cfg.read_text())
+        config["tasks_root"] = raw
+        cfg.write_text(json.dumps(config))
+        original_cwd = Path.cwd()
+        self.addCleanup(os.chdir, original_cwd)
+        os.chdir(cwd)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            module = p.load_snapshot_module()
+            with mock.patch.object(module, "load_auth", return_value={
+                    "redmine_url": URL, "api_key": "TEST", "use_curl": False}), \
+                    mock.patch.object(module, "fetch_user_issues", return_value=[]), \
+                    mock.patch("socket.socket.connect", side_effect=AssertionError("Сеть запрещена")), \
+                    mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+                self.assertEqual(module.main(), 0)
+                first = (target / SNAP_NAME).read_bytes()
+                self.assertEqual(module.main(), 0)
+            self.assertEqual((target / PREV_NAME).read_bytes(), first)
+            result = subprocess.run([sys.executable, str(p.root / "scripts/redmine-deltas.py")],
+                                    cwd=cwd, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Изменений нет", result.stdout)
+        for name in (SNAP_NAME, PREV_NAME):
+            self.assertEqual(list(p.root.rglob(name)), [target / name])
+
+
+def _deltas_stdout(project):
+    result = subprocess.run(
+        [sys.executable, str(project.root / "scripts/redmine-deltas.py")],
+        cwd=project.root, capture_output=True, text=True, timeout=60,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+class DeltasPositiveClasses(unittest.TestCase):
+    """REDMINE-CLASSES: проверяем ссылки внутри каждой требуемой группы."""
+
+    def setUp(self):
+        self.p = _Project()
+        self.addCleanup(self.p.close)
+
+    def output(self, before, after):
+        self.p.put(self.p.prev, _snapshot(before))
+        self.p.put(self.p.snap, _snapshot(after))
+        code, out, err = _deltas_stdout(self.p)
+        self.assertEqual(code, 0, err)
+        return out
+
+    def group(self, out, title):
+        # Markdown-заголовки или отдельные жирные строки; не захватываем соседнюю группу.
+        match = re.search(r"^(?:#+ |\*\*)[^\n]*" + re.escape(title)
+                          + r"[^\n]*\n(.*?)(?=^(?:#+ |\*\*)|\Z)",
+                          out, re.M | re.S)
+        self.assertIsNotNone(match, out)
+        return match.group(1)
+
+    def assert_task(self, group):
+        self.assertIn(f"{URL}/issues/101", group)
+        self.assertIn("Задача-Контракт", group)
+
+    def test_new_task_group(self):
+        out = self.output({2551: []}, {2551: [_issue(101, 2551, "Задача-Контракт")]})
+        self.assert_task(self.group(out, "Новые задачи"))
+
+    def test_status_change_group(self):
+        self.check_change(status=True, assignee=False)
+
+    def test_assignee_change_group(self):
+        self.check_change(status=False, assignee=True)
+
+    def test_simultaneous_status_and_assignee_change_in_both_groups(self):
+        self.check_change(status=True, assignee=True)
+
+    def check_change(self, status, assignee):
+        uid = 2982 if assignee else 2551
+        old = _issue(101, 2551, "Задача-Контракт", "New")
+        new = _issue(101, uid, "Задача-Контракт", "In Progress" if status else "New")
+        after = {2551: [], 2982: []}
+        after[uid] = [new]
+        out = self.output({2551: [old], 2982: []}, after)
+        for title, values, enabled in (("Смена статуса", ("New", "In Progress"), status),
+                                       ("Смена исполнителя", ("Иванов", "Петров"), assignee)):
+            if enabled:
+                group = self.group(out, title)
+                self.assert_task(group)
+                for value in values:
+                    self.assertIn(value, group)
+        self.assertNotIn("Ушла из наблюдения", out)
+        self.assertNotIn("Закрыты", out)
+
+    def test_explicit_is_closed_transition(self):
+        old = dict(_issue(101, 2551, "Задача-Контракт"), is_closed=False)
+        new = dict(old, is_closed=True, status="Closed")
+        out = self.output({2551: [old]}, {2551: [new]})
+        self.assert_task(self.group(out, "Закрыты"))
+        self.assertNotIn("ушла из наблюдения", out.lower())
+        self.assertNotIn("ушли из наблюдения", out.lower())
+
+
+class DeltasCollectionTitle(unittest.TestCase):
+    """DELTA-TITLE: интервал между сборами, включая два сбора за день."""
+
+    def test_same_day_collections(self):
+        self.check_title("2026-09-30T09:00:00+00:00", "2026-09-30T14:00:00+00:00")
+
+    def test_collections_several_days_apart(self):
+        self.check_title("2026-09-24T09:00:00+00:00", "2026-09-30T14:00:00+00:00")
+
+    def check_title(self, previous, current):
+        p = _Project()
+        self.addCleanup(p.close)
+        for path, timestamp in ((p.prev, previous), (p.snap, current)):
+            data = _snapshot({2551: [_issue(101, 2551, "Без изменений")]})
+            data["generated_at"] = timestamp
+            p.put(path, data)
+        code, out, err = _deltas_stdout(p)
+        self.assertEqual(code, 0, err)
+        self.assertIn(previous, out)
+        self.assertIn(current, out)
+        self.assertIn("Изменений нет", out)
+        self.assertIn("Дельты с прошлого сбора", out)
+        self.assertNotIn("Дельты со вчера", out)
+        self.assertNotIn("Дельты между снимками", out)
+
+
 if __name__ == "__main__":
     unittest.main()
