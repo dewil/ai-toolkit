@@ -5,7 +5,7 @@ stdlib-only (unittest), без сети.
 
 Запуск: python3 tests/test_telegram_inputs.py
 
-Спека: docs/dev/2026-09-30-spec-telegram-empty-file-username.md.
+Критерии: INV-MSG-03 (пустой --file, username безымянного чата).
 Требование: INV-MSG-03 (отказ до сети, код 2; один код несовпадения username
 в send-one и pull-one).
 
