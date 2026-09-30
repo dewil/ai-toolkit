@@ -55,7 +55,8 @@ async def amain(args) -> int:
     # этом поле и не должны из-за него ломаться.
     schedule_dt = getattr(args, "schedule", None)
     schedule_tz = getattr(args, "schedule_tz", None)
-    if args.username is not None and not args.username:
+    want = args.username.lstrip("@").lower() if args.username is not None else None
+    if want is not None and not want:
         sys.stderr.write("expected_username задан пустой строкой - проверь значение username.\n")
         return 2
     # None и "" различаются: --file "$VAR" с пустой переменной - это заданный
@@ -115,8 +116,7 @@ async def amain(args) -> int:
         # Опциональная сверка username - страховка от отправки не тому адресату.
         actual_username = (getattr(entity, "username", "") or "")
         if args.username is not None:
-            want = args.username.lstrip("@").lower()
-            if actual_username.lower() != want:
+            if not actual_username or actual_username.lower() != want:
                 sys.stderr.write(
                     f"username чата id {chat_id} = @{actual_username or '?'}, "
                     f"ожидали @{want}. Стоп, ничего не отправлено.\n"

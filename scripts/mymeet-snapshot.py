@@ -153,7 +153,10 @@ def _curl_bytes(auth: dict, url: str, timeout: int) -> bytes:
         check=True, capture_output=True, timeout=timeout,
     )
     body, _, code = result.stdout.rpartition(b"\n")
-    status = int(code)
+    try:
+        status = int(code)
+    except ValueError as exc:
+        raise OSError("некорректный ответ curl") from exc
     if status >= 400:
         raise urllib.error.HTTPError(url, status, "ошибка HTTP", {}, None)
     return body
