@@ -87,14 +87,18 @@ DEFAULT_AUTH = Path.home() / ".config" / "asana" / "auth.json"
 
 
 def load_token(auth_path: str | None) -> str:
-    if auth_path:
+    if auth_path is not None:
+        if not auth_path.strip():
+            sys.exit("Пустой путь --auth: укажи файл с токеном")
         p = Path(auth_path).expanduser()
         if not p.exists():
             sys.exit(f"Нет файла с токеном: {p}")
         try:
-            token = str(json.loads(p.read_text(encoding="utf-8")).get("token") or "").strip()
+            data = json.loads(p.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             sys.exit(f"Не читается {p}: {e}")
+        value = data.get("token") if isinstance(data, dict) else None
+        token = value.strip() if isinstance(value, str) else ""
         if not token:
             sys.exit(f"В {p} нет поля token")
         return token
@@ -105,9 +109,11 @@ def load_token(auth_path: str | None) -> str:
 
     if DEFAULT_AUTH.exists():
         try:
-            token = str(json.loads(DEFAULT_AUTH.read_text(encoding="utf-8")).get("token") or "").strip()
+            data = json.loads(DEFAULT_AUTH.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             sys.exit(f"Не читается {DEFAULT_AUTH}: {e}")
+        value = data.get("token") if isinstance(data, dict) else None
+        token = value.strip() if isinstance(value, str) else ""
         if token:
             return token
 
