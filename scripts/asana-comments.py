@@ -8,8 +8,10 @@
 REST-эндпоинт /tasks/{gid}/stories умеет пагинацию, ее тут и разматываем.
 
 Токен (Personal Access Token, https://app.asana.com/0/my-apps) берется из:
-  1. переменной окружения ASANA_TOKEN;
-  2. файла ~/.config/asana/auth.json вида {"token": "..."} (права 600).
+  1. явно указанного --auth <файл>;
+  2. непустой переменной окружения ASANA_TOKEN;
+  3. файла ~/.config/asana/auth.json вида {"token": "..."} (права 600).
+Ошибка явного файла останавливает команду без перехода к другому источнику.
 В репозиторий и в заметки токен не кладем.
 
 Примеры:
@@ -42,16 +44,28 @@ AUTH_PATH = Path.home() / ".config" / "asana" / "auth.json"
 FIELDS = "created_at,created_by.name,text,resource_subtype,type"
 
 
-def load_token() -> str:
+def load_token(auth_path: str | None = None) -> str:
+    def read_token(path: Path) -> str:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            sys.exit(f"Не читается файл токена {path}: проверь доступ и формат JSON")
+        token = data.get("token") if isinstance(data, dict) else None
+        return token.strip() if isinstance(token, str) else ""
+
+    if auth_path is not None:
+        path = Path(auth_path).expanduser()
+        token = read_token(path)
+        if not token:
+            sys.exit(f"В {path} нет непустого поля token")
+        return token
+
     token = os.environ.get("ASANA_TOKEN", "").strip()
     if token:
         return token
 
     if AUTH_PATH.exists():
-        try:
-            token = str(json.loads(AUTH_PATH.read_text(encoding="utf-8")).get("token", "")).strip()
-        except (json.JSONDecodeError, OSError) as e:
-            sys.exit(f"Не читается {AUTH_PATH}: {e}")
+        token = read_token(AUTH_PATH)
         if token:
             return token
 
@@ -59,7 +73,7 @@ def load_token() -> str:
         f"Нет токена Asana. Создай Personal Access Token на https://app.asana.com/0/my-apps и положи так:\n"
         f"  mkdir -p {AUTH_PATH.parent} && chmod 700 {AUTH_PATH.parent}\n"
         f'  printf \'{{"token": "ТОКЕН"}}\\n\' > {AUTH_PATH} && chmod 600 {AUTH_PATH}\n'
-        f"либо экспортируй ASANA_TOKEN."
+        f"либо укажи --auth <файл>, либо экспортируй ASANA_TOKEN."
     )
 
 
@@ -109,6 +123,7 @@ def select_stories(
 def main() -> int:
     p = argparse.ArgumentParser(description="Комментарии задачи Asana (с постраничностью)")
     p.add_argument("task_gid", help="gid задачи (последнее число в URL задачи)")
+    p.add_argument("--auth", metavar="ФАЙЛ", help="файл с PAT аккаунта (приоритет над ASANA_TOKEN)")
     p.add_argument("--last", type=int, default=10, help="сколько последних показать (по умолчанию 10)")
     p.add_argument("--all", action="store_true", help="показать все, игнорируя --last")
     p.add_argument("--system", action="store_true", help="включить системные события, не только комментарии")
@@ -116,7 +131,7 @@ def main() -> int:
     args = p.parse_args()
 
     stories, total = select_stories(
-        fetch_stories(args.task_gid, load_token()),
+        fetch_stories(args.task_gid, load_token(args.auth)),
         system=args.system,
         since=args.since,
         last=args.last,
