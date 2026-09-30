@@ -15,14 +15,20 @@ Jev не пишет текст: на вход текст и набор вопр�
 Ключ: переменная OPENROUTER_API_KEY или файл ~/.config/openrouter/key (права 600).
 Прокси: --proxy, иначе JEV_PROXY, иначе HTTPS_PROXY окружения. В cron переменных
 профиля нет - прокси передается явно, иначе с заблокированного выхода 403.
-Вывод - JSON ответа сервиса как есть (stdout).
+Вывод в stdout - ответ сервиса с маскировкой ключа, учетных данных прокси
+и отраженных Bearer-токенов: JSON при распознанном JSON, сырой текст иначе.
+Каждый рабочий запуск после разбора аргументов, до чтения входа и ключа,
+печатает в stderr ровно одну строку "прокси: <источник>" без адреса:
+--proxy, JEV_PROXY, HTTPS_PROXY (также для https_proxy) или "не задан".
+Строка есть при успехе и отказе; --help и ошибки argparse ее не требуют.
 
 Коды возврата:
   0 - ответ получен, на каждый вопрос есть ответ;
   1 - ошибка сети, HTTP, ключа или входа;
   3 - ответ получен, но не на каждый вопрос есть пригодный ответ по схеме
-      (тип, значение, вариант из критериев) или формат не распознан.
-      JSON все равно печатается - смотреть глазами, результат не использовать.
+      (тип, значение, вариант из критериев), формат не распознан или
+      маскировка изменила обязательное поле либо ответ.
+      Полученный ответ все равно печатается - смотреть глазами, результат не использовать.
 Эндпоинт помечен у OpenRouter как alpha: формат может смениться без
 предупреждения. Сверка идет по опубликованной схеме (api-reference, раздел
 alphadecisions, сверено 25.09.2026); ключ в выводе маскируется, файл ключа с
@@ -36,6 +42,7 @@ import stat
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -48,20 +55,43 @@ _PROXY = ""            # адрес прокси тоже маскируется
 
 
 def mask(text: str) -> str:
-    """Ключ в любом выводе заменяется: шлюз может отразить заголовок в диагностике."""
-    for secret in (_KEY, _PROXY):
-        if secret:
-            for form in {secret, json.dumps(secret)[1:-1]}:   # как есть и в JSON-экранировании
+    """Скрыть отраженные ключ, прокси, его учетные данные и Bearer-токены."""
+    credentials = set()
+    if _PROXY:
+        try:
+            parsed = urllib.parse.urlsplit(_PROXY)
+            credentials = {part for part in (parsed.username, parsed.password) if part}
+        except ValueError:
+            pass
+    credentials |= {urllib.parse.unquote(part) for part in credentials}
+    secrets = {_KEY, _PROXY} | credentials
+    for secret in sorted(secrets - {""}, key=len, reverse=True):
+        forms = {secret, json.dumps(secret)[1:-1], json.dumps(secret, ensure_ascii=False)[1:-1]}
+        for form in forms:
+            if secret in credentials:
+                text = re.sub(r"(?<![A-Za-z0-9])" + re.escape(form) + r"(?![A-Za-z0-9])", "***", text)
+            else:
                 text = text.replace(form, "***")
-    return text
+    return re.sub(r"(?i)(?<![A-Za-z0-9])Bearer[ \t]+[A-Za-z0-9+/=._-]+", "Bearer ***", text)
+
+
+def mask_response(response):
+    """Скрыть секреты во всех ключах и значениях JSON до вывода."""
+    def clean(value):
+        if isinstance(value, dict):
+            return {mask(key): clean(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        return mask(value) if isinstance(value, str) else value
+
+    return clean(response)
 
 
 def mask_err(text: str) -> str:
     """Для диагностики (stderr): плюс учетные данные в любом URL и Basic/Bearer-токены.
 
-    Шаблонная маскировка только здесь: на успешном ответе она портила бы данные
-    ("basic knowledge" в варианте choice). Ответ сервиса маскируется по точным
-    значениям ключа и прокси, его содержимое не меняется.
+    Шаблон Basic применяется только здесь: на успешном ответе он портил бы
+    данные ("basic knowledge" в варианте choice).
     """
     text = mask(text)
     text = re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*:/{0,2})[^/@\s'\"]+@", r"\1***@", text)
@@ -142,6 +172,11 @@ def main() -> None:
     ap.add_argument("--proxy", help="прокси для запроса (иначе JEV_PROXY, иначе HTTPS_PROXY окружения)")
     a = ap.parse_args()
 
+    proxy, proxy_src = resolve_proxy(a.proxy)
+    global _PROXY
+    _PROXY = proxy
+    print(f"прокси: {proxy_src}", file=sys.stderr, flush=True)
+
     try:
         questions = json.loads(Path(a.questions).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -162,9 +197,6 @@ def main() -> None:
     # по истечении DEADLINE выходим, что бы там ни висело (поток daemon).
     result: dict = {}
 
-    proxy, proxy_src = resolve_proxy(a.proxy)
-    global _PROXY
-    _PROXY = proxy
     if proxy:
         # urllib сверяет хост с NO_PROXY и при совпадении идет мимо даже явного
         # прокси - тогда 403 назвал бы источником прокси то, что не использовалось
@@ -181,7 +213,7 @@ def main() -> None:
             body = e.read().decode(errors="replace")
             if e.code == 403 and body.lstrip()[:1] == "<":
                 result["err"] = (f"HTTP 403 с html-страницей вместо ответа API: отказал шлюз сервиса "
-                                 f"(обычно - заблокирован выход машины) или сам прокси; прокси: {proxy_src}. "
+                                 f"(обычно - заблокирован выход машины) или сам прокси. "
                                  f"Без прокси - задайте --proxy или JEV_PROXY; с прокси - проверьте его")
             else:
                 result["err"] = f"HTTP {e.code}: {body[:500]}"
@@ -205,13 +237,19 @@ def main() -> None:
         print("ответ сервиса - не JSON", file=sys.stderr)
         sys.exit(3)
 
-    print(mask(json.dumps(response, ensure_ascii=False, indent=2)))
+    safe_response = mask_response(response)
+    print(json.dumps(safe_response, ensure_ascii=False, indent=2))
     miss = missing_answers(response, questions)
     if miss is None:
         print("формат ответа не распознан (нет answers или есть error) - результат не использовать", file=sys.stderr)
         sys.exit(3)
     if miss:
         print(mask_err(f"нет пригодного ответа на: {', '.join(miss)} - результат не использовать"), file=sys.stderr)
+        sys.exit(3)
+    if (missing_answers(safe_response, questions) != []
+            or any(response["answers"][name] != safe_response["answers"][name]
+                   for name in questions)):
+        print("маскировка изменила пригодный ответ - результат не использовать", file=sys.stderr)
         sys.exit(3)
 
 
