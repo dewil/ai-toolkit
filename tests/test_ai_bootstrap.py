@@ -325,6 +325,62 @@ runpy.run_path(script, run_name='__main__')
                 first.communicate()
         self.command('check')
 
+    def test_06_unknown_journal_version_is_rejected_without_writes(self):
+        self.interrupted_build()
+        journal = self.root / '.ai-bootstrap/journal.json'
+        data = json.loads(journal.read_text())
+        data['schema_version'] = 999
+        journal.write_text(json.dumps(data))
+        before = snapshot(self.base)
+        self.command('recover', expected=2)
+        self.assertEqual(snapshot(self.base), before)
+        self.command('check', expected=2)
+
+    def test_06_unsafe_journal_path_is_validated_before_any_replay(self):
+        self.interrupted_build()
+        journal = self.root / '.ai-bootstrap/journal.json'
+        original = json.loads(journal.read_text())
+        victim = self.base / 'outside-victim.md'
+        victim.write_text('OUTSIDE_USER_FILE')
+        for unsafe in ['../outside-victim.md', str(victim), '.AI/../outside-victim.md']:
+            with self.subTest(path=unsafe):
+                data = json.loads(json.dumps(original))
+                data['actions'][-1]['path'] = unsafe
+                journal.write_text(json.dumps(data))
+                before = snapshot(self.base)
+                self.command('recover', expected=2)
+                self.assertEqual(snapshot(self.base), before)
+
+    def test_06_interrupted_apply_before_state_commit_is_not_healthy(self):
+        wrapper = '''import os, pathlib, runpy, sys
+script, root, bundle, project_id = sys.argv[1:5]
+real_replace = os.replace
+def fail_state(src, dst, *args, **kwargs):
+    if pathlib.Path(dst).absolute() == pathlib.Path(root).absolute() / '.AI/canon/canon.state.json':
+        raise OSError('injected state commit failure')
+    return real_replace(src, dst, *args, **kwargs)
+os.replace = fail_state
+sys.argv = [script, 'apply', '--root', root, '--bundle', bundle,
+            '--project-id', project_id, '--types', 'coding,wiki', '--adapters', 'claude,codex,kimi']
+runpy.run_path(script, run_name='__main__')
+'''
+        result = subprocess.run([sys.executable, '-c', wrapper, str(SCRIPT), str(self.root),
+                                 str(self.bundle), PROJECT_ID], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0, 'fault injection did not intercept state commit')
+        self.assertTrue((self.root / 'AGENTS.md').is_file())
+        self.assertTrue((self.root / 'CLAUDE.md').is_file())
+        self.assertFalse((self.root / '.AI/canon/canon.state.json').exists())
+        self.assertTrue((self.root / '.ai-bootstrap/journal.json').is_file())
+        self.command('check', expected=1)
+        before = snapshot(self.root)
+        self.command('apply', expected=2)
+        self.assertEqual(snapshot(self.root), before)
+        self.command('recover')
+        self.command('check')
+        before = snapshot(self.root)
+        self.command('recover')
+        self.assertEqual(snapshot(self.root), before)
+
     def test_07_gitignore_preserves_lines_and_ignores_private_files(self):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         self.put(self.root / '.gitignore', '# user ignore\nlocal-user-data/\n')
