@@ -53,7 +53,8 @@ class LegacyGuardTest(unittest.TestCase):
                                 if operation == "library-recover":
                                     cd.recover(root)
                                 else:
-                                    cd.apply_release(root, {"project_type": ["universal"]},
+                                    cd.apply_release(root, {"project_type": ["universal"], "local_only": [],
+                                                     "skip_sync": [], "overrides": []},
                                                      cd.empty_state(), descriptor, "a" * 40,
                                                      cd.DictBlobSource({}), root / ".claude/canon.state.json")
                             self.assertNotEqual(error.exception.code, 0)
