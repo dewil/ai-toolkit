@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import os
 import stat
 import re
 import subprocess
@@ -87,6 +88,55 @@ class AiBootstrapIntegrity(unittest.TestCase):
                 result = self.command('apply', expected=2)
                 self.assertTrue(result.stderr.strip(), 'Malformed Git HEAD needs a diagnostic')
                 self.assertEqual(snapshot(repository), before)
+
+    def test_real_parent_git_metadata_is_checked_through_intermediate_symlink(self):
+        repository = self.base / 'physical-repository'
+        repository.mkdir()
+        physical_root = repository / 'nested-client'
+        physical_root.mkdir()
+        subprocess.run(['git', 'init', '-q', str(repository)], check=True)
+        private = physical_root / '.AI/project.md'
+        self.put(private, 'Tracked private project behind an intermediate symlink\n')
+        subprocess.run(['git', '-C', str(repository), 'add', '-f', 'nested-client/.AI/project.md'], check=True)
+        private.unlink()
+        private.parent.rmdir()
+        (repository / '.git/HEAD').write_bytes(b'malformed HEAD metadata\n')
+        alias = self.base / 'repository-alias'
+        alias.symlink_to(repository, target_is_directory=True)
+        self.root = alias / 'nested-client'
+        self.assertFalse(self.root.is_symlink(), 'Only the intermediate parent is a symlink')
+        before = snapshot(repository)
+        result = self.command('apply', expected=2)
+        self.assertTrue(result.stderr.strip())
+        self.assertEqual(snapshot(repository), before)
+
+    def test_missing_git_binary_refuses_known_repository_but_allows_non_git_root(self):
+        empty_bin = self.base / 'empty-path'
+        empty_bin.mkdir()
+        environment = dict(os.environ, PATH=str(empty_bin))
+        for known_repository in (True, False):
+            with self.subTest(known_repository=known_repository):
+                self.root = self.base / ('known-repository' if known_repository else 'plain-directory')
+                self.root.mkdir()
+                if known_repository:
+                    subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+                    private = self.root / '.AI/project.md'
+                    self.put(private, 'Tracked private project requiring Git verification\n')
+                    subprocess.run(['git', '-C', str(self.root), 'add', '-f', '.AI/project.md'], check=True)
+                    private.unlink()
+                    private.parent.rmdir()
+                before = snapshot(self.root)
+                result = subprocess.run([sys.executable, str(SCRIPT), 'apply', '--root', str(self.root),
+                                         '--bundle', str(self.bundle), '--project-id',
+                                         '22aaab19-84df-42b0-9f1a-51aa4fbb3425', '--types', 'coding,wiki'],
+                                        capture_output=True, text=True, env=environment)
+                if known_repository:
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertTrue(result.stderr.strip())
+                    self.assertEqual(snapshot(self.root), before)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertTrue((self.root / '.AI/project.md').is_file())
 
     def test_removed_ignore_protection_is_not_healthy(self):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
