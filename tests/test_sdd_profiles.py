@@ -28,15 +28,20 @@ class SddProfileTests(unittest.TestCase):
         self.environment = {k: v for k, v in os.environ.items() if k not in ('BASH_ENV', 'ENV')}
         self.environment.update(HOME=str(self.root), CODEX_HOME=str(self.profiles))
 
-    def run_profile(self, role, pair):
+    def run_profile(self, role, pair, primary=None):
         for path in self.profiles.glob('*.config.toml'):
             path.unlink()
-        (self.profiles / (role + '.config.toml')).write_text('model = "model-author"\n')
+        (self.profiles / (role + '.config.toml')).write_text(
+            'model = "model-author"\n' if primary is None else primary)
         other = 'compliance' if role == 'implement' else 'implement'
         if pair != 'absent':
             content = {'empty': '# No usable model\nmodel = ""\n',
                        'match': "model = 'model-author' # same actual model\n",
-                       'different': 'model = "model-independent"\n'}[pair]
+                       'different': 'model = "model-independent"\n',
+                       'malformed': "model = 'different-missing-closing-quote\n",
+                       'nonstring': 'model = 42\n',
+                       'whitespace': 'model = "   "\n',
+                       'control': 'model = "different\\tmodel"\n'}[pair]
             (self.profiles / (other + '.config.toml')).write_text(content)
         program, count = re.subn(r'^PROFILE=audit\b', 'PROFILE=' + role, self.snippet, count=1, flags=re.M)
         self.assertEqual(count, 1)
@@ -57,6 +62,24 @@ class SddProfileTests(unittest.TestCase):
                         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                         self.assertNotIn(MARKER, result.stdout + result.stderr)
                         self.assertTrue((result.stdout + result.stderr).strip())
+
+    def test_broken_pair_profiles_cannot_authorize_independent_model_launch(self):
+        for role in ('implement', 'compliance'):
+            for pair in ('malformed', 'nonstring', 'whitespace', 'control'):
+                with self.subTest(role=role, pair=pair):
+                    result = self.run_profile(role, pair)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertNotIn(MARKER, result.stdout + result.stderr)
+                    self.assertTrue((result.stdout + result.stderr).strip())
+
+    def test_audit_requires_a_valid_nonempty_string_model_in_its_own_profile(self):
+        for primary in ('model = ""\n', "model = 'missing-closing-quote\n",
+                        'model = 42\n', 'model = "   "\n', 'model = "bad\\tmodel"\n'):
+            with self.subTest(primary=primary):
+                result = self.run_profile('audit', 'absent', primary=primary)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn(MARKER, result.stdout + result.stderr)
+                self.assertTrue((result.stdout + result.stderr).strip())
 
     def test_audit_does_not_require_an_independent_pair_profile(self):
         for pair in ('absent', 'empty', 'match', 'different'):
