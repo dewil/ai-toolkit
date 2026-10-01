@@ -4,6 +4,7 @@ description: Синхронизировать проект с каноном cla
 
 Синхронизируй текущий проект с каноном claude-toolkit.
 
+0. До чтения legacy-реестра проверь `.AI` и `.ai-bootstrap` в корне проекта, включая файлы и симлинки (в том числе битые). Если любой путь существует - остановись без записей, mkdir и сетевого синка. Это новый AI-layout или незавершенный bootstrap: используй новую процедуру AI bootstrap/check/recover из `bootstrap/bootstrap-ai.prompt.md`. Общий sync для `.AI` пока не реализован; legacy bootstrap и миграцию не предлагай.
 1. Прочитай `.claude/canon.yaml` в корне проекта. Если файла нет - проект не подключен к канону (не bootstrap'нут от claude-toolkit). Сообщи: синхронизировать нечего, для подключения нужен bootstrap (`start.md`), - и остановись.
 2. Возьми из него `canon.raw_base` (например, `https://raw.githubusercontent.com/dewil/claude-toolkit/main`).
 3. Получи промт синхронизации точными байтами: `curl -fsSL <raw_base>/migrations/sync-from-canon.prompt.md`. Если `curl` недоступен - фолбэк `WebFetch` того же URL (для промта это допустимо, для канон-файлов - нет: `WebFetch` лоссовый). Если `curl` есть, а не отвечает сам raw-хост, тот же файл берется байт-точно через `api.github.com`: `curl -fsSL -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/<owner>/<repo>/contents/migrations/sync-from-canon.prompt.md?ref=<branch>"`.

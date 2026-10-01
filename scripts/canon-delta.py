@@ -688,9 +688,19 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def refuse_ai_layout(root: Path) -> None:
+    """Legacy writers must not initialize state beside the new AI layout."""
+    for name in (".AI", ".ai-bootstrap"):
+        marker = root / name
+        if marker.exists() or marker.is_symlink():
+            die(f"обнаружен {name}: legacy sync/migrate запрещен; "
+                "используй процедуру AI bootstrap/check/recover", EXIT_INCOMPAT)
+
+
 @contextlib.contextmanager
 def project_flock(root: Path):
     """Project-level advisory flock на весь проход (§6, находка 6). Один writer."""
+    refuse_ai_layout(root)
     lp = root / ".claude" / LOCK_NAME
     lp.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lp, os.O_RDWR | os.O_CREAT, 0o644)

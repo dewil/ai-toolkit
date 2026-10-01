@@ -244,6 +244,7 @@ def build_ledger(old: dict, root: Path, external: list[dict] | None) -> dict:
 
 def cmd_migrate(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
+    cd.refuse_ai_layout(root)
     claude = root / ".claude"
     old_path = Path(args.canon) if args.canon else claude / "canon.yaml"
     if not old_path.exists():
