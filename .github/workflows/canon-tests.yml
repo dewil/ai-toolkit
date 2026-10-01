@@ -7,9 +7,8 @@ name: canon-delta tests
 # paths - маской по scripts/*.py, а не поименно: раскатываемые скрипты раньше
 # в триггер не входили вовсе, и дефект в них доезжал до парка мимо CI.
 #
-# Список тестов ниже - поименный, и он уже расходился с tests/: chrome_cookies,
-# gsheets и telegram_pace лежали в репозитории, но в CI не гонялись. Заводишь
-# новый tests/test_*.py - дописывай его сюда же.
+# Каждый tests/test_*.py обнаруживается scripts/run-tests.py автоматически;
+# отдельные процессы сохраняют изоляцию существующих модулей.
 
 on:
   push:
@@ -21,6 +20,14 @@ on:
       - "bootstrap/**"
       - "templates/**"
       - "rules/**"
+      - "agents/**"
+      - "skills/**"
+      - "commands/**"
+      - "migrations/**"
+      - "docs/**"
+      - "README.md"
+      - "CLAUDE.md"
+      - "ARCHITECTURE.md"
       - "start.md"
       - "evals/**"
       - ".github/workflows/canon-tests.yml"
@@ -32,8 +39,17 @@ on:
       - "bootstrap/**"
       - "templates/**"
       - "rules/**"
+      - "agents/**"
+      - "skills/**"
+      - "commands/**"
+      - "migrations/**"
+      - "docs/**"
+      - "README.md"
+      - "CLAUDE.md"
+      - "ARCHITECTURE.md"
       - "start.md"
       - "evals/**"
+      - ".github/workflows/canon-tests.yml"
 
 jobs:
   tests:
@@ -48,10 +64,4 @@ jobs:
         # не должна доезжать до парка
         run: python3 -m compileall -q scripts/
       - name: run tests
-        run: |
-          set -e
-          for t in ai_migrate ai_migrate_recovery ai_migrate_integrity ai_bootstrap ai_bootstrap_integrity ai_bootstrap_transport ai_legacy_guard build_lock classify wal integration migrate fs_mapping md_pdf md_docx csv_xlsx md_pptx telegram_config mymeet_snapshot asana_comments asana_auth asana_project asana_blockers run_evals feedback_collect chrome_cookies gsheets telegram_pace canon_brief canon_inbox_watch gdocs mymeet_pull_guard telegram_inputs telegram_schedule telegram_snapshot_edits redmine redmine_edgecases redmine_unknown_status session_cost documents_contract jev_decide review_fixes codex_sandbox codex_sandbox_extra gitleaks_hook; do
-            echo "::group::test_$t"
-            python3 tests/test_$t.py
-            echo "::endgroup::"
-          done
+        run: python3 scripts/run-tests.py
