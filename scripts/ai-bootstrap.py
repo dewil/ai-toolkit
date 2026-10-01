@@ -258,19 +258,53 @@ def file_action(rel, data, before=None, mode=0o644):
             'data': base64.b64encode(data).decode()}
 
 
+def git_metadata_present(root):
+    # Match Git's physical working directory even through an alias parent.
+    actual_root = root.resolve()
+    for folder in (actual_root, *actual_root.parents):
+        try:
+            (folder / '.git').lstat()
+        except FileNotFoundError:
+            continue
+        return True
+    return False
+
+
 def private_tracked(root):
     if not root.exists():
         return
     try:
+        # Git's fatal code 128 also covers a corrupt index/config. Only an
+        # explicit absence of a repository permits skipping this boundary.
+        git_env = {**os.environ, 'LC_ALL': 'C'}
+        repository = subprocess.run(
+            ['git', '-C', str(root), 'rev-parse', '--is-inside-work-tree'],
+            capture_output=True, timeout=15, env=git_env)
+        no_repository = repository.stderr.startswith((
+            b'fatal: not a git repository (or any of the parent directories)',
+            b'fatal: not a git repository (or any parent up to mount point '))
+        if (repository.returncode == 128 and no_repository
+                and not any(name in os.environ for name in
+                            ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'))):
+            # A damaged HEAD can produce that same message while the index
+            # still tracks private files, including in an enclosing repo.
+            if git_metadata_present(root):
+                raise Invalid('Cannot inspect existing Git metadata; private-path tracking is unknown')
+            return
+        if repository.returncode != 0 or repository.stdout.strip() != b'true':
+            raise Invalid('Cannot inspect Git repository; private-path tracking is unknown')
         result = subprocess.run(['git', '-C', str(root), 'ls-files', '-z', '--',
                                  '.AI/memory', '.AI/project.md', '.AI/canon', TXN,
                                  '.claude/settings.local.json'],
-                                capture_output=True, timeout=15)
+                                capture_output=True, timeout=15, env=git_env)
     except FileNotFoundError:
+        if git_metadata_present(root) or any(name in os.environ for name in
+                                            ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')):
+            raise Invalid('Git is unavailable; private-path tracking is unknown')
         return
     if result.returncode == 0 and result.stdout:
         raise Invalid('Private bootstrap paths are already tracked by Git; reconcile before bootstrap')
-    if result.returncode not in (0, 128):
+    if result.returncode != 0:
         raise Invalid('Cannot inspect Git tracking')
 
 
