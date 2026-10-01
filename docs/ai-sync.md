@@ -1,10 +1,12 @@
 # Обновление канона в установленном .AI
 
-Навык [canon-sync](../skills/canon-sync/SKILL.md) или `/canon` обновляет канон существующего клиента. [Исполнительная процедура](../migrations/ai-sync.prompt.md) задает audit, read-only plan, согласованное apply и check. Legacy `.claude` сохраняет прежний маршрут; переход в `.AI` выполняется только отдельной миграцией.
+Для первого обновления старого `.AI` навык может отсутствовать, а установленный `/canon` - останавливаться. Прямой HTTP-вход без предварительной установки навыка: "Выполни https://raw.githubusercontent.com/dewil/claude-toolkit/main/migrations/ai-sync.prompt.md для этого клиента". Для форка используй выбранный OWNER/REPO, другой ref задается явно. URL main служит discovery: до plan/apply процедура разрешает его в SHA и продолжает по закрепленной копии.
+
+После обновления навык [canon-sync](../skills/canon-sync/SKILL.md) или новый `/canon` обновляет канон существующего клиента. [Исполнительная процедура](../migrations/ai-sync.prompt.md) задает audit, read-only plan, согласованное apply и check. Legacy `.claude` сохраняет прежний маршрут; переход в `.AI` выполняется только отдельной миграцией.
 
 ## Версия и запуск
 
-HTTP-репозиторий берется из явно выбранного источника, иначе HTTPS `state.source.base`. Сохраненный SHA обозначает установленную версию; обычное обновление выбирает `main`, другой ref - по запросу пользователя. Явно заданный immutable URL/SHA соблюдается точно. Без HTTP origin (например, после bundle-установки) продуктовый default - `https://raw.githubusercontent.com/dewil/claude-toolkit/main`; форки заменяют default. Локальный клон не обнаруживается и не используется. Выбранный ref разрешается через GitHub API в 40-hex commit SHA; процедура, sync и bootstrap берутся из этого же SHA во временный каталог вне клиента.
+HTTP-репозиторий берется из явно выбранного источника, иначе HTTPS `state.source.base`. Сохраненный SHA обозначает установленную версию; обычное обновление выбирает `main`, другой ref - по запросу пользователя. Явно заданный immutable URL/SHA соблюдается точно. Без HTTP origin (например, после bundle-установки) продуктовый default - `https://raw.githubusercontent.com/dewil/claude-toolkit/main`; форки заменяют default. Локальный клон не обнаруживается и не используется. Выбранный ref разрешается через GitHub API в 40-hex commit SHA; процедура, sync и bootstrap берутся из этого же SHA во временный каталог вне клиента. Уже выбранный навыком/router SHA передается процедуре точно и больше не разрешается через main; plan/apply используют тот же PINNED_URL. Immutable пара инструментов сохраняется до healthy завершения.
 
 После конкретного плана и разрешения команды имеют вид:
 
@@ -39,7 +41,11 @@ python3 /tmp/ai-sync/ai-sync.py recover --root ROOT
 python3 /tmp/ai-sync/ai-sync.py check --root ROOT
 ```
 
-Sync recovery валидирует весь сохраненный журнал до записи, завершает зафиксированное поколение offline и сохраняет неожиданно измененные файлы отказом. Новый пакет, сеть или выбор ref не нужны. Журнал вручную не удаляется. Все toolkit writers используют один exclusive lock. Повтор совпадающего sync/recover - no-op.
+Для recovery используется та же immutable пара ai-sync.py/ai-bootstrap.py из pinned commit прерванной операции, сохраненная вне клиента. Нельзя смешивать установленный self-updated script с helper другого поколения. При утрате пары загружаются только соответствующие инструменты из того же подтвержденного SHA, без нового main/ref или source package; неизвестный SHA - остановка.
+
+Sync recovery валидирует весь сохраненный журнал до записи, завершает зафиксированное поколение offline и сохраняет неожиданно измененные файлы отказом. Для replay с сохраненной парой новый пакет, сеть или выбор ref не нужны. Журнал вручную не удаляется. Все toolkit writers используют один exclusive lock (`LOCK_EX|LOCK_NB`); read-only check берет shared nonblocking lock (`LOCK_SH|LOCK_NB`) на существующий regular `.ai-bootstrap/lock`, без создания. Missing/unsafe lock - отказ. Повтор совпадающего sync/recover - no-op.
+
+При отказе sandbox/access, read-only назначении или synthetic mount masks исполнитель останавливается и объясняет среду. Он не запускает rmdir/umount, не создает placeholder dirs и не ослабляет policy; смена на разрешенного исполнителя требует авторизации владельца. Поддержка mount masks не реализована в sync/миграторе.
 
 Первый проверяемый контракт - Linux/Python 3.11+. Check подтверждает структуру и поколение; fresh-session проверки агентов, сертификация других ОС и массовая раскатка - отдельные шаги.
 
