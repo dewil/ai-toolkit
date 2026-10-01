@@ -50,10 +50,8 @@
 
 ### 2) Синк существующего проекта
 
-- До записей проверь `.AI` и `.ai-bootstrap` в корне (включая ссылки). При наличии останови legacy-sync: новый общий sync еще не реализован. При `.ai-bootstrap/migration.json` используй отдельный `ai-migrate.py check/recover --root ROOT`; для bootstrap-журнала - `ai-bootstrap.py check/recover --root ROOT`. Не запускай чужой recover.
-
-- Следующий промт: `<canon_base>/migrations/sync-from-canon.prompt.md`. Получение промта - см. раздел ["Как получать промты"](#как-получать-промты).
-- Содержимое - инструкции для тебя. Выполни как продолжение текущей сессии.
+- Прочитай общий навык `<canon_base>/skills/canon-sync/SKILL.md` и выполни его в текущей сессии. Он проверяет `.AI` и `.ai-bootstrap` (включая ссылки), направляет AI к отдельной pinned `migrations/ai-sync.prompt.md`, а legacy - к прежней `migrations/sync-from-canon.prompt.md`. Несколько журналов дают отказ; recover запускается только владельцем журнала. Получение - см. раздел ["Как получать промты"](#как-получать-промты).
+- Синк не запускает bootstrap или миграцию автоматически и не меняет ID/types/adapters; локальный клон не ищи.
 
 ### 3) Миграция legacy в .AI
 
