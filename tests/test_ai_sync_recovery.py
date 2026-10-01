@@ -1,4 +1,5 @@
 """Independent FR-AIS05/06 crash, replay, full prevalidation and lock checks."""
+import fcntl
 import json
 import select
 import shutil
@@ -194,6 +195,34 @@ class AiSyncRecovery(SyncFixture):
             if first.poll() is None:
                 first.kill()
                 first.communicate()
+        self.cli('check')
+
+    def test_06_healthy_root_apply_and_recover_use_existing_exclusive_lock(self):
+        self.upstream('rules/coding.md', b'# Coding\nLOCKED_UPDATE\n')
+        plan = self.plan()
+        lock = self.root / '.ai-bootstrap/lock'
+        lock.parent.mkdir(exist_ok=True)
+        with lock.open('a+b') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertFalse((self.root / '.ai-bootstrap/sync.json').exists())
+            self.reject_apply(plan['plan_sha256'])
+            before = tree(self.root)
+            self.cli('recover', reject=True)
+            self.assertEqual(tree(self.root), before)
+            self.assertFalse((self.root / '.ai-bootstrap/sync.json').exists())
+        self.apply(plan)
+        self.cli('check')
+
+    def test_06_healthy_root_shared_reader_lock_blocks_sync_exclusive_writer(self):
+        self.upstream('rules/coding.md', b'# Coding\nEXCLUSIVE_UPDATE\n')
+        plan = self.plan()
+        lock = self.root / '.ai-bootstrap/lock'
+        lock.parent.mkdir(exist_ok=True)
+        with lock.open('a+b') as held:
+            fcntl.flock(held, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            self.assertFalse((self.root / '.ai-bootstrap/sync.json').exists())
+            self.reject_apply(plan['plan_sha256'])
+        self.apply(plan)
         self.cli('check')
 
     def test_06_external_writer_drift_at_step_is_preserved(self):
