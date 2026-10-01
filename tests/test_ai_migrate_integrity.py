@@ -1,5 +1,8 @@
 """Independent migration preservation and recovery regressions."""
 import argparse
+import base64
+import copy
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -39,16 +42,54 @@ class AiMigrationIntegrity(unittest.TestCase):
                 self.assertEqual(snapshot(self.root), before)
                 self.assertFalse((self.root / '.ai-bootstrap').exists())
 
-    def test_journal_missing_destination_parent_is_rejected_before_replay(self):
-        # Obtain a valid recorded plan, then remove one operation. The assertion
-        # concerns the public recovery CLI and all original project bytes.
+    def valid_journal(self):
         spec = importlib.util.spec_from_file_location('migration_integrity_fixture', SCRIPT)
         migration = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(migration)
         args = argparse.Namespace(bundle=self.bundle, source_base=None,
                                   project_id=PROJECT_ID, types='coding,wiki',
                                   adapters='claude,codex,kimi')
-        journal = migration.migration_plan(args, self.root)
+        return migration.migration_plan(args, self.root)
+
+    def assert_recovery_refuses_unchanged(self, journal):
+        self.put(self.root / '.ai-bootstrap/migration.json', json.dumps(journal))
+        before = snapshot(self.root)
+        result = self.command('recover', expected=2)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertEqual(snapshot(self.root), before)
+        self.assertFalse((self.root / '.ai-bootstrap/legacy').exists())
+
+    def test_malformed_steps_have_controlled_refusal_without_writes(self):
+        valid = self.valid_journal()
+        for malformed in (None, [], {'kind': 'dir', 'path': '.AI',
+                                     'before': None, 'after': None}):
+            with self.subTest(step=malformed):
+                journal = copy.deepcopy(valid)
+                journal['steps'][0] = malformed
+                self.assert_recovery_refuses_unchanged(journal)
+
+    def test_missing_nested_memory_step_refused_before_archive(self):
+        journal = self.valid_journal()
+        target = '.AI/memory/nested/fact.md'
+        count = len(journal['steps'])
+        journal['steps'] = [s for s in journal['steps'] if s.get('path') != target]
+        self.assertEqual(len(journal['steps']), count - 1)
+        self.assert_recovery_refuses_unchanged(journal)
+
+    def test_omitted_docs_archive_refused_even_with_matching_forged_state(self):
+        journal = self.valid_journal()
+        journal['steps'] = [s for s in journal['steps']
+                            if not (s['kind'] == 'move' and s['path'] == 'docs/dev')]
+        del journal['state']['migration']['archives']['docs/dev']
+        state_step = journal['steps'][-1]
+        self.assertEqual(state_step['path'], '.AI/canon/canon.state.json')
+        data = json.dumps(journal['state']).encode()
+        state_step['data'] = base64.b64encode(data).decode()
+        state_step['after']['sha256'] = hashlib.sha256(data).hexdigest()
+        self.assert_recovery_refuses_unchanged(journal)
+
+    def test_journal_missing_destination_parent_is_rejected_before_replay(self):
+        journal = self.valid_journal()
         original_count = len(journal['steps'])
         journal['steps'] = [step for step in journal['steps']
                             if not (step['kind'] == 'dir' and step['path'] == '.AI/rules')]
