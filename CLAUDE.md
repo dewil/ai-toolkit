@@ -22,6 +22,7 @@
 Где живет авторитетная механика (не пересказывай ее здесь по памяти - читай источник):
 
 - Отдельная миграция legacy `.claude` - `migrations/ai-layout.prompt.md`, исполнитель `scripts/ai-migrate.py`; обычный bootstrap не мигрирует старые проекты.
+- Обновление установленного `.AI` - общий `skills/canon-sync/SKILL.md`, отдельная `migrations/ai-sync.prompt.md` и исполнитель `scripts/ai-sync.py`; `/canon` - router. Эксплуатация - `docs/ai-sync.md`.
 - Новый bootstrap/build/check/recover - `scripts/ai-bootstrap.py`, policy и начальные локальные файлы - `templates/ai/`. Новый state только `.AI/canon/canon.state.json`; старые sync/migrate его не применяют.
 - Схема legacy `.claude/canon.yaml` (поля, `file_hashes` как база снимка) - в `bootstrap/bootstrap-02-scaffold.prompt.md`, шаг 4b.
 - Логика синка (трехстороннее сравнение, autodiscovery, upstream-брифы) - в `migrations/sync-from-canon.prompt.md`.
@@ -31,8 +32,8 @@
 
 Разница определяет, регистрировать ли файл и синкать ли его:
 
-- **Канон-файлы** (`rules/`, `agents/`, `skills/`, `commands/`, `scripts/`) - источник истины. Legacy-проект отслеживает их в `canon.yaml.files`, sync поддерживает в актуальном состоянии. Новый bootstrap фиксирует их в `.AI/canon/canon.state.json`; общий sync нового формата будет отдельной фичей. У `scripts/` маппинг тривиальный: путь в каноне = путь в проекте (`scripts/X.py` -> `scripts/X.py`).
-- **Шаблоны** (`templates/`) - скелеты с TODO-заглушками. Bootstrap копирует их один раз; дальше проект владеет файлом сам, заполняет под себя. В `canon.yaml.files` НЕ заносятся, sync их не контролирует, `manifest.yaml` про них не знает. Это намеренно: после копирования файл разойдется с шаблоном, и пытаться его "синкать" бессмысленно. Пример - `templates/README.md` (человеческий манифест проекта) и `templates/project-structure.md` (карта папок).
+- **Канон-файлы** (`rules/`, `agents/`, `skills/`, `commands/`, `scripts/`) - источник истины. Legacy-проект отслеживает их в `canon.yaml.files`, sync поддерживает в актуальном состоянии. Новый bootstrap фиксирует их в `.AI/canon/canon.state.json`; общий sync обновляет их по истинным базам отдельным `ai-sync.py`. У `scripts/` маппинг тривиальный: путь в каноне = путь в проекте (`scripts/X.py` -> `scripts/X.py`).
+- **Шаблоны** (`templates/`) - скелеты с TODO-заглушками. В `.AI` START - исключение: управляемый каталог с receipt, обновляемый sync; project.md, memory и context-policy принадлежат проекту. Bootstrap копирует их один раз; дальше проект владеет файлом сам, заполняет под себя. В `canon.yaml.files` НЕ заносятся, sync их не контролирует, `manifest.yaml` про них не знает. Это намеренно: после копирования файл разойдется с шаблоном, и пытаться его "синкать" бессмысленно. Пример - `templates/README.md` (человеческий манифест проекта) и `templates/project-structure.md` (карта папок).
 
 ## Принципы (применяются в каждом промте этого репо)
 
@@ -67,7 +68,7 @@
 - В соответствующем bootstrap-промте (`bootstrap-02-scaffold.prompt.md` для универсального или `bootstrap-03-<тип>.prompt.md` для типового) добавить шаг "создать `<куда>` из шаблона" по той же схеме, что для существующих:
   - `curl -fsSL <canon_base>/templates/<name>.md` -> запиши в `<путь в проекте>` (канон тянется только по HTTP; локальный клон не подхватываем).
   - Существующий файл НЕ перезаписывается (идемпотентность).
-- В `manifest.yaml` шаблоны НЕ заносятся (sync их не использует).
+- В `manifest.yaml` шаблоны НЕ заносятся; AI sync отдельно использует pinned START template для управляемого каталога, остальные проектные шаблоны не обновляет.
 - В `canon.yaml.files` проекта шаблоны НЕ записываются (после копирования проект владеет файлом сам).
 
 ## Inbox upstream-кандидатов

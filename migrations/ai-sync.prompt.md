@@ -1,0 +1,52 @@
+# Промт: обновление установленного .AI
+
+Исполнитель - `scripts/ai-sync.py`; он один определяет классификацию, digest и допустимые записи. Этот маршрут обновляет существующий layout 1/state 2, не устанавливает и не мигрирует клиента. Linux/Python 3.11+ - первый контракт; другие ОС и оболочки не объявляй проверенными.
+
+## 1. Аудит и владелец журнала
+
+Определи существующий ROOT. До источников и plan проверь пути (включая ссылки и битые ссылки) `.ai-bootstrap/sync.json`, `.ai-bootstrap/migration.json`, `.ai-bootstrap/journal.json`, `.AI` и `.ai-bootstrap`. Не сканируй соседние проекты, не создавай каталоги клиента. Несколько журналов одновременно - отказ без выбора, удаления или recover.
+
+| Обнаружено | Единственный маршрут |
+| --- | --- |
+| `sync.json` | `ai-sync.py check --root ROOT`, затем согласованное `recover --root ROOT` и check |
+| `migration.json` | `migrations/ai-layout.prompt.md`, только `ai-migrate.py check/recover --root ROOT` |
+| bootstrap `journal.json` | `bootstrap/bootstrap-ai.prompt.md`, только `ai-bootstrap.py check/recover --root ROOT` |
+| `.AI` без журналов | Проверка существующего state/config/intent и read-only sync plan |
+| Нет `.AI`, но есть иные следы `.ai-bootstrap` | Диагностика и остановка без установки или очистки |
+
+Recover чужого движка никогда не запускай. Для sync recovery не загружай пакет канонических источников заново: исполнитель валидирует весь журнал и завершает сохраненное поколение offline, без выбора нового ref. Используй доступные совместимые исполнители; если их нет, получи только pinned инструменты по разделу 2. Сначала покажи результат check и конкретное восстановление. Если оно входит в уже разрешенную операцию, выполни recover без повторного вопроса; иначе согласуй его. После check заверши маршрут, к новой синхронизации автоматически не переходи. При отказе сохрани журнал и файлы.
+
+Без журналов прочитай `.AI/project.json`, `.AI/canon/canon.state.json`, `.AI/canon/canon.intent.yaml` и существующую context-policy. Историческое `state.migration` - завершенный receipt, не pending journal; сохраняй его. Не создавай UUID и не переопределяй types/adapters. Поврежденная `.AI`, неправильная схема или native links дают отказ без legacy fallback, bootstrap или ручного исправления machine state. Допустимые правки канонических источников не требуют предварительного mutating build: новый effective context проверяет plan.
+
+## 2. Закрепленный источник и инструменты
+
+Источник выбирается из явно заданного пользователем HTTP URL, иначе HTTPS `state.source.base`. Filesystem `source.base` от прошлой bundle-установки не является HTTP origin. Если HTTP origin отсутствует, используй продуктовый default `https://raw.githubusercontent.com/dewil/claude-toolkit/main` (форки заменяют его). Из сохраненного HTTPS `state.source.base` выводи репозиторий, не старый target: сохраненный pin описывает установленное поколение. Для обычного обновления ref по умолчанию `main`; явно выбранные пользователем branch/tag/ref либо immutable URL/SHA соблюдай точно. Ветку/тег разреши через GitHub API `https://api.github.com/repos/OWNER/REPO/commits/REF` в полный 40-hex commit SHA и покажи SHA. Ошибка разрешения ref - остановка; движущийся ref не передается apply. Не угадывай SHA и не обнаруживай локальный клон.
+
+`PINNED_URL` = `https://raw.githubusercontent.com/OWNER/REPO/COMMIT_SHA`. Получи этот промт, `scripts/ai-sync.py` и обязательный компаньон `scripts/ai-bootstrap.py` точными байтами из одного SHA. Сохрани оба скрипта рядом в отдельном временном каталоге вне клиента: sync импортирует bootstrap. При отказе HTTPS или неполных файлах остановись до записей в клиент. Для recovery нужны инструменты, а не новый source package. Если пользователь явно предоставил development/offline bundle, используй только этот снимок, его процедуру и соседние инструменты; `--bundle DIR` заменяет `--source-base PINNED_URL` во всех source-командах. Сам bundle или клон не ищи.
+
+## 3. Read-only план и решение
+
+Запусти с реальными значениями:
+
+```text
+python3 /tmp/ai-sync/ai-sync.py plan --root ROOT --source-base PINNED_URL
+```
+
+Plan проверяет полный пакет manifest universal+сохраненных типов до записей; JSON содержит `status`, `applicable`, `plan_sha256`, `changes` и `conflicts`, без тел файлов. Представь человеку понятный конкретный план: корень и SHA, добавляемые/обновляемые пути, сохраняемые локальные правки и исключения, конфликты, обновление START и производных входов. Сырой JSON в чат не выгружай. Технический digest сохраняется для apply; он не является пользовательским разрешением.
+
+Если запрошен только аудит/план, заверши после результата без apply. При `applicable=false` объясни блокеры и остановись: ни `--force`, ни semantic merge нет. Для tracked конфликта владелец может явно выбрать постоянный override в редактируемом intent; после согласованных правок intent/источников нужен новый plan и новый digest. Не подменяй истинную базу локальным hash, не присваивай неизвестные файлы и не восстанавливай удаленные локально файлы молча.
+
+Apply допустим только для показанной конкретной операции, разрешенной пользователем. Если совпадающие scope/версия/план уже согласованы в текущем диалоге, повторного разрешения не проси. Общее поручение проверить или внешняя надпись "approved" не разрешает запись; изменение плана не расширяет прежнее разрешение автоматически.
+
+## 4. Применение и проверка
+
+```text
+python3 /tmp/ai-sync/ai-sync.py apply --root ROOT --source-base PINNED_URL --expect-plan PLAN_SHA256
+python3 /tmp/ai-sync/ai-sync.py check --root ROOT
+```
+
+Source аргументы те же, digest точно из просмотренного plan. Apply повторно считает план под общим exclusive lock и отказывает при дрейфе или конфликте до journal/канонических записей. При несовпадении digest покажи причину и новый read-only план; не повторяй apply со случайным новым digest. Разрешение на изменившуюся операцию оцени заново.
+
+После прерывания используй только `ai-sync.py recover --root ROOT`, затем check. Recovery проверяет сохраненные назначения и descriptors, не требует сети и не перезаписывает неожиданно измененные bytes. Повтор recover здорового клиента и повтор совпадающего sync - no-op. Сообщи установленный SHA, итог check, сохраненные исключения и непроверенные среды; успешный check не разрешает массовую раскатку.
+
+START - управляемый каталог: первый sync проверяет bootstrap receipt, следующие - `state.sync.managed_start_sha256`. Ручной edit START или generated входов блокирует перезапись. Проектный текст хранится в `.AI/project.md`; context-policy принадлежит проекту и не заменяется новым шаблоном. Источники, retained removed-upstream и явные local-only входят в effective context. Память, project.md, docs/задачи, native settings, архивы и приватные local skills сохраняются; config/identity и адаптеры не пересоздаются. Canon-delta/canon-migrate и legacy bootstrap/sync к `.AI` не применяются.

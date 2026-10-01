@@ -94,7 +94,7 @@ AGENTS.md (codex/kimi) и CLAUDE.md (claude) генерируются: обяз�
 
 Входы не означают проверенное поведение среды. Для каждого адаптера нужна свежая сессия из корня с проверкой входа, ID, задачи и записи/повторного чтения общей памяти. Нативная глобальная автопамять автоматически не подключается, до отдельной проверки используется явная файловая память. Настройки, разрешения и секреты агентов не копируются. macOS/Windows не проверены; DeepSeek без выбранной оболочки отвергается.
 
-**Общий sync `.AI` пока не реализован.** Старые `/canon`, canon-delta, canon-migrate и sync/bootstrap-промты отказываются при `.AI` или `.ai-bootstrap`; не обходи этот гейт. Legacy 01/02/03 остаются для явно выбранного старого маршрута.
+Установленный `.AI` обновляется общим навыком [canon-sync](skills/canon-sync/SKILL.md) или `/canon`: отдельный `ai-sync.py` готовит read-only план и применяет согласованную версию с проверкой digest. [Эксплуатация и восстановление](docs/ai-sync.md). Legacy canon-delta, canon-migrate и sync/bootstrap-промты сохраняют отказ при `.AI` или `.ai-bootstrap`. Legacy 01/02/03 остаются для явно выбранного старого маршрута.
 
 ## Отдельная миграция legacy в .AI
 
@@ -117,7 +117,7 @@ python3 /tmp/MIGRATION/scripts/ai-migrate.py recover --root ROOT
 
 При `.ai-bootstrap/migration.json` используется только `ai-migrate.py recover`: он завершает записанное поколение без сети и отказывает при неожиданных правках. Это roll-forward, автоматический rollback не обещается. Bootstrap/check/build/recover отказываются при migration journal. Повтор той же завершенной миграции с теми же ID/config/source - no-op; чужое состояние и новая конфигурация не перезаписываются.
 
-Linux/Python 3.11+ - первый контракт. Нативный слот автопамяти, векторный индекс и расписание не меняются; fresh-agent проверки и публикация на main не следуют из локального check. Проверки разработки и восстановления выполняются на временных копиях, исходный клиент не меняется. Общий sync `.AI` по-прежнему отсутствует.
+Linux/Python 3.11+ - первый контракт. Нативный слот автопамяти, векторный индекс и расписание не меняются; fresh-agent проверки и публикация на main не следуют из локального check. Проверки разработки и восстановления выполняются на временных копиях, исходный клиент не меняется. Обновление установленного `.AI` выполняется отдельным [AI sync](docs/ai-sync.md), с сохранением migration receipts.
 
 ## Обновление существующего legacy-проекта (solo)
 
@@ -183,7 +183,7 @@ Linux/Python 3.11+ - первый контракт. Нативный слот а
 - `scripts/` - **две вещи разной природы**: (1) движок канон-синка `build-lock.py` / `canon-delta.py` / `canon-migrate.py` (не распространяется в проекты - это оснастка); (2) канонические скрипты для проектов (`codex-sandbox.py` - запуск codex только в песочнице bwrap, `gitleaks-hook.py` - проверка и установка pre-commit gitleaks, `md-pdf.py`, `session-cost.py`, зеркалирование `telegram-*`/`redmine-*`/`mymeet-*`).
 - `tests/` - stdlib-тесты: движок (crash-матрица и регрессии по adversarial-находкам) и канонические скрипты для проектов.
 - `.github/workflows/` - CI: `canon-tests`, `canon-release`.
-- `templates/` - скелеты с TODO-заглушками, копируются в проект один раз; дальше проект владеет ими сам.
+- `templates/` - начальные скелеты; проект владеет контекстом, памятью и policy. `.AI/START.md` - исключение: управляемый каталог, обновляемый AI sync.
 - `migrations/` - одноразовые промты апгрейда (в т.ч. `sync-from-canon`).
 - `manifest.yaml` - полный список канон-файлов по типам, с однострочным описанием. Единственный реестр: bootstrap и sync тянут списки отсюда.
 - `CLAUDE.md` - агентский контекст для Claude, работающего внутри этого репо (правка канона); импортирует этот README.
@@ -195,7 +195,7 @@ Linux/Python 3.11+ - первый контракт. Нативный слот а
 **Как сделать свой:**
 
 1. Форкни репо под свой аккаунт (`<username>/claude-toolkit` или как хочешь).
-2. Замени `dewil/claude-toolkit` на свой `<username>/<repo>` в: `start.md` (пример `<canon_base>`), `bootstrap/bootstrap-01-memory.prompt.md` (команда запуска), `bootstrap/bootstrap-02-scaffold.prompt.md` (шаблон реестра, поля `repo`/`raw_base`), этом `README.md` (Быстрый старт).
+2. Замени продуктовый HTTP default `dewil/claude-toolkit` в `skills/canon-sync/SKILL.md`, `commands/canon.md`, `migrations/ai-sync.prompt.md` и `docs/ai-sync.md`; также замени `dewil/claude-toolkit` на свой `<username>/<repo>` в: `start.md` (пример `<canon_base>`), `bootstrap/bootstrap-01-memory.prompt.md` (команда запуска), `bootstrap/bootstrap-02-scaffold.prompt.md` (шаблон реестра, поля `repo`/`raw_base`), этом `README.md` (Быстрый старт).
 3. Закоммить и запушь.
 4. В новых проектах используй ссылку на свой `start.md`.
 
