@@ -48,7 +48,7 @@ class AiBootstrapIntegrity(unittest.TestCase):
     def test_required_local_infrastructure_must_exist(self):
         self.command('apply')
         for relative in ('.AI/project.md', '.AI/memory/MEMORY.md',
-                         '.AI/canon/canon.intent.yaml', 'docs/dev/backlog', 'docs/dev/done'):
+                         '.AI/canon/canon.intent.yaml', 'docs/backlog', 'docs/done'):
             with self.subTest(path=relative):
                 path = self.root / relative
                 saved = self.base / 'saved'

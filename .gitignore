@@ -6,7 +6,7 @@ __pycache__/
 
 # Локальные рабочие заметки по разработке канона.
 # Не публикуются в репо (см. rules/docs-maintenance.md).
-docs/dev/
+docs/
 .obsidian/
 
 # release-descriptor canon.lock.json КОММИТИТСЯ в дерево при издании релиза

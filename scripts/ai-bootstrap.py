@@ -365,7 +365,7 @@ def package(args, root):
     # Place rules last, so existing negations do not override them.
     files['.gitignore'] = ignore + IGNORE.encode()
     dirs = {'.AI/' + n for n in ('rules', 'skills', 'roles', 'commands', 'memory')}
-    dirs.update(('docs/dev/backlog', 'docs/dev/done'))
+    dirs.update(('docs/backlog', 'docs/done'))
     for rel in list(files) + list(LINKS) + list(dirs):
         dirs.update(str(p) for p in PurePosixPath(rel).parents if str(p) != '.')
     actions = []
@@ -452,7 +452,7 @@ def assert_layout(root):
     if intent.get('schema_version') != VERSION or intent.get('layout_version') != LAYOUT:
         raise Invalid('Unknown intent/layout version')
     for rel in ('.AI/rules', '.AI/skills', '.AI/roles', '.AI/commands', '.AI/memory',
-                'docs/dev/backlog', 'docs/dev/done'):
+                'docs/backlog', 'docs/done'):
         if descriptor(root, rel) != {'kind': 'dir'}:
             raise Invalid(f'Missing layout directory: {rel}')
 
@@ -522,7 +522,7 @@ def writer(root):
 
 def allowed_action(rel, desc):
     safe_relative(rel)
-    if rel in ('.AI', '.claude', '.agents', 'scripts', 'docs', 'docs/dev', 'docs/dev/backlog', 'docs/dev/done'):
+    if rel in ('.AI', '.claude', '.agents', 'scripts', 'docs', 'docs/backlog', 'docs/done'):
         return desc['kind'] == 'dir'
     if rel in LINKS:
         return desc == {'kind': 'link', 'target': LINKS[rel]}
