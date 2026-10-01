@@ -17,6 +17,7 @@
 
 Где живет авторитетная механика (не пересказывай ее здесь по памяти - читай источник):
 
+- Отдельная миграция legacy `.claude` - `migrations/ai-layout.prompt.md`, исполнитель `scripts/ai-migrate.py`; обычный bootstrap не мигрирует старые проекты.
 - Новый bootstrap/build/check/recover - `scripts/ai-bootstrap.py`, policy и начальные локальные файлы - `templates/ai/`. Новый state только `.AI/canon/canon.state.json`; старые sync/migrate его не применяют.
 - Схема legacy `.claude/canon.yaml` (поля, `file_hashes` как база снимка) - в `bootstrap/bootstrap-02-scaffold.prompt.md`, шаг 4b.
 - Логика синка (трехстороннее сравнение, autodiscovery, upstream-брифы) - в `migrations/sync-from-canon.prompt.md`.

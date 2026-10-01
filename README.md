@@ -96,6 +96,25 @@ AGENTS.md (codex/kimi) и CLAUDE.md (claude) генерируются: обяз�
 
 **Общий sync `.AI` пока не реализован.** Старые `/canon`, canon-delta, canon-migrate и sync/bootstrap-промты отказываются при `.AI` или `.ai-bootstrap`; не обходи этот гейт. Legacy 01/02/03 остаются для явно выбранного старого маршрута.
 
+## Отдельная миграция legacy в .AI
+
+По явному запросу на переход используй [ai-layout](migrations/ai-layout.prompt.md): audit -> read-only plan -> согласованное apply. Bootstrap нового проекта поверх `.claude` не запускается. Для новой миграции адаптер поддерживает только старый монолитный `.claude/canon.yaml` плюс `.claude/` и `CLAUDE.md`; split registry, существующий `.agents`, чужая `.AI` и неизвестный state дают отказ. Сначала проверяются журналы и завершенная миграция: recovery и успешный check завершенного поколения используют сохраненные ID/config, без нового UUID или legacy prerequisites.
+
+Скачай `scripts/ai-migrate.py` и его компаньон `scripts/ai-bootstrap.py` из одного pinned HTTPS revision в соседние файлы временного каталога вне клиента. Для явно предоставленного офлайн bundle оба скрипта берутся из того же снимка. Типы, адаптеры и UUID фиксируются для plan/apply:
+
+```text
+python3 /tmp/MIGRATION/scripts/ai-migrate.py plan --root ROOT --source-base PINNED_HTTPS_URL --project-id UUID --types coding,wiki --adapters claude,codex,kimi
+python3 /tmp/MIGRATION/scripts/ai-migrate.py apply --root ROOT --source-base PINNED_HTTPS_URL --project-id UUID --types coding,wiki --adapters claude,codex,kimi
+python3 /tmp/MIGRATION/scripts/ai-migrate.py check --root ROOT
+python3 /tmp/MIGRATION/scripts/ai-migrate.py recover --root ROOT
+```
+
+`--bundle DIR` заменяет `--source-base` только для явного bundle; автоматического поиска клона нет. Plan не пишет в клиент, CLI возвращает 0 при успехе и 2 при отказе. Память и неизвестные локальные файлы сохраняются; локальные правки и exclusions не обновляются поверх каноном. Истинные upstream-базы хранятся отдельно от retained/local-only. Старые `.claude`, root-входы и `docs/dev` сохраняются в `.ai-bootstrap/legacy/`, backup остается после успеха. `docs/dev` переносится в `docs` только без коллизий. Приватные контекст и память остаются локальными источниками, generated входы их не встраивают.
+
+При `.ai-bootstrap/migration.json` используется только `ai-migrate.py recover`: он завершает записанное поколение без сети и отказывает при неожиданных правках. Это roll-forward, автоматический rollback не обещается. Bootstrap/check/build/recover отказываются при migration journal. Повтор той же завершенной миграции с теми же ID/config/source - no-op; чужое состояние и новая конфигурация не перезаписываются.
+
+Linux/Python 3.11+ - первый контракт. Нативный слот автопамяти, векторный индекс и расписание не меняются; fresh-agent проверки и публикация на main не следуют из локального check. Проверки разработки и восстановления выполняются на временных копиях, исходный клиент не меняется. Общий sync `.AI` по-прежнему отсутствует.
+
 ## Обновление существующего legacy-проекта (solo)
 
 Если проект уже бутстрапленный (в `.claude/` есть канон-реестр), открой в его корне Claude Code и запусти:
