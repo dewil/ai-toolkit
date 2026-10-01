@@ -65,6 +65,29 @@ class AiBootstrapIntegrity(unittest.TestCase):
                 self.assertEqual(snapshot(self.root), before)
         self.root = original_root
 
+    def test_corrupt_git_head_cannot_bypass_root_or_parent_tracked_private_file(self):
+        for location in ('root', 'parent'):
+            with self.subTest(repository=location):
+                repository = self.base / ('corrupt-head-' + location)
+                repository.mkdir()
+                self.root = repository if location == 'root' else repository / 'nested-client'
+                self.root.mkdir(exist_ok=True)
+                subprocess.run(['git', 'init', '-q', str(repository)], check=True)
+                private = self.root / '.AI/project.md'
+                self.put(private, 'Tracked private project with corrupt repository HEAD\n')
+                tracked_path = private.relative_to(repository).as_posix()
+                subprocess.run(['git', '-C', str(repository), 'add', '-f', tracked_path], check=True)
+                tracked = subprocess.run(['git', '-C', str(repository), 'ls-files', '--', tracked_path],
+                                         capture_output=True, text=True, check=True)
+                self.assertEqual(tracked.stdout.strip(), tracked_path)
+                private.unlink()
+                private.parent.rmdir()
+                (repository / '.git/HEAD').write_bytes(b'malformed HEAD metadata\n')
+                before = snapshot(repository)
+                result = self.command('apply', expected=2)
+                self.assertTrue(result.stderr.strip(), 'Malformed Git HEAD needs a diagnostic')
+                self.assertEqual(snapshot(repository), before)
+
     def test_removed_ignore_protection_is_not_healthy(self):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         self.command('apply')
