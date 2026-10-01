@@ -88,6 +88,33 @@ class AiMigrationIntegrity(unittest.TestCase):
         state_step['after']['sha256'] = hashlib.sha256(data).hexdigest()
         self.assert_recovery_refuses_unchanged(journal)
 
+    def test_validate_journal_reports_invalid_for_incomplete_records(self):
+        spec = importlib.util.spec_from_file_location('migration_validation_fixture', SCRIPT)
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        valid = self.valid_journal()
+        cases = {}
+        unknown_link = copy.deepcopy(valid)
+        unknown_link['steps'].insert(-1, {'kind': 'link', 'path': 'docs/notes',
+                                         'before': None, 'after': {'kind': 'link'}})
+        cases['unknown-link-without-target'] = unknown_link
+        final_directory = copy.deepcopy(valid)
+        final_directory['steps'][-1] = {'kind': 'dir', 'path': '.AI/canon/canon.state.json',
+                                        'before': None, 'after': {'kind': 'dir'}}
+        cases['final-state-is-directory'] = final_directory
+        missing_source = copy.deepcopy(valid)
+        target = next(iter(valid['state']['source_files'].values()))['path']
+        missing_source['steps'] = [s for s in missing_source['steps'] if s['path'] != target]
+        cases['missing-selected-source-payload'] = missing_source
+        for name, journal in cases.items():
+            with self.subTest(case=name):
+                # JSON roundtrip excludes Python-only fixture values.
+                journal = json.loads(json.dumps(journal))
+                before = snapshot(self.root)
+                with self.assertRaises(migration.Invalid):
+                    migration.validate_journal(journal)
+                self.assertEqual(snapshot(self.root), before)
+
     def test_journal_missing_destination_parent_is_rejected_before_replay(self):
         journal = self.valid_journal()
         original_count = len(journal['steps'])
