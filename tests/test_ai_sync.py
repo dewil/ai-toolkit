@@ -384,6 +384,29 @@ class AiSyncAcceptance(SyncFixture):
         self.assertLessEqual(len(agents), json.loads(policy_bytes)['max_bytes'])
         self.cli('check')
 
+    def test_08_completed_migration_receipt_and_exact_archive_survive_sync(self):
+        import test_ai_migrate as migration
+        fixture = migration.AiMigrationContract()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.command('apply')
+        self.root, self.bundle, self.sources = fixture.root, fixture.bundle, fixture.sources
+        self.state_path = self.root / '.AI/canon/canon.state.json'
+        self.intent_path = self.root / '.AI/canon/canon.intent.yaml'
+        migrated_state = self.read_json(self.state_path)
+        self.assertIn('migration', migrated_state, 'black-box migration must create historical receipt')
+        receipt = migrated_state['migration']
+        archive = self.root / '.ai-bootstrap/legacy'
+        archived = tree(archive)
+        self.assertFalse((self.root / '.ai-bootstrap/migration.json').exists())
+        self.upstream('rules/wiki.md', b'# Wiki\nUPDATE_MIGRATED_CLIENT\n')
+        self.apply()
+        self.assertEqual(self.read_json(self.state_path)['migration'], receipt)
+        self.assertEqual(tree(archive), archived)
+        self.assertEqual(self.destination('rules/coding.md').read_bytes(), fixture.legacy_rule)
+        self.assertEqual((self.root / '.AI/memory/MEMORY.md').read_bytes(), fixture.legacy_memory)
+        self.cli('check')
+
     def test_09_start_catalog_retains_removed_and_rejects_manual_entries(self):
         self.remove_upstream('commands/review.md')
         self.apply()
