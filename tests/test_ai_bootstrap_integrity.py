@@ -92,17 +92,19 @@ class AiBootstrapIntegrity(unittest.TestCase):
     def test_real_parent_git_metadata_is_checked_through_intermediate_symlink(self):
         repository = self.base / 'physical-repository'
         repository.mkdir()
-        physical_root = repository / 'nested-client'
+        physical_container = repository / 'container'
+        physical_container.mkdir()
+        physical_root = physical_container / 'nested-client'
         physical_root.mkdir()
         subprocess.run(['git', 'init', '-q', str(repository)], check=True)
         private = physical_root / '.AI/project.md'
         self.put(private, 'Tracked private project behind an intermediate symlink\n')
-        subprocess.run(['git', '-C', str(repository), 'add', '-f', 'nested-client/.AI/project.md'], check=True)
+        subprocess.run(['git', '-C', str(repository), 'add', '-f', 'container/nested-client/.AI/project.md'], check=True)
         private.unlink()
         private.parent.rmdir()
         (repository / '.git/HEAD').write_bytes(b'malformed HEAD metadata\n')
         alias = self.base / 'repository-alias'
-        alias.symlink_to(repository, target_is_directory=True)
+        alias.symlink_to(physical_container, target_is_directory=True)
         self.root = alias / 'nested-client'
         self.assertFalse(self.root.is_symlink(), 'Only the intermediate parent is a symlink')
         before = snapshot(repository)
