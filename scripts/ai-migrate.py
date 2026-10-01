@@ -92,6 +92,7 @@ def payload(step):
 
 
 def migration_plan(args, root):
+    ab.refuse_sync(root)
     ab.private_tracked(root)
     if ab.descriptor(root, JOURNAL) is not None or ab.descriptor(root, ab.JOURNAL) is not None:
         raise Invalid('Unfinished transaction: use the matching recover procedure')
@@ -196,6 +197,7 @@ def migration_plan(args, root):
     outputs, receipt = ab.context(config, sources, files['.AI/START.md'][0], json.loads(files[ab.POLICY][0]))
     for p, data in outputs.items():
         files[p] = (data, 0o644)
+    fresh_state['bootstrap_files']['.AI/START.md'] = ab.sha(files['.AI/START.md'][0])
     fresh_state['context'] = receipt
     fresh_state['migration'] = {'schema_version': 1, 'backup': BACKUP, 'retained': sorted(set(retained)), 'archives': archive_inputs}
     before_ignore = ab.descriptor(root, '.gitignore')
@@ -346,6 +348,7 @@ def validate_journal(journal):
 
 
 def preflight(root, journal):
+    ab.refuse_sync(root)
     validate_journal(journal)
     ab.private_tracked(root)
     pending = set()
@@ -433,6 +436,7 @@ def install_step(root, step):
 
 
 def finish(root, journal):
+    ab.refuse_sync(root)
     preflight(root, journal)
     for step in journal['steps']:
         install_step(root, step)
@@ -449,6 +453,7 @@ def finish(root, journal):
 
 
 def check_migration(root):
+    ab.refuse_sync(root)
     state = ab.check(root)
     migration = state.get('migration')
     if not isinstance(migration, dict) or migration.get('schema_version') != 1 or migration.get('backup') != BACKUP:
@@ -475,6 +480,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     root = args.root.absolute()
     try:
+        ab.refuse_sync(root)
         if args.root.is_symlink():
             raise Invalid('Use the actual client root')
         if args.command in ('plan', 'apply'):

@@ -330,6 +330,7 @@ def private_ignored(root):
 
 
 def package(args, root):
+    refuse_sync(root)
     try:
         project_id = str(uuid.UUID(args.project_id))
     except (ValueError, TypeError, AttributeError) as error:
@@ -499,7 +500,13 @@ def assert_layout(root):
             raise Invalid(f'Missing layout directory: {rel}')
 
 
+def refuse_sync(root):
+    if descriptor(root, TXN + '/sync.json') is not None:
+        raise Invalid('Unfinished sync: use ai-sync.py recover')
+
+
 def refuse_migration(root):
+    refuse_sync(root)
     if descriptor(root, MIGRATION_JOURNAL) is not None:
         raise Invalid('Unfinished migration: use ai-migrate.py recover')
 
@@ -640,6 +647,7 @@ def validate_future(root, journal):
 
 
 def finish(root, journal):
+    refuse_sync(root)
     validate_future(root, journal)
     # Preflight all changes, so one conflict cannot cause additional writes.
     for action in journal['actions']:
@@ -672,6 +680,7 @@ def finish(root, journal):
 
 
 def transact(root, actions):
+    refuse_sync(root)
     if not actions:
         return
     journal = {'schema_version': VERSION, 'layout_version': LAYOUT, 'actions': actions}
