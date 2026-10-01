@@ -29,6 +29,7 @@ INTENT = '.AI/canon/canon.intent.yaml'
 POLICY = '.AI/canon/context-policy.json'
 TXN = '.ai-bootstrap'
 JOURNAL = TXN + '/journal.json'
+MIGRATION_JOURNAL = TXN + '/migration.json'
 TYPES = {'coding', 'wiki', 'management', 'education', 'documentation'}
 ADAPTERS = {'claude', 'codex', 'kimi'}
 TEMPLATES = ('START.md', 'project.md', 'MEMORY.md', 'context-policy.json')
@@ -412,6 +413,12 @@ def validate_state(state, config=None):
             raise Invalid('Project identity differs from state')
     except (KeyError, ValueError, TypeError, AttributeError) as error:
         raise Invalid('Invalid project identity') from error
+    local_files = state.get('local_files', [])
+    if not isinstance(local_files, list) or any(not isinstance(p, str) for p in local_files) or set(local_files) & set(files):
+        raise Invalid('Invalid local-only files')
+    validate_paths(list(files) + local_files)
+    for path in local_files:
+        destination(path)
     ctx = state.get('context')
     expected = ({'AGENTS.md'} if set(config['adapters']) & {'codex', 'kimi'} else set())
     if 'claude' in config['adapters']:
@@ -430,6 +437,7 @@ def load_state(root):
 
 def current_context(root, state):
     sources = {p: read_file(root, data['path']) for p, data in state['source_files'].items()}
+    sources.update({p: read_file(root, destination(p)) for p in state.get('local_files', [])})
     return context(json_file(root, PROJECT), sources, read_file(root, '.AI/START.md'), json_file(root, POLICY))
 
 
@@ -457,7 +465,13 @@ def assert_layout(root):
             raise Invalid(f'Missing layout directory: {rel}')
 
 
+def refuse_migration(root):
+    if descriptor(root, MIGRATION_JOURNAL) is not None:
+        raise Invalid('Unfinished migration: use ai-migrate.py recover')
+
+
 def check(root):
+    refuse_migration(root)
     if (root / JOURNAL).exists() or (root / JOURNAL).is_symlink():
         raise Invalid('Unfinished transaction: run recover')
     state = load_state(root)
@@ -635,6 +649,7 @@ def transact(root, actions):
 
 
 def build(root):
+    refuse_migration(root)
     # Preflight before acquiring a writer, to preserve invalid trees unchanged.
     if descriptor(root, JOURNAL) is not None:
         raise Invalid('Unfinished transaction: run recover')
@@ -676,6 +691,7 @@ def main(argv=None):
         parser.error('Use the actual client root, not a symlink')
     root = args.root.absolute()
     try:
+        refuse_migration(root)
         if args.command in ('plan', 'apply'):
             actions, state = package(args, root)
             if args.command == 'plan':
