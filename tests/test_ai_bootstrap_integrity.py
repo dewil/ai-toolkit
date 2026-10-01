@@ -17,6 +17,54 @@ class AiBootstrapIntegrity(unittest.TestCase):
     policy = AiBootstrapContract.policy
     command = AiBootstrapContract.command
 
+    def test_corrupt_git_index_cannot_bypass_tracked_private_file_refusal(self):
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        private = self.root / '.AI/project.md'
+        self.put(private, 'Private project already in Git index\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', '-f', '.AI/project.md'], check=True)
+        tracked = subprocess.run(['git', '-C', str(self.root), 'ls-files', '--', '.AI/project.md'],
+                                 capture_output=True, text=True, check=True)
+        self.assertEqual(tracked.stdout.strip(), '.AI/project.md')
+        private.unlink()
+        private.parent.rmdir()
+        (self.root / '.git/index').write_bytes(b'corrupt index must fail closed\n')
+        before = snapshot(self.root)
+        result = subprocess.run([sys.executable, str(SCRIPT), 'apply', '--root', str(self.root),
+                                 '--bundle', str(self.bundle), '--project-id',
+                                 '22aaab19-84df-42b0-9f1a-51aa4fbb3425', '--types', 'coding,wiki'],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertTrue(result.stderr.strip(), 'Git failure must have a diagnostic')
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_corrupt_git_index_makes_installed_project_check_fail_without_writes(self):
+        self.command('apply')
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        (self.root / '.git/index').write_bytes(b'corrupt installed project index\n')
+        before = snapshot(self.root)
+        result = subprocess.run([sys.executable, str(SCRIPT), 'check', '--root', str(self.root)],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(result.stderr.strip(), 'Git failure must have a diagnostic')
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_invalid_git_metadata_is_not_treated_as_a_non_git_project(self):
+        original_root = self.root
+        for corruption in ('invalid-gitdir', 'invalid-config'):
+            with self.subTest(corruption=corruption):
+                self.root = self.base / corruption
+                self.root.mkdir()
+                if corruption == 'invalid-gitdir':
+                    self.put(self.root / '.git', 'gitdir: ' + str(self.base / 'missing-git-dir') + '\n')
+                else:
+                    subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+                    (self.root / '.git/config').write_text('[unterminated section\n')
+                before = snapshot(self.root)
+                result = self.command('apply', expected=2)
+                self.assertTrue(result.stderr.strip(), 'Git failure must have a diagnostic')
+                self.assertEqual(snapshot(self.root), before)
+        self.root = original_root
+
     def test_removed_ignore_protection_is_not_healthy(self):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         self.command('apply')
