@@ -270,6 +270,61 @@ runpy.run_path(script, run_name='__main__')
         self.assertEqual(snapshot(self.root), before)
         self.command('check', expected=2)
 
+    def test_06_unsafe_state_destination_refuses_without_outside_write(self):
+        self.command('apply')
+        path = self.root / '.AI/canon/canon.state.json'
+        state = json.loads(path.read_text())
+        first = next(iter(state['source_files']))
+        state['source_files'][first]['path'] = '../outside-victim.md'
+        victim = self.base / 'outside-victim.md'
+        victim.write_text('OUTSIDE_USER_FILE')
+        path.write_text(json.dumps(state))
+        before = snapshot(self.base)
+        self.command('build', expected=2)
+        self.assertEqual(snapshot(self.base), before)
+        self.command('check', expected=2)
+
+    def test_06_concurrent_build_cannot_start_second_transaction(self):
+        self.command('apply')
+        path = self.root / '.AI' / MANDATORY[0]
+        path.write_text(path.read_text() + '\nCONCURRENT_GENERATION\n')
+        wrapper = '''import os, pathlib, runpy, sys
+script, root = sys.argv[1:3]
+real_replace = os.replace
+blocked = False
+def wait_once(src, dst, *args, **kwargs):
+    global blocked
+    target = pathlib.Path(dst).absolute()
+    if not blocked and target.parent == pathlib.Path(root).absolute() and target.name in ('AGENTS.md', 'CLAUDE.md'):
+        blocked = True
+        print('LOCK_HELD', flush=True)
+        sys.stdin.readline()
+    return real_replace(src, dst, *args, **kwargs)
+os.replace = wait_once
+sys.argv = [script, 'build', '--root', root]
+runpy.run_path(script, run_name='__main__')
+'''
+        first = subprocess.Popen([sys.executable, '-c', wrapper, str(SCRIPT), str(self.root)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True)
+        try:
+            import select
+            readable, _, _ = select.select([first.stdout], [], [], 10)
+            self.assertTrue(readable, 'first writer did not reach replacement')
+            self.assertEqual(first.stdout.readline().strip(), 'LOCK_HELD')
+            before = snapshot(self.root)
+            second = subprocess.run([sys.executable, str(SCRIPT), 'build', '--root', str(self.root)],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(second.returncode, 2, second.stdout + second.stderr)
+            self.assertEqual(snapshot(self.root), before)
+            stdout, stderr = first.communicate('continue\n', timeout=10)
+            self.assertEqual(first.returncode, 0, stdout + stderr)
+        finally:
+            if first.poll() is None:
+                first.kill()
+                first.communicate()
+        self.command('check')
+
     def test_07_gitignore_preserves_lines_and_ignores_private_files(self):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         self.put(self.root / '.gitignore', '# user ignore\nlocal-user-data/\n')
