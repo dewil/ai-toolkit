@@ -1,5 +1,8 @@
 """Independent integrity regressions for FR-AIB-03/06/07."""
+import base64
+import hashlib
 import json
+import stat
 import re
 import subprocess
 import sys
@@ -92,6 +95,60 @@ class AiBootstrapIntegrity(unittest.TestCase):
                 self.command(verb, expected=2)
                 self.assertEqual(snapshot(self.root), before)
                 self.assertFalse((self.root / '.ai-bootstrap').exists())
+
+    def test_malformed_recovery_metadata_refused_before_any_write(self):
+        self.command('apply')
+        state_path = self.root / '.AI/canon/canon.state.json'
+        original_state = state_path.read_bytes()
+        project_path = self.root / '.AI/project.json'
+        original_project = project_path.read_bytes()
+        output_path = self.root / 'AGENTS.md'
+        original_output = output_path.read_bytes()
+        journal_path = self.root / '.ai-bootstrap/journal.json'
+
+        def action(path, data):
+            existing = self.root / path
+            return {'path': path,
+                    'before': {'kind': 'file', 'sha256': hashlib.sha256(existing.read_bytes()).hexdigest(),
+                               'mode': stat.S_IMODE(existing.stat().st_mode)},
+                    'after': {'kind': 'file', 'sha256': hashlib.sha256(data).hexdigest(), 'mode': 0o644},
+                    'data': base64.b64encode(data).decode()}
+
+        for corruption in ('future-context', 'future-source-hash', 'current-project-version'):
+            with self.subTest(corruption=corruption):
+                state_path.write_bytes(original_state)
+                project_path.write_bytes(original_project)
+                output_path.write_bytes(original_output)
+                future = json.loads(original_state)
+                replacement = b'planned replacement must not be written\n'
+                future['context']['outputs']['AGENTS.md'] = hashlib.sha256(replacement).hexdigest()
+                if corruption == 'future-context':
+                    future['context'] = {}
+                elif corruption == 'future-source-hash':
+                    next(iter(future['source_files'].values()))['blob_sha'] = 'not-a-blob'
+                else:
+                    project = json.loads(original_project)
+                    project['schema_version'] = 999
+                    project_path.write_text(json.dumps(project))
+                journal = {'schema_version': 2, 'layout_version': 1, 'actions': [
+                    action('AGENTS.md', replacement),
+                    action('.AI/canon/canon.state.json', json.dumps(future).encode())]}
+                journal_path.write_text(json.dumps(journal))
+                before = snapshot(self.root)
+                self.command('recover', expected=2)
+                self.assertEqual(snapshot(self.root), before,
+                                 'Malformed metadata must be rejected before output/state replacements')
+
+    def test_unknown_context_policy_version_rejected_before_install(self):
+        policy = self.bundle / 'templates/ai/context-policy.json'
+        data = json.loads(policy.read_text())
+        data['schema_version'] = 999
+        policy.write_text(json.dumps(data))
+        for command in ('plan', 'apply'):
+            with self.subTest(command=command):
+                before = snapshot(self.root)
+                self.command(command, expected=2)
+                self.assertEqual(snapshot(self.root), before)
 
     def test_real_bundle_start_links_resolve(self):
         repository = SCRIPT.parent.parent
