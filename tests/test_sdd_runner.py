@@ -110,6 +110,37 @@ print('CHILD ' + json.dumps({'name': os.path.basename(__file__), 'pid': os.getpi
                 finally:
                     link.unlink()
 
+    def test_all_matching_paths_are_preflighted_before_any_child_starts(self):
+        log = self.tests.parent / 'child-execution.log'
+        self.put('test_000_valid.py',
+                 'from pathlib import Path\n'
+                 + 'Path(' + repr(str(log)) + ').write_text("child ran")\n'
+                 + 'print("EARLY_CHILD_EXECUTED", flush=True)\n')
+        external = self.root / 'external-late-test.py'
+        external.write_text('print("LATE_LINK_EXECUTED")\n')
+        invalid = self.tests / 'test_zzz_invalid.py'
+        for kind in ('symlink', 'dangling-symlink', 'symlink-directory', 'fifo'):
+            with self.subTest(kind=kind):
+                if kind == 'symlink':
+                    invalid.symlink_to(external)
+                elif kind == 'dangling-symlink':
+                    invalid.symlink_to(self.root / 'missing-target.py')
+                elif kind == 'symlink-directory':
+                    invalid.symlink_to(self.cwd, target_is_directory=True)
+                else:
+                    os.mkfifo(invalid)
+                try:
+                    result = self.invoke('--tests-dir', self.tests)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertFalse(log.exists(), 'No child may run before complete preflight')
+                    self.assertNotIn('EARLY_CHILD_EXECUTED', result.stdout + result.stderr)
+                    self.assertNotIn('LATE_LINK_EXECUTED', result.stdout + result.stderr)
+                    self.assertIn(invalid.name, result.stdout + result.stderr)
+                finally:
+                    invalid.unlink()
+                    if log.exists():
+                        log.unlink()
+
     def test_default_directory_is_relative_to_runner_repository_not_callers_cwd(self):
         repository = self.root / 'relocated repository'
         (repository / 'scripts').mkdir(parents=True)
