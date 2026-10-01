@@ -140,6 +140,28 @@ class AiBootstrapIntegrity(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertTrue((self.root / '.AI/project.md').is_file())
 
+    def test_missing_git_with_explicit_external_git_environment_refuses_install(self):
+        empty_bin = self.base / 'empty-environment-path'
+        empty_bin.mkdir()
+        external = self.base / 'external-git-context'
+        external.mkdir()
+        for variable in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'):
+            with self.subTest(variable=variable):
+                self.root = self.base / ('plain-' + variable.lower())
+                self.root.mkdir()
+                environment = dict(os.environ, PATH=str(empty_bin))
+                for name in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'):
+                    environment.pop(name, None)
+                environment[variable] = str(external / variable.lower())
+                before = snapshot(self.base)
+                result = subprocess.run([sys.executable, str(SCRIPT), 'apply', '--root', str(self.root),
+                                         '--bundle', str(self.bundle), '--project-id',
+                                         '22aaab19-84df-42b0-9f1a-51aa4fbb3425', '--types', 'coding,wiki'],
+                                        capture_output=True, text=True, env=environment)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertTrue(result.stderr.strip())
+                self.assertEqual(snapshot(self.base), before)
+
     def test_removed_ignore_protection_is_not_healthy(self):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         self.command('apply')
