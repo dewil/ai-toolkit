@@ -1,5 +1,7 @@
 # Промт: bootstrap шаг 01 - настроить локальную автопамять
 
+**Ранний гейт, до любых записей:** если в корне проекта существует `.AI` или `.ai-bootstrap` (включая ссылку), останови этот legacy-промт. Используй `scripts/ai-bootstrap.py check --root ROOT`, при незавершенной операции - `recover --root ROOT`. Не создавай память, каталоги или настройки legacy. Для нового проекта основной маршрут - соседний `bootstrap-ai.prompt.md`; этот промт оставлен для явно выбранного legacy-маршрута.
+
 Этот файл - шаг 01 в bootstrap-цепочке claude-toolkit. Обычно запускается через `start.md` (точка входа репо), но может быть вызван и напрямую:
 
 - `выполни инструкции из https://raw.githubusercontent.com/dewil/claude-toolkit/main/bootstrap/bootstrap-01-memory.prompt.md`

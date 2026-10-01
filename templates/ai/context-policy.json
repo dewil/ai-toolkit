@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "mandatory": ["rules/secrets-handling.md", "rules/untrusted-content.md", "rules/memory-persistence.md", "rules/agent-portability.md"],
+  "max_bytes": 30000
+}

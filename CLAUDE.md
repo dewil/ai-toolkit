@@ -1,6 +1,6 @@
 # claude-toolkit
 
-Канон правил, агентов, скиллов и bootstrap-промтов для проектов с Claude Code. Этот файл - **агентский контекст для Claude, работающего ВНУТРИ этого репозитория** (правка канона, добавление новых rules/agents/skills, рефакторинг bootstrap-промтов). Человеческое описание проекта и архитектуры - в `README.md` (импортирован ниже, поэтому весь контекст - у тебя на руках).
+Канон правил, агентов, скиллов и bootstrap-промтов для проектов с Claude Code и переносимым источником `.AI`. Этот файл - **агентский контекст для Claude, работающего ВНУТРИ этого репозитория** (правка канона, добавление новых rules/agents/skills, рефакторинг bootstrap-промтов). Человеческое описание проекта и архитектуры - в `README.md` (импортирован ниже, поэтому весь контекст - у тебя на руках).
 
 @./README.md
 
@@ -9,15 +9,16 @@
 Верхнеуровневая раскладка (пофайловый реестр с описаниями - в `manifest.yaml`, не дублируется здесь):
 
 - `start.md` - точка входа (тонкий роутер: новый проект / синк / посмотреть).
-- `bootstrap/` - цепочка настройки проекта с нуля (`01-memory` -> `02-scaffold` -> `03-<тип>`).
-- `rules/`, `agents/`, `skills/`, `commands/`, `scripts/` - **канон-файлы** (источник истины, проект отслеживает их в `canon.yaml.files`, sync поддерживает актуальными).
+- `bootstrap/` - новый маршрут `bootstrap-ai.prompt.md` для `.AI`; цепочка `01-memory` -> `02-scaffold` -> `03-<тип>` сохранена для legacy.
+- `rules/`, `agents/`, `skills/`, `commands/`, `scripts/` - **канон-файлы** (источник истины, legacy-проект отслеживает их в `canon.yaml.files`; новый bootstrap - в `.AI/canon/canon.state.json`).
 - `templates/` - **шаблоны** (скелеты с TODO; проект копирует один раз и владеет сам, sync не контролирует). Семантика отличается от канон-файлов - см. ниже.
 - `migrations/` - одноразовые промты для апгрейда существующих проектов.
 - `manifest.yaml` - полный список канон-файлов по типам с однострочным описанием каждого. **Единственный реестр списков.**
 
 Где живет авторитетная механика (не пересказывай ее здесь по памяти - читай источник):
 
-- Схема `.claude/canon.yaml` (поля, `file_hashes` как база снимка) - в `bootstrap/bootstrap-02-scaffold.prompt.md`, шаг 4b.
+- Новый bootstrap/build/check/recover - `scripts/ai-bootstrap.py`, policy и начальные локальные файлы - `templates/ai/`. Новый state только `.AI/canon/canon.state.json`; старые sync/migrate его не применяют.
+- Схема legacy `.claude/canon.yaml` (поля, `file_hashes` как база снимка) - в `bootstrap/bootstrap-02-scaffold.prompt.md`, шаг 4b.
 - Логика синка (трехстороннее сравнение, autodiscovery, upstream-брифы) - в `migrations/sync-from-canon.prompt.md`.
 - Концептуальное описание всего перечисленного человеческим языком - в `README.md` (импортирован выше).
 
@@ -25,7 +26,7 @@
 
 Разница определяет, регистрировать ли файл и синкать ли его:
 
-- **Канон-файлы** (`rules/`, `agents/`, `skills/`, `commands/`, `scripts/`) - источник истины. Проект отслеживает их в `canon.yaml.files`, sync поддерживает в актуальном состоянии. У `scripts/` маппинг тривиальный: путь в каноне = путь в проекте (`scripts/X.py` -> `scripts/X.py`).
+- **Канон-файлы** (`rules/`, `agents/`, `skills/`, `commands/`, `scripts/`) - источник истины. Legacy-проект отслеживает их в `canon.yaml.files`, sync поддерживает в актуальном состоянии. Новый bootstrap фиксирует их в `.AI/canon/canon.state.json`; общий sync нового формата будет отдельной фичей. У `scripts/` маппинг тривиальный: путь в каноне = путь в проекте (`scripts/X.py` -> `scripts/X.py`).
 - **Шаблоны** (`templates/`) - скелеты с TODO-заглушками. Bootstrap копирует их один раз; дальше проект владеет файлом сам, заполняет под себя. В `canon.yaml.files` НЕ заносятся, sync их не контролирует, `manifest.yaml` про них не знает. Это намеренно: после копирования файл разойдется с шаблоном, и пытаться его "синкать" бессмысленно. Пример - `templates/README.md` (человеческий манифест проекта) и `templates/project-structure.md` (карта папок).
 
 ## Принципы (применяются в каждом промте этого репо)
@@ -107,5 +108,6 @@
 @./rules/secrets-handling.md
 @./rules/untrusted-content.md
 @./rules/memory-persistence.md
+@./rules/agent-portability.md
 @./rules/scheduled-automation.md
 @./rules/silent-failure.md
