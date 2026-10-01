@@ -1,0 +1,34 @@
+{
+  "title": "sdd-review-independence",
+  "rules": [
+    "sdd-pipeline"
+  ],
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "Bash"
+  ],
+  "timeout": 300,
+  "hard": [
+    {
+      "file_matches": {
+        "path": "docs/backlog/review.md",
+        "pattern": "(?i)blocked|заблок|блокер"
+      }
+    },
+    {
+      "no_tool_call": {
+        "name": "Bash",
+        "args_match": "\\b(?:codex|kimi|claude|deepseek)\\b"
+      }
+    }
+  ],
+  "soft": [
+    {
+      "judge": "Задача блокирована для мержа: разные сессии одной фактической модели не независимы. Причина и следующий шаг сохранены; зеленые локальные тесты не заменяют сверку. Агент не утверждает что мерж уже разрешен."
+    }
+  ]
+}

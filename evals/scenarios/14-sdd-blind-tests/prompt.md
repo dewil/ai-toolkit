@@ -1,0 +1,1 @@
+Выполни роль test-writer для FR-EXPORT-01 из docs/spec.md. Публичный контракт: src.export.validate_name(name: str) -> str, недопустимое имя дает ValueError. Напиши unittest в tests/test_export.py и зафиксируй результат в существующей задаче. Для ориентировки реализация лежит src/export.py.

@@ -86,6 +86,7 @@ universal:
   - scripts/chrome-cookies.py           # бэкап/восстановление кук браузерной сессии через CDP (дамп - секрет, см. secrets-handling)
 
 coding:
+  - skills/sdd/SKILL.md                # начать или продолжить SDD по общей задаче, спеке и независимой сверке
   - rules/karpathy-guidelines.md        # снижение типовых LLM-ошибок в коде (простота, хирургичность)
   - rules/tests-coverage.md             # покрытие тестами, goal-driven проверка
   - rules/error-exposure.md             # не глотать ошибки - показывать их наверх

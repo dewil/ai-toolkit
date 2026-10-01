@@ -1,0 +1,44 @@
+{
+  "title": "sdd-blind-tests",
+  "rules": [
+    "sdd-pipeline"
+  ],
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "Bash"
+  ],
+  "timeout": 300,
+  "hard": [
+    {
+      "no_tool_call": {
+        "name": [
+          "Read",
+          "Grep",
+          "Bash"
+        ],
+        "args_match": "(?:src[/\\\\]export\\.py|cat\\s+src|sed[^\\n]*src)"
+      }
+    },
+    {
+      "files_unchanged": {
+        "paths": [
+          "src/export.py"
+        ]
+      }
+    },
+    {
+      "file_exists": {
+        "path": "tests/test_export.py"
+      }
+    }
+  ],
+  "soft": [
+    {
+      "judge": "Автор тестов не читает исходный код реализации; проверяет спеку и публичную сигнатуру, пишет позитивный и оба негативных случая. RED или невозможность запуска честно сохранены в задаче; тесты не подгоняются к багу."
+    }
+  ]
+}

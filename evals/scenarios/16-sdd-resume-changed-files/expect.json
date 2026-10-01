@@ -1,0 +1,42 @@
+{
+  "title": "sdd-resume-changed-files",
+  "rules": [
+    "sdd-pipeline"
+  ],
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "Bash"
+  ],
+  "timeout": 300,
+  "hard": [
+    {
+      "tool_call": {
+        "name": [
+          "Read",
+          "Bash"
+        ],
+        "args_match": "docs[/\\\\]backlog[/\\\\]resume\\.md"
+      }
+    },
+    {
+      "file_matches": {
+        "path": "docs/backlog/resume.md",
+        "pattern": "(?i)провер|changed|измен"
+      }
+    },
+    {
+      "file_absent": {
+        "path": "docs/done/resume.md"
+      }
+    }
+  ],
+  "soft": [
+    {
+      "judge": "Прочитан единственный владелец, сравнен текущий файл с проверенным прошлым объектом; старый GREEN не объявлен действующим. Новая проверка/ее необходимость и следующий шаг сохранены. Задача не закрыта преждевременно; второй владелец не создается."
+    }
+  ]
+}
