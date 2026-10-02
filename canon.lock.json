@@ -1,7 +1,7 @@
 {
   "files": {
     "agents/architect.md": {
-      "blob_sha": "14d0e90bc6e173a1ab5a70b6e46841c02de04e0e",
+      "blob_sha": "cdc1207ab5002f0d2ccfefb317815f7013ae8fb9",
       "mode": "100644"
     },
     "agents/code-reviewer.md": {
@@ -13,15 +13,15 @@
       "mode": "100644"
     },
     "agents/debugger.md": {
-      "blob_sha": "357487079f01380f86cb4420b7763facd108ab31",
+      "blob_sha": "cb9c83deb5ae4198c3e574db138da25af8c33f15",
       "mode": "100644"
     },
     "agents/explorer.md": {
-      "blob_sha": "06552c4674cbdd93d71de528e16f1e87a0865f75",
+      "blob_sha": "8f9c203ad60c257530d12d4193829e1ad485e9d9",
       "mode": "100644"
     },
     "agents/implementer.md": {
-      "blob_sha": "cdb2f30d7ef695d5259c59fb4d0cdbd5d1194648",
+      "blob_sha": "aed7c411b20b542f2f666f1afbc6a012b322b4bf",
       "mode": "100644"
     },
     "agents/librarian.md": {
@@ -33,7 +33,7 @@
       "mode": "100644"
     },
     "agents/note-writer.md": {
-      "blob_sha": "3c0e3157aeed6ff0fe3f77640868cbf97ff4ebee",
+      "blob_sha": "480ca90a39414f9589610db20a24aa6a1ee9c01f",
       "mode": "100644"
     },
     "agents/planner.md": {
@@ -45,35 +45,75 @@
       "mode": "100644"
     },
     "agents/summarizer.md": {
-      "blob_sha": "0757fe41d0b999a504df3e529cd5e2c8487a6932",
+      "blob_sha": "f4587d4162b8346f3004879d97159679765ae2f7",
+      "mode": "100644"
+    },
+    "agents/test-writer.md": {
+      "blob_sha": "9b33c78f624a4a854b194c617eba3d9e305ba4f6",
       "mode": "100644"
     },
     "agents/tracker.md": {
-      "blob_sha": "7816a57df4b8ff359acb6f932a4a0ab1096bffac",
+      "blob_sha": "be9a8da4455844fb2a3ad7d145a328941ff93565",
       "mode": "100644"
     },
     "commands/canon.md": {
-      "blob_sha": "cf00cf5de39f938b61136e7b1ccced8e5f4c74dc",
+      "blob_sha": "1ec25bf57d5c929256000637f2fbd25eb1112001",
+      "mode": "100644"
+    },
+    "commands/feedback-inbox.md": {
+      "blob_sha": "ad80d24fb21979442bf914381a46dd4f1c2fb719",
       "mode": "100644"
     },
     "rules/addressing.md": {
       "blob_sha": "a22d14f023def85888012c3076434a8e8f3041cf",
       "mode": "100644"
     },
+    "rules/agent-as-user-voice.md": {
+      "blob_sha": "4cf204b4f35775c77a380b0b0c98b2db3cb96dfc",
+      "mode": "100644"
+    },
+    "rules/agent-browser.md": {
+      "blob_sha": "937099ae12eef1e5c4a29d8761f580baa0a6ec1f",
+      "mode": "100644"
+    },
+    "rules/agent-portability.md": {
+      "blob_sha": "4f90a2beb8945eb142d97ee8ea5872c0f9f1230e",
+      "mode": "100644"
+    },
     "rules/artifacts-structure.md": {
-      "blob_sha": "da22464d5ac124a8f575a323bc7f02339f558fd6",
+      "blob_sha": "3dd8a8c64d6b261ea9cfc2e03806bbe9371f1ae4",
+      "mode": "100644"
+    },
+    "rules/billing-ai-work.md": {
+      "blob_sha": "d2208aa3a7a0532a5b9f2f35ad2605fbc46dc445",
+      "mode": "100644"
+    },
+    "rules/calendar-tasks.md": {
+      "blob_sha": "585d3c20b812c71d251ac55381757a74093bacac",
+      "mode": "100644"
+    },
+    "rules/client-umbrella.md": {
+      "blob_sha": "e503548e4d9c2d4c811b12b2970e53a87009104c",
       "mode": "100644"
     },
     "rules/compact-results.md": {
-      "blob_sha": "7f6cb1394f33fba5926dcdb026fe89b4bb0584d1",
+      "blob_sha": "327d6d3c2088a4792ae288d17cc54b56af04401a",
       "mode": "100644"
     },
     "rules/course-structure.md": {
-      "blob_sha": "88d0804460b7d223ba1d857501a1b751ef326868",
+      "blob_sha": "70af32ab6844b1e4675be2468abff026078e30f7",
+      "mode": "100644"
+    },
+    "rules/doc-style-guide.md": {
+      "blob_sha": "a19de9cdeea812529f142d9ddca3043e2533dfb4",
       "mode": "100644"
     },
     "rules/docs-maintenance.md": {
-      "blob_sha": "d9716aa8bb6fef0be81e760f9365c309ca9d063e",
+      "blob_sha": "4274d573d987015f87979d9047f1f2b433a0a793",
+      "mode": "100644"
+    },
+    "rules/document-metadata.md": {
+      "blob_sha": "2e6f07679f2de6fec9047e7f8004f3f1465133ac",
       "mode": "100644"
     },
     "rules/error-exposure.md": {
@@ -81,11 +121,15 @@
       "mode": "100644"
     },
     "rules/estimates-in-hours.md": {
-      "blob_sha": "e677e56e56aa31ca2634c789f402769fd9b5ce9d",
+      "blob_sha": "1506145ac79fdcd52e4b72abbb29e27a2d16e934",
+      "mode": "100644"
+    },
+    "rules/format-dimensions.md": {
+      "blob_sha": "296632c2991c2aa946d9980a5d3119058e377c76",
       "mode": "100644"
     },
     "rules/google-sheets-mcp.md": {
-      "blob_sha": "f0cb919d5c07670dee39df980b32d34522cb4855",
+      "blob_sha": "36b004a6386d824a495c724c874af6c2173ab147",
       "mode": "100644"
     },
     "rules/homework.md": {
@@ -93,135 +137,363 @@
       "mode": "100644"
     },
     "rules/karpathy-guidelines.md": {
-      "blob_sha": "656341098f4da2f900be9d221979e954a5c25511",
+      "blob_sha": "fe7b1fae87adeafd5bcfa2b4eeca9a8c21986c74",
       "mode": "100644"
     },
     "rules/lecture-notes.md": {
       "blob_sha": "6aa3e5f19f43c33b966107630eb9a86c56a6cd94",
       "mode": "100644"
     },
+    "rules/mcp-multi-account.md": {
+      "blob_sha": "1f282aca6ec39abdf6e6507e428ebd77c238b9e4",
+      "mode": "100644"
+    },
     "rules/meeting-transcripts.md": {
-      "blob_sha": "540b46d18e3ba42d8bae55dff6fcec21ff027948",
+      "blob_sha": "bca2a81b18c577864616102f21c9c9960df080d2",
       "mode": "100644"
     },
     "rules/meetings.md": {
-      "blob_sha": "f1b3335daeefc52962015c1e3ed473a3d0fbe7dd",
+      "blob_sha": "6ef13bb5f32c63d46e3a8c860694f9641b2666f5",
+      "mode": "100644"
+    },
+    "rules/memory-persistence.md": {
+      "blob_sha": "58f022a1d439fcf808a9fd774b7266a8b500caad",
       "mode": "100644"
     },
     "rules/name-cross-check.md": {
       "blob_sha": "a81ec771fc131da1b760cbf77b9c80d719f43a5c",
       "mode": "100644"
     },
+    "rules/outbound-checklist.md": {
+      "blob_sha": "821fbdaa68b951796569e8cc0e925a9adf80551d",
+      "mode": "100644"
+    },
+    "rules/outbound-timing.md": {
+      "blob_sha": "c31c00c2d0f5b6837012380cf81e1d77768b13e7",
+      "mode": "100644"
+    },
+    "rules/prod-instance.md": {
+      "blob_sha": "a46f559bcc1041144a7ef4eb84b260da329564d4",
+      "mode": "100644"
+    },
+    "rules/requirements-traceability.md": {
+      "blob_sha": "498cdb57ca4b440d19648ecc92ff9103c4f96d0f",
+      "mode": "100644"
+    },
+    "rules/scheduled-automation.md": {
+      "blob_sha": "2934217b21b2d17d2d6bfa65ce83825ee78b619d",
+      "mode": "100644"
+    },
+    "rules/sdd-pipeline.md": {
+      "blob_sha": "8134b5102628734bed0328ec684c0c49ab23b8cf",
+      "mode": "100644"
+    },
     "rules/secrets-handling.md": {
-      "blob_sha": "dd2f6e7f9ec2bcb6885cd15287bf2165661ae64e",
+      "blob_sha": "a8cfba77c09ddbf66ec8cb4d54413f07d1218c3d",
+      "mode": "100644"
+    },
+    "rules/silent-failure.md": {
+      "blob_sha": "4b727f0f4b4904b8e565b94318660f18bc263bcb",
       "mode": "100644"
     },
     "rules/subagents-usage.md": {
-      "blob_sha": "523fd33f499a8d72399959470b7579a60c66fcce",
+      "blob_sha": "f81d2ec945a6ca66bb713ce5de5bec4b0e87e4cd",
       "mode": "100644"
     },
     "rules/tasks-tracking.md": {
-      "blob_sha": "7b48dbbded80ff7643380aae2ce6aac5cb41473a",
+      "blob_sha": "4a3d075da4effe0e6b791e430b3787878cbb0090",
       "mode": "100644"
     },
     "rules/tests-coverage.md": {
-      "blob_sha": "65ebcd051ca908f95f7d78f5bef9d25b9497782d",
+      "blob_sha": "1f074edde9cdb32dad25aa0a602bf7da5f4488bc",
+      "mode": "100644"
+    },
+    "rules/tracker-addressing.md": {
+      "blob_sha": "32797596e5801aedf7a2558a672d9e5d7a938541",
       "mode": "100644"
     },
     "rules/typography-ru.md": {
-      "blob_sha": "72106d511d6b4be2e7f8da60cbd47a1c42695eba",
+      "blob_sha": "99d04e41930fc8b3af3f2f11fc4722f98e6d25bf",
+      "mode": "100644"
+    },
+    "rules/untrusted-content.md": {
+      "blob_sha": "f3f21f8b242ec34988ccb68d7f08dd5aefd56745",
+      "mode": "100644"
+    },
+    "rules/upstream-inbox.md": {
+      "blob_sha": "1d90167645f2b3da72fe3db70a801eadacac6957",
+      "mode": "100644"
+    },
+    "rules/wiki-decision-log.md": {
+      "blob_sha": "a48d4a58b557f5e0fab9741d0bd25bed67c806a2",
+      "mode": "100644"
+    },
+    "rules/wiki-inbox-flow.md": {
+      "blob_sha": "4bdad3aec84f9768988c4232d405f5d8bb5c1c9e",
       "mode": "100644"
     },
     "rules/wiki-linking-obsidian.md": {
-      "blob_sha": "186c59322f4179dc60ef6481e21981a3171aca6c",
+      "blob_sha": "da38322e4edf57e5c1444d5bcb2ea5a25dd1bc1f",
       "mode": "100644"
     },
     "rules/wiki-notes-style.md": {
-      "blob_sha": "9cf714b9ec80fee7c15ed90d8fbf7b89d8601454",
+      "blob_sha": "f5e6a18c47026aeb544d08beccf0db717104420f",
+      "mode": "100644"
+    },
+    "scripts/ai-bootstrap.py": {
+      "blob_sha": "b8f1895ebbeec05f500100ba5edcc6c3b46d548c",
+      "mode": "100644"
+    },
+    "scripts/ai-migrate.py": {
+      "blob_sha": "d3d1f2616aa871d8c73b14012b6eff1baa78a960",
+      "mode": "100644"
+    },
+    "scripts/ai-sync.py": {
+      "blob_sha": "378bb743c54d80ca0cd301a8ad5280d6a3a63385",
+      "mode": "100644"
+    },
+    "scripts/asana-blockers.py": {
+      "blob_sha": "2d9fca0a375414d81f375975aba46e4bd646bbcd",
+      "mode": "100755"
+    },
+    "scripts/asana-comments.py": {
+      "blob_sha": "74259092d86361ee3080e810cd5299b424984c54",
+      "mode": "100755"
+    },
+    "scripts/asana-project.py": {
+      "blob_sha": "cf111d8513f67a620a42b3ef3d27426ed8f7b6f3",
+      "mode": "100755"
+    },
+    "scripts/canon-brief.py": {
+      "blob_sha": "f6bf64806343878d79e29e07e78a424f2ba2b397",
+      "mode": "100755"
+    },
+    "scripts/chrome-cookies.py": {
+      "blob_sha": "a2876a98ac6836d2d4218521d8b6d2a5cfa644f0",
+      "mode": "100755"
+    },
+    "scripts/codex-sandbox.py": {
+      "blob_sha": "aa0ebf3164a916ba25bed32c5a4002f25c27a71c",
+      "mode": "100755"
+    },
+    "scripts/csv-xlsx.py": {
+      "blob_sha": "200bce30b08d576bfe5a0e12d8198d27c3270ff2",
+      "mode": "100755"
+    },
+    "scripts/gdocs.py": {
+      "blob_sha": "0ed5a8603ffddea6d073d3dccc4f4c440fe66c7e",
+      "mode": "100755"
+    },
+    "scripts/gitleaks-hook.py": {
+      "blob_sha": "a52e79971d8adee23fd2beb8bb5f41b77f9258e6",
+      "mode": "100755"
+    },
+    "scripts/gsheets.py": {
+      "blob_sha": "c6ebf1df35722f7838cc1f63262af4827d47b086",
+      "mode": "100755"
+    },
+    "scripts/jev-decide.py": {
+      "blob_sha": "0b94d3db4573554259d1fd819c72281989ebf37b",
+      "mode": "100755"
+    },
+    "scripts/md-docx.py": {
+      "blob_sha": "f6aa8652d8fc579afc6ef342bf6c9109ffeda9ed",
       "mode": "100644"
     },
     "scripts/md-pdf.py": {
-      "blob_sha": "dcfd4ea465a6a1a23ab4648dd57382950b56ea27",
+      "blob_sha": "ccbd1e7984759775a70a50faf62ad474ba74f62b",
+      "mode": "100755"
+    },
+    "scripts/md-pptx.py": {
+      "blob_sha": "da675582fe2d45235ce34064464ddb96a44fca39",
       "mode": "100755"
     },
     "scripts/mymeet-snapshot.py": {
-      "blob_sha": "933c302de744cffa5d39f8942ad3efe3a665dc29",
+      "blob_sha": "2440a6d30820addc273c4b06b978be225f0341bd",
       "mode": "100755"
     },
     "scripts/redmine-deltas.py": {
-      "blob_sha": "86509ba3277d0f788121ecb0d3cf7b33cd88d435",
+      "blob_sha": "17ee28194246207b9d78ad5c7f40be836560e938",
       "mode": "100755"
     },
     "scripts/redmine-snapshot.py": {
-      "blob_sha": "3e0fdf5bc6ff152a8e5e0de1082849a8a54aee6b",
+      "blob_sha": "16fa9087446d824e0624480a11334bf7b4d8e533",
+      "mode": "100755"
+    },
+    "scripts/session-cost.py": {
+      "blob_sha": "ce1988d06a15b365457e667a5c1eb9d2c220e106",
       "mode": "100755"
     },
     "scripts/telegram-deltas.py": {
-      "blob_sha": "3d353cb871f15b0e840322427e2f06ef432a9580",
+      "blob_sha": "e351a3011659414a7d695b7d9ded11fefd675c16",
+      "mode": "100755"
+    },
+    "scripts/telegram-pull-one.py": {
+      "blob_sha": "baad87596bb3f84b6df1a0e200a90d0255093b49",
+      "mode": "100755"
+    },
+    "scripts/telegram-send-one.py": {
+      "blob_sha": "32a60c17c3eb2ac2683d1511e1c05d382f9d673c",
       "mode": "100755"
     },
     "scripts/telegram-send.py": {
-      "blob_sha": "503d65d78a8748c555ec9847319d06a7865a27ca",
+      "blob_sha": "96726daf8aeaae6e0f36951de0e702b869847734",
       "mode": "100755"
     },
     "scripts/telegram-snapshot.py": {
-      "blob_sha": "d193d33eb2cdb4dbe2a2ba929548ebac24f859df",
+      "blob_sha": "19614b85659936e83ffffb9c88cbab1ba5da48f0",
       "mode": "100755"
     },
+    "skills/agent-browser/SKILL.md": {
+      "blob_sha": "6e005b0cfd045ec5a32e8535cd1d73f606c86bba",
+      "mode": "100644"
+    },
+    "skills/agent-browser/runbook-linux.md": {
+      "blob_sha": "a0d203dd3e7abfbb9731ac859dcdfb8eb5dcfec9",
+      "mode": "100644"
+    },
+    "skills/agent-browser/runbook-mac.md": {
+      "blob_sha": "b6b0bcce798a2cea04c06add38e2e8ccd251b27e",
+      "mode": "100644"
+    },
+    "skills/asana-blockers/SKILL.md": {
+      "blob_sha": "4b9ec7545f79efb88d695886f5fddb5e3e38b489",
+      "mode": "100644"
+    },
+    "skills/asana-comments/SKILL.md": {
+      "blob_sha": "8eec46fe02425f99701d719d3929a29574697290",
+      "mode": "100644"
+    },
+    "skills/asana-project/SKILL.md": {
+      "blob_sha": "0418f761fbe32c75fbce6f0738938120c963e331",
+      "mode": "100644"
+    },
+    "skills/backlog-task/SKILL.md": {
+      "blob_sha": "7ea6dd130905e7944750ef559455b58b73706864",
+      "mode": "100644"
+    },
+    "skills/canon-sync/SKILL.md": {
+      "blob_sha": "53757b4d08f3392dae01ac378ec4d4ce41b9f509",
+      "mode": "100644"
+    },
     "skills/codex-audit/SKILL.md": {
-      "blob_sha": "304948ae25fb0c13c370105bdf0e407563457c19",
+      "blob_sha": "3fd293d9f731d68fc40e1c70f9f37a1805cbc0df",
+      "mode": "100644"
+    },
+    "skills/codex-implement/SKILL.md": {
+      "blob_sha": "9d9c847a34e42e98f541479e3cd42b3859d31f2d",
+      "mode": "100644"
+    },
+    "skills/csv-xlsx/SKILL.md": {
+      "blob_sha": "c8df05a7270804a6fc7098f2a532a30fded5cd2a",
+      "mode": "100644"
+    },
+    "skills/estimate-calibration/SKILL.md": {
+      "blob_sha": "edd29eebc0f4e61ecd26ea03f7ac2412a55607cc",
+      "mode": "100644"
+    },
+    "skills/gdocs/SKILL.md": {
+      "blob_sha": "dea260f22dd7ab2ebe1614d9b7b1e10df42ffa6b",
       "mode": "100644"
     },
     "skills/harvest-canon/SKILL.md": {
-      "blob_sha": "574fcbea3492183c7d924f5ebc253f7e347cb1d0",
+      "blob_sha": "48fa60d712060e31f00eac57d1697e266fb0a231",
+      "mode": "100644"
+    },
+    "skills/jev-decide/SKILL.md": {
+      "blob_sha": "f83660aa0765c5c37d2dabbe94a961f94c4b54cd",
+      "mode": "100644"
+    },
+    "skills/llm-ru/SKILL.md": {
+      "blob_sha": "4c8ed6b26a329539e1ade2515a15ee9044d596db",
       "mode": "100644"
     },
     "skills/local-transcription/SKILL.md": {
-      "blob_sha": "dd73905312c3cb513273ef31f3e365285f95b8c4",
+      "blob_sha": "77dce34287c85ed91bed531547d9c5f8a215f3df",
+      "mode": "100644"
+    },
+    "skills/local-transcription/transcribe_meeting.py": {
+      "blob_sha": "03bda98ec0e472062c3ff8819edfb25b83e834fd",
+      "mode": "100644"
+    },
+    "skills/md-docx/SKILL.md": {
+      "blob_sha": "8f906ce7c099d6425e34623f4c4f9ba60543fe5a",
       "mode": "100644"
     },
     "skills/md-pdf/SKILL.md": {
-      "blob_sha": "a794196653ef56b70a68a2048ee66ecac062eb6a",
+      "blob_sha": "3754c067a378e24076b61dc93801c38b06bd8108",
+      "mode": "100644"
+    },
+    "skills/md-pptx/SKILL.md": {
+      "blob_sha": "a59b614b99995d9f135a0ca2235e7e31cff426dd",
+      "mode": "100644"
+    },
+    "skills/memory-compact/SKILL.md": {
+      "blob_sha": "bf531bd00f1bce3809d10d4fe92d183b6111556f",
+      "mode": "100644"
+    },
+    "skills/migrate/SKILL.md": {
+      "blob_sha": "c74c6577c08c17025736dff56ed574dfba0c470a",
       "mode": "100644"
     },
     "skills/minimal-code/SKILL.md": {
-      "blob_sha": "408d2c273d090016907706b2e4a1df9f5d41ebab",
+      "blob_sha": "901e754d0c0a746ee216918df5a0366945fce096",
       "mode": "100644"
     },
     "skills/mymeet-snapshot/SKILL.md": {
-      "blob_sha": "55623b708deee2a6aa0f504bc403f4aa86512e22",
+      "blob_sha": "c30df8d1b6555ee8f80907df53aa564273302a3c",
+      "mode": "100644"
+    },
+    "skills/office-md/SKILL.md": {
+      "blob_sha": "1f88eca63d1dac27c146c74c06315a72bf62b97e",
+      "mode": "100644"
+    },
+    "skills/pii-mask/SKILL.md": {
+      "blob_sha": "b126b614bae21c0ae862a59c0ed90c817e2d5a6d",
       "mode": "100644"
     },
     "skills/qa-browser/SKILL.md": {
-      "blob_sha": "228fb1e0539fb9ee1bdb567a8942bba7cfb7dfe5",
+      "blob_sha": "63ce0b58227dcd4fe9b1dfb54cc8638c32da4d87",
       "mode": "100644"
     },
     "skills/redmine-snapshot/SKILL.md": {
-      "blob_sha": "ed3b8ede8900cfefaf9a2fac1d6198f774d10d46",
+      "blob_sha": "86a44827085bbc76395860c601d6e44f99565198",
+      "mode": "100644"
+    },
+    "skills/repo-publication/SKILL.md": {
+      "blob_sha": "d7df953b709a9c20da0e30721f642179306e9852",
       "mode": "100644"
     },
     "skills/requirements/SKILL.md": {
-      "blob_sha": "4f536a7a4ec890bd3351a94a73340fb0ee9b4e5f",
+      "blob_sha": "2905e982f80dec9e538ff90f20699da850e6b61b",
+      "mode": "100644"
+    },
+    "skills/sdd/SKILL.md": {
+      "blob_sha": "20e19e96a17af5969dad24f70d9128e578637871",
+      "mode": "100644"
+    },
+    "skills/session-cost/SKILL.md": {
+      "blob_sha": "fa822438be196321e2077e58b8f3b319f9e5ce24",
       "mode": "100644"
     },
     "skills/telegram-send/SKILL.md": {
-      "blob_sha": "074127088ba7d175fa1ff415623fbba7b55fac5c",
+      "blob_sha": "c882fe5633da068a51a497f77b792bccf16b801a",
       "mode": "100644"
     },
     "skills/telegram-snapshot/SKILL.md": {
-      "blob_sha": "79f4a00a05c532bb55e47a32ae758ff1a33cae29",
+      "blob_sha": "5c7ea307dd53dab9227e74e9a3be24dbba13a239",
       "mode": "100644"
     },
     "skills/tutor/SKILL.md": {
-      "blob_sha": "379eeca7139c45741f259be8b1b7b799d807c686",
+      "blob_sha": "ab75b28a4f67e045edd7129fb3bb56a0b2452eb2",
       "mode": "100644"
     },
     "skills/web-research/SKILL.md": {
-      "blob_sha": "59e19322580c03b09aa87bcc34c7eede2c716f75",
+      "blob_sha": "6364771a5b30f4223653d74fb2b1cdfabb87f14e",
       "mode": "100644"
     }
   },
-  "manifest_digest": "829bd7a5007d99d424a691d6543d60bc9d445f8a2c9da9f20493922378e472de",
+  "manifest_digest": "e6739d94dde1e23e4241d131dfa16e291f78155315ddd5c5c9687d556295b005",
   "membership": {
     "agents/architect.md": [
       "universal"
@@ -259,17 +531,41 @@
     "agents/summarizer.md": [
       "universal"
     ],
+    "agents/test-writer.md": [
+      "coding"
+    ],
     "agents/tracker.md": [
       "management"
     ],
     "commands/canon.md": [
       "universal"
     ],
+    "commands/feedback-inbox.md": [
+      "universal"
+    ],
     "rules/addressing.md": [
+      "universal"
+    ],
+    "rules/agent-as-user-voice.md": [
+      "universal"
+    ],
+    "rules/agent-browser.md": [
+      "universal"
+    ],
+    "rules/agent-portability.md": [
       "universal"
     ],
     "rules/artifacts-structure.md": [
       "management"
+    ],
+    "rules/billing-ai-work.md": [
+      "management"
+    ],
+    "rules/calendar-tasks.md": [
+      "universal"
+    ],
+    "rules/client-umbrella.md": [
+      "universal"
     ],
     "rules/compact-results.md": [
       "universal"
@@ -277,7 +573,13 @@
     "rules/course-structure.md": [
       "education"
     ],
+    "rules/doc-style-guide.md": [
+      "documentation"
+    ],
     "rules/docs-maintenance.md": [
+      "universal"
+    ],
+    "rules/document-metadata.md": [
       "universal"
     ],
     "rules/error-exposure.md": [
@@ -285,6 +587,9 @@
     ],
     "rules/estimates-in-hours.md": [
       "management"
+    ],
+    "rules/format-dimensions.md": [
+      "coding"
     ],
     "rules/google-sheets-mcp.md": [
       "management"
@@ -298,16 +603,43 @@
     "rules/lecture-notes.md": [
       "education"
     ],
+    "rules/mcp-multi-account.md": [
+      "universal"
+    ],
     "rules/meeting-transcripts.md": [
       "management"
     ],
     "rules/meetings.md": [
       "management"
     ],
+    "rules/memory-persistence.md": [
+      "universal"
+    ],
     "rules/name-cross-check.md": [
       "management"
     ],
+    "rules/outbound-checklist.md": [
+      "universal"
+    ],
+    "rules/outbound-timing.md": [
+      "universal"
+    ],
+    "rules/prod-instance.md": [
+      "universal"
+    ],
+    "rules/requirements-traceability.md": [
+      "coding"
+    ],
+    "rules/scheduled-automation.md": [
+      "universal"
+    ],
+    "rules/sdd-pipeline.md": [
+      "coding"
+    ],
     "rules/secrets-handling.md": [
+      "universal"
+    ],
+    "rules/silent-failure.md": [
       "universal"
     ],
     "rules/subagents-usage.md": [
@@ -319,8 +651,24 @@
     "rules/tests-coverage.md": [
       "coding"
     ],
+    "rules/tracker-addressing.md": [
+      "coding",
+      "management"
+    ],
     "rules/typography-ru.md": [
       "universal"
+    ],
+    "rules/untrusted-content.md": [
+      "universal"
+    ],
+    "rules/upstream-inbox.md": [
+      "universal"
+    ],
+    "rules/wiki-decision-log.md": [
+      "wiki"
+    ],
+    "rules/wiki-inbox-flow.md": [
+      "wiki"
     ],
     "rules/wiki-linking-obsidian.md": [
       "wiki"
@@ -328,7 +676,55 @@
     "rules/wiki-notes-style.md": [
       "wiki"
     ],
+    "scripts/ai-bootstrap.py": [
+      "universal"
+    ],
+    "scripts/ai-migrate.py": [
+      "universal"
+    ],
+    "scripts/ai-sync.py": [
+      "universal"
+    ],
+    "scripts/asana-blockers.py": [
+      "management"
+    ],
+    "scripts/asana-comments.py": [
+      "management"
+    ],
+    "scripts/asana-project.py": [
+      "management"
+    ],
+    "scripts/canon-brief.py": [
+      "universal"
+    ],
+    "scripts/chrome-cookies.py": [
+      "universal"
+    ],
+    "scripts/codex-sandbox.py": [
+      "universal"
+    ],
+    "scripts/csv-xlsx.py": [
+      "universal"
+    ],
+    "scripts/gdocs.py": [
+      "management"
+    ],
+    "scripts/gitleaks-hook.py": [
+      "universal"
+    ],
+    "scripts/gsheets.py": [
+      "management"
+    ],
+    "scripts/jev-decide.py": [
+      "universal"
+    ],
+    "scripts/md-docx.py": [
+      "universal"
+    ],
     "scripts/md-pdf.py": [
+      "universal"
+    ],
+    "scripts/md-pptx.py": [
       "universal"
     ],
     "scripts/mymeet-snapshot.py": [
@@ -340,7 +736,18 @@
     "scripts/redmine-snapshot.py": [
       "management"
     ],
+    "scripts/session-cost.py": [
+      "universal"
+    ],
     "scripts/telegram-deltas.py": [
+      "wiki",
+      "management"
+    ],
+    "scripts/telegram-pull-one.py": [
+      "wiki",
+      "management"
+    ],
+    "scripts/telegram-send-one.py": [
       "wiki",
       "management"
     ],
@@ -352,17 +759,73 @@
       "wiki",
       "management"
     ],
+    "skills/agent-browser/SKILL.md": [
+      "universal"
+    ],
+    "skills/agent-browser/runbook-linux.md": [
+      "universal"
+    ],
+    "skills/agent-browser/runbook-mac.md": [
+      "universal"
+    ],
+    "skills/asana-blockers/SKILL.md": [
+      "management"
+    ],
+    "skills/asana-comments/SKILL.md": [
+      "management"
+    ],
+    "skills/asana-project/SKILL.md": [
+      "management"
+    ],
+    "skills/backlog-task/SKILL.md": [
+      "universal"
+    ],
+    "skills/canon-sync/SKILL.md": [
+      "universal"
+    ],
     "skills/codex-audit/SKILL.md": [
       "universal"
+    ],
+    "skills/codex-implement/SKILL.md": [
+      "coding"
+    ],
+    "skills/csv-xlsx/SKILL.md": [
+      "universal"
+    ],
+    "skills/estimate-calibration/SKILL.md": [
+      "management"
+    ],
+    "skills/gdocs/SKILL.md": [
+      "management"
     ],
     "skills/harvest-canon/SKILL.md": [
       "universal"
     ],
+    "skills/jev-decide/SKILL.md": [
+      "universal"
+    ],
+    "skills/llm-ru/SKILL.md": [
+      "universal"
+    ],
     "skills/local-transcription/SKILL.md": [
-      "management",
-      "education"
+      "universal"
+    ],
+    "skills/local-transcription/transcribe_meeting.py": [
+      "universal"
+    ],
+    "skills/md-docx/SKILL.md": [
+      "universal"
     ],
     "skills/md-pdf/SKILL.md": [
+      "universal"
+    ],
+    "skills/md-pptx/SKILL.md": [
+      "universal"
+    ],
+    "skills/memory-compact/SKILL.md": [
+      "universal"
+    ],
+    "skills/migrate/SKILL.md": [
       "universal"
     ],
     "skills/minimal-code/SKILL.md": [
@@ -371,14 +834,29 @@
     "skills/mymeet-snapshot/SKILL.md": [
       "management"
     ],
+    "skills/office-md/SKILL.md": [
+      "universal"
+    ],
+    "skills/pii-mask/SKILL.md": [
+      "universal"
+    ],
     "skills/qa-browser/SKILL.md": [
       "coding"
     ],
     "skills/redmine-snapshot/SKILL.md": [
       "management"
     ],
+    "skills/repo-publication/SKILL.md": [
+      "universal"
+    ],
     "skills/requirements/SKILL.md": [
       "coding"
+    ],
+    "skills/sdd/SKILL.md": [
+      "coding"
+    ],
+    "skills/session-cost/SKILL.md": [
+      "universal"
     ],
     "skills/telegram-send/SKILL.md": [
       "wiki",
