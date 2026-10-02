@@ -1,6 +1,7 @@
 """Receipt regressions for the post-design JSON-status contract clarification."""
 import hashlib
 import json
+import shutil
 import unittest
 
 import test_ai_migrate as migration
@@ -60,6 +61,46 @@ class TerminalStatusContract(unittest.TestCase):
         before = terminal.complete_snapshot(self.root)
         self.assert_failed(handoff, 'check', 'check')
         self.assertEqual(terminal.complete_snapshot(self.root), before)
+
+    def test_prepare_plan_apply_require_existing_directory_bundle_before_artifacts(self):
+        missing = self.base / 'missing-bundle'
+        regular = self.base / 'regular-bundle'
+        self.put(regular, 'not a directory')
+        for operation in ('plan', 'apply'):
+            for bundle in (missing, regular):
+                with self.subTest(operation=operation, bundle=bundle.name):
+                    handoff = self.base / (operation + '-' + bundle.name)
+                    before = terminal.complete_snapshot(self.root)
+                    self.invoke(['prepare', '--root', self.root, '--bundle', bundle,
+                                 '--project-id', migration.bootstrap.PROJECT_ID,
+                                 '--types', 'coding,wiki', '--adapters', 'claude,codex,kimi',
+                                 '--handoff-dir', handoff, '--operation', operation], expected=2)
+                    self.assertFalse(handoff.exists(), 'invalid source created output artifacts')
+                    self.assertEqual(terminal.complete_snapshot(self.root), before)
+
+    def test_deleted_bundle_plan_apply_fail_validation_before_engine_invocation(self):
+        handoffs = [(operation, self.prepare(operation)[0]) for operation in ('plan', 'apply')]
+        shutil.rmtree(self.bundle)
+        for operation, handoff in handoffs:
+            with self.subTest(operation=operation):
+                marker = handoff / 'engine-invoked'
+                engine = handoff / 'tools/ai-migrate.py'
+                engine.write_text('from pathlib import Path\n' +
+                                  'Path(' + repr(str(marker)) + ').write_text("invoked")\n' +
+                                  'raise SystemExit(2)\n')
+                request = handoff / 'request.json'
+                data = json.loads(request.read_text())
+                data['tools_sha256']['ai-migrate.py'] = hashlib.sha256(engine.read_bytes()).hexdigest()
+                request.write_text(json.dumps(data))
+                before = terminal.complete_snapshot(self.root)
+                self.run_request(handoff, operation, expected=2)
+                self.assertFalse(marker.exists(), 'invalid source reached engine')
+                result = json.loads((handoff / 'result.json').read_text())
+                self.assertEqual(result['status'], 'failed')
+                self.assertEqual(result['stage'], 'validate')
+                self.assertIsNone(result['check'])
+                self.assertNotEqual(result['exit_code'], 0)
+                self.assertEqual(terminal.complete_snapshot(self.root), before)
 
 
 if __name__ == '__main__':
