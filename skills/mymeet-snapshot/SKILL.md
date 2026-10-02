@@ -7,7 +7,7 @@ description: Настроить/починить зеркало расшифро
 
 Скилл для первой настройки или починки локального snapshot расшифровок встреч из mymeet.ai через REST API. Скрипт тянет MD-отчеты проектных встреч и раскладывает по папкам `Встречи/` - для чтения, написания `.summary.md` и работы без захода в web-UI mymeet.
 
-Скрипт-эталон лежит в каноне в `scripts/mymeet-snapshot.py` (top-level папка `scripts/`, не внутри папки скилла). Bootstrap-03-management копирует его в `scripts/` в корне проекта - оттуда же, где его ожидает запуск (`python3 scripts/mymeet-snapshot.py`).
+Скрипт-эталон лежит в каноне в `scripts/mymeet-snapshot.py` (top-level папка `scripts/`, не внутри папки скилла). `.AI` bootstrap типа management копирует его в `scripts/` в корне проекта - оттуда же, где его ожидает запуск (`python3 scripts/mymeet-snapshot.py`).
 
 Архитектура повторяет `telegram-snapshot` / `redmine-snapshot`: общий секрет на устройстве, проектные указатели - в репозитории проекта.
 

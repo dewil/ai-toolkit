@@ -366,22 +366,22 @@ class DocumentationTest(unittest.TestCase):
         self.assertRegex(section.lower(), r"истори[\s\S]{0,180}(?:не провер|не скан)|(?:не провер|не скан)[\s\S]{0,180}истори")
 
     def test_canon_checks_in_step_one_and_lists_missing_items_in_plan(self):
-        text = (ROOT / "migrations/sync-from-canon.prompt.md").read_text(encoding="utf-8")
-        audit = self.section(text, r"ШАГ 1\.")
-        plan = self.section(text, r"ШАГ 2\.")
+        text = (ROOT / "migrations/ai-sync.prompt.md").read_text(encoding="utf-8")
+        audit = self.section(text, r"1\. Аудит")
+        plan = self.section(text, r"3\. Read-only план")
         self.assertIn("gitleaks-hook.py status", audit)
         self.assertRegex(audit.lower(), r"git[- ]кор|кор[\w-]*\s+проект")
         self.assertRegex(audit.lower(), r"зонтик|зонтич|подключенн|подключённ")
         self.assertRegex(plan.lower(), r"gitleaks[^\n]*(?:нет|не хватает|отсутств|не установлен)|(?:нет|не хватает|отсутств|не установлен)[^\n]*gitleaks")
 
     def test_canon_install_requires_ok_and_missing_binary_does_not_stop_sync(self):
-        text = (ROOT / "migrations/sync-from-canon.prompt.md").read_text(encoding="utf-8")
-        action = self.section(text, r"ШАГ 4\.")
+        text = (ROOT / "migrations/ai-sync.prompt.md").read_text(encoding="utf-8")
+        action = self.section(text, r"4\. Применение")
         self.assertIn("gitleaks-hook.py install", action)
         # Ограничения должны быть привязаны к gitleaks, а не к другому действию.
         paragraphs = [p for p in re.split(r"\n\s*\n", text) if "gitleaks" in p.lower()]
         local = "\n".join(paragraphs).lower()
-        self.assertRegex(local, r"только[^\n]{0,100}(?:после|по)[^\n]{0,60}[\"«“]?ок")
+        self.assertRegex(local, r"только[^\n]{0,100}после[^\n]{0,60}[\"«“]?ок")
         self.assertRegex(local, r"не (?:останавлива|блокиру|прерыва)")
         self.assertRegex(local, r"(?:бинарник|агент)[^\n]{0,100}не (?:став|устанавл)")
         self.assertRegex(local, r"команд[\w]*\s+(?:установки|для установки)|(?:дай|дает|даёт|покажи|выведи)[^\n]*команд")
