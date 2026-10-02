@@ -279,6 +279,62 @@ def log_query(*args, **kwargs):
                                  'metadata must not reach backend calls')
                 self.assertIn('result', responses[1])
 
+    def test_request_meta_accepted_and_ignored_for_other_methods(self):
+        for method, params in (
+                ('ping', {}), ('tools/list', {}),
+                ('initialize', {'protocolVersion': '2025-06-18', 'capabilities': {},
+                                'clientInfo': {'name': 'blind-test', 'version': '1'}})):
+            baseline, _ = self.run_rpc([self.request(method, params)])
+            self.assertIn('result', baseline[0])
+            for meta in ({}, {'progressToken': 'token'}, {'progressToken': 0.5},
+                         {'vendor.example/custom': [None, True], 'threadId': 'Other'}):
+                with self.subTest(method=method, meta=meta):
+                    responses, _ = self.run_rpc([self.request(method, {**params, '_meta': meta})])
+                    self.assertEqual(responses, baseline, 'transport metadata must be ignored')
+        self.assertFalse(self.marker.exists())
+
+    def test_request_meta_malformed_for_other_methods(self):
+        for method, params in (
+                ('ping', {}), ('tools/list', {}),
+                ('initialize', {'protocolVersion': '2025-06-18', 'capabilities': {},
+                                'clientInfo': {'name': 'blind-test', 'version': '1'}})):
+            for meta in (None, [], 'meta', 1, True,
+                         {'progressToken': None}, {'progressToken': True},
+                         {'progressToken': []}, {'progressToken': {}}):
+                with self.subTest(method=method, meta=meta):
+                    responses, _ = self.run_rpc([
+                        self.request(method, {**params, '_meta': meta}),
+                        self.request('ping', rid=2)])
+                    self.assertIn('error', responses[0], 'malformed transport metadata must fail')
+                    self.assertEqual(responses[0]['error']['code'], -32602)
+                    self.assertIn('result', responses[1])
+            for number in ('1e999', '-1e999'):
+                with self.subTest(method=method, number=number):
+                    request = self.request(method, {**params, '_meta': {'progressToken': 'OVERFLOW_NUMBER'}})
+                    wire = json.dumps(request).replace('"OVERFLOW_NUMBER"', number)
+                    process = subprocess.run([sys.executable, str(SCRIPT), '--backend', str(self.backend)],
+                        input=wire + '\n' + json.dumps(self.request('ping', rid=2)) + '\n',
+                        capture_output=True, text=True, cwd=self.dir, timeout=5,
+                        env={**os.environ, 'TMPDIR': TMP})
+                    self.assertEqual(process.returncode, 0)
+                    responses = [json.loads(line) for line in process.stdout.splitlines()]
+                    self.assertIn('error', responses[0])
+                    self.assertEqual(responses[0]['error']['code'], -32602)
+                    self.assertIn('result', responses[1])
+        self.assertFalse(self.marker.exists())
+
+    def test_request_meta_other_method_notifications_are_silent(self):
+        notifications = []
+        for method in ('ping', 'tools/list', 'initialize'):
+            for meta in ({'progressToken': 'token'}, None, {'progressToken': True}):
+                request = self.request(method, {'_meta': meta})
+                del request['id']
+                notifications.append(request)
+        responses, _ = self.run_rpc([*notifications, self.request('ping', rid=7)])
+        self.assertEqual([response['id'] for response in responses], [7])
+        self.assertIn('result', responses[0])
+        self.assertFalse(self.marker.exists())
+
     def test_transport_meta_rejects_malformed_types(self):
         self.synthetic()
         invalid = [None, [], 'meta', 1, True,
