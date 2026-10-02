@@ -78,6 +78,7 @@ class PackageBound(unittest.TestCase):
         return code, stdout.getvalue(), stderr.getvalue(), calls
 
     def test_rejects_aggregate_overflow_before_requesting_next_remote_file(self):
+        self.sources['rules/agent-portability.md'] = b'MM'
         self.limits(1)
         code, out, err, calls = self.invoke(remote=True)
         self.assertEqual(code, 2, out + err)
