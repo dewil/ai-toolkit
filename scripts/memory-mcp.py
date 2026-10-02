@@ -211,10 +211,19 @@ def dispatch(request, backend, timeout):
         result = {'tools': [tool()]}
     elif method == 'tools/call':
         try:
-            if set(params) != {'name', 'arguments'} or params['name'] != 'memory_search':
+            if not {'name', 'arguments'} <= params.keys() or params.keys() - {'name', 'arguments', '_meta'} or params['name'] != 'memory_search':
                 raise ValueError()
+            if '_meta' in params:
+                meta = params['_meta']
+                if not isinstance(meta, dict):
+                    raise ValueError()
+                if 'progressToken' in meta:
+                    token = meta['progressToken']
+                    if not isinstance(token, str) and (type(token) not in (int, float) or not math.isfinite(token)):
+                        raise ValueError()
+                # Transport metadata is opaque: it never selects scope or backend.
             args = arguments(params['arguments'])
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             return rpc_error(rid, -32602)
         value = search(backend, timeout, args)
         result = {'content': [{'type': 'text', 'text': encode(value)}], 'isError': value['status'] == 'error'}
