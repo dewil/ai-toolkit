@@ -320,7 +320,10 @@ def validate_future(root, journal):
     forbidden = set(intent['local_only']) | set(intent['skip_sync']) | set(intent['overrides'])
     allowed = {ab.destination(p) for p in state['source_files'] if p not in forbidden} | {START, ab.STATE, *outputs}
     parents = {str(parent) for p in allowed for parent in PurePosixPath(p).parents if str(parent) != '.'}
-    ab.validate_paths(pending)
+    # Parent directory actions intentionally precede their descendants. Validate
+    # collisions among approved file destinations; directories must be exact
+    # parents of these validated destinations (checked below).
+    ab.validate_paths(allowed)
     expected_order = sorted((p for p in pending if pending[p]['after']['kind'] == 'dir'), key=lambda p: (p.count('/'), p))
     expected_order += sorted((p for p in pending if pending[p]['after']['kind'] == 'file'), key=lambda p: (p == ab.STATE, p))
     if list(pending) != expected_order:

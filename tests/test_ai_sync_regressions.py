@@ -1,11 +1,45 @@
 """Regressions for defects found during implementation; blind tests unchanged."""
 import hashlib
+import shutil
+import subprocess
+import sys
 import unittest
 
-from test_ai_sync import SyncFixture
+from test_ai_sync import SCRIPT, SyncFixture, tree
+from test_ai_sync_recovery import WRAPPER
 
 
 class AiSyncRegressions(SyncFixture):
+    def test_new_skill_installs_through_missing_parent_directory(self):
+        path = 'skills/new-skill/SKILL.md'
+        self.add_upstream(path, b'# New skill\nNEW_DIRECTORY_GENERATION\n')
+        self.assertFalse(self.destination(path).parent.exists())
+        self.apply()
+        self.assertEqual(self.destination(path).read_bytes(), (self.bundle / path).read_bytes())
+        self.assert_base(path, (self.bundle / path).read_bytes())
+        self.cli('check')
+
+    def test_new_skill_parent_and_file_recover_offline_after_interruption(self):
+        path = 'skills/new-skill/nested/SKILL.md'
+        self.add_upstream(path, b'# Nested skill\nOFFLINE_DIRECTORY_GENERATION\n')
+        plan = self.plan()
+        result = subprocess.run([sys.executable, '-c', WRAPPER, str(SCRIPT), str(self.root),
+                                 str(self.bundle), plan['plan_sha256'],
+                                 self.destination(path).relative_to(self.root).as_posix(), 'after', 'fail'],
+                                capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('FAULT_POINT', result.stdout)
+        self.assertTrue((self.root / '.ai-bootstrap/sync.json').is_file())
+        self.assertEqual(self.read_json(self.state_path), self.initial_state)
+        self.assertIn(b'OFFLINE_DIRECTORY_GENERATION', self.destination(path).read_bytes())
+        shutil.rmtree(self.bundle)
+        self.cli('recover')
+        self.cli('check')
+        self.assertFalse((self.root / '.ai-bootstrap/sync.json').exists())
+        before = tree(self.root)
+        self.cli('recover')
+        self.assertEqual(tree(self.root), before)
+
     def test_source_mode_change_invalidates_reviewed_bundle(self):
         self.upstream('rules/coding.md', b'REVIEWED_UPDATE\n')
         plan = self.plan()
