@@ -480,6 +480,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     root = args.root.absolute()
     try:
+        ab.mount_preflight(root)
         ab.refuse_sync(root)
         if args.root.is_symlink():
             raise Invalid('Use the actual client root')
