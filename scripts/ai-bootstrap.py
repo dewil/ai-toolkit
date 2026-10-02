@@ -153,7 +153,7 @@ def checked(root, rel):
     return root / rel
 
 
-def descriptor(root, rel):
+def descriptor(root, rel, hash_file=True):
     path = checked(root, rel)
     try:
         info = path.lstat()
@@ -165,14 +165,21 @@ def descriptor(root, rel):
         return {'kind': 'dir'}
     if not stat.S_ISREG(info.st_mode):
         raise Invalid(f'Unsupported filesystem object: {rel}')
-    return {'kind': 'file', 'sha256': sha(path.read_bytes()), 'mode': stat.S_IMODE(info.st_mode)}
+    result = {'kind': 'file', 'mode': stat.S_IMODE(info.st_mode)}
+    if hash_file:
+        result['sha256'] = sha(path.read_bytes())
+    return result
 
 
-def read_file(root, rel):
-    desc = descriptor(root, rel)
+def read_file(root, rel, max_bytes=None):
+    desc = descriptor(root, rel, hash_file=max_bytes is None)
     if not desc or desc['kind'] != 'file':
         raise Invalid(f'Missing regular source: {rel}')
-    return checked(root, rel).read_bytes()
+    path = checked(root, rel)
+    if max_bytes is None:
+        return path.read_bytes()
+    with path.open('rb') as source:
+        return source.read(max_bytes + 1)
 
 
 def json_file(root, rel):
@@ -220,15 +227,18 @@ def loader(args):
         if not re.fullmatch(r'https://raw\.githubusercontent\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[0-9a-fA-F]{40}', base):
             raise Invalid('source-base must be HTTPS GitHub raw URL pinned to a 40-character commit SHA')
 
-        def get(rel):
+        def get(rel, max_bytes=None):
             safe_relative(rel)
             url = base + '/' + rel
+            limit = min(MAX_FILE, max_bytes) if max_bytes is not None else MAX_FILE
             with urllib.request.urlopen(url, timeout=30) as response:
                 if response.url != url:
                     raise Invalid('Source redirect is not the pinned URL')
-                data = response.read(MAX_FILE + 1)
+                data = response.read(limit + 1)
             if len(data) > MAX_FILE:
                 raise Invalid(f'Source too large: {rel}')
+            if max_bytes is not None and len(data) > max_bytes:
+                raise Invalid('Source package too large')
             return data
 
         return get, {'kind': 'https', 'base': base, 'commit_sha': base.rsplit('/', 1)[1]}
@@ -237,10 +247,13 @@ def loader(args):
         if not bundle.is_dir():
             raise Invalid('Bundle directory does not exist')
 
-        def get(rel):
-            data = read_file(bundle, rel)
+        def get(rel, max_bytes=None):
+            limit = min(MAX_FILE, max_bytes) if max_bytes is not None else MAX_FILE
+            data = read_file(bundle, rel, limit)
             if len(data) > MAX_FILE:
                 raise Invalid(f'Source too large: {rel}')
+            if max_bytes is not None and len(data) > max_bytes:
+                raise Invalid('Source package too large')
             return data
 
         # Local machine path must not leak into generated public context.
@@ -397,10 +410,16 @@ def package(args, root):
     selected = sorted({p for t in ['universal'] + types for p in sections[t]})
     validate_paths(selected)
     validate_paths([destination(p) for p in selected])
-    sources = {p: get(p) for p in selected}
-    templates = {name: get('templates/ai/' + name) for name in TEMPLATES}
-    if sum(map(len, sources.values())) + sum(map(len, templates.values())) > MAX_PACKAGE:
-        raise Invalid('Source package too large')
+    package_bytes = 0
+
+    def package_file(rel):
+        nonlocal package_bytes
+        data = get(rel, MAX_PACKAGE - package_bytes)
+        package_bytes += len(data)
+        return data
+
+    sources = {p: package_file(p) for p in selected}
+    templates = {name: package_file('templates/ai/' + name) for name in TEMPLATES}
     config = {'schema_version': VERSION, 'layout_version': LAYOUT, 'project_id': project_id,
               'project_type': types, 'adapters': adapters}
     catalogue = '\n'.join(f'- [{destination(p)}]({destination(p)[4:]})' for p in selected if not p.startswith('scripts/'))
