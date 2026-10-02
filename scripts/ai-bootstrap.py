@@ -48,6 +48,56 @@ class Invalid(ValueError):
     pass
 
 
+def read_mountinfo():
+    """Public test seam; production always inspects its own Linux namespace."""
+    return Path('/proc/self/mountinfo').read_text()
+
+
+def mount_preflight(root):
+    """Refuse masked metadata before inspecting client or source contents."""
+    guidance = 'Environment mount check failed; use an ordinary terminal'
+    try:
+        if not sys.platform.startswith('linux'):
+            raise Invalid('Linux mountinfo is required')
+        text = read_mountinfo()
+        if not isinstance(text, str) or not text.strip():
+            raise Invalid('Empty mountinfo')
+
+        def decode(field):
+            # mountinfo uses exactly these kernel octal escapes, not shell escapes.
+            if re.search(r'\\(?!040|011|012|134)', field):
+                raise Invalid('Invalid mountinfo escape')
+            return re.sub(r'\\(040|011|012|134)',
+                          lambda m: chr(int(m[1], 8)), field)
+
+        mounts = []
+        for line in text.splitlines():
+            fields = line.split(' ')
+            if ('' in fields or fields.count('-') != 1 or len(fields) < 10):
+                raise Invalid('Malformed mountinfo')
+            separator = fields.index('-')
+            if (separator < 6 or len(fields) != separator + 4 or
+                    not fields[0].isdigit() or not fields[1].isdigit() or
+                    not re.fullmatch(r'[0-9]+:[0-9]+', fields[2])):
+                raise Invalid('Malformed mountinfo fields')
+            for field in fields:
+                decode(field)
+            for index in (3, 4):
+                path = decode(fields[index])
+                if not path.startswith('/') or '..' in Path(path).parts:
+                    raise Invalid('Invalid mountinfo path')
+            mounts.append(Path(decode(fields[4])))
+    except (OSError, ValueError, TypeError) as error:
+        raise Invalid(guidance + ': mountinfo unavailable or malformed') from error
+    actual = root.resolve()
+    trees = [actual / p for p in ('.agents', '.git', '.claude', 'docs/dev',
+                                  '.AI', '.ai-bootstrap')]
+    files = [actual / p for p in ('CLAUDE.md', 'AGENTS.md', '.gitignore')]
+    for mount in mounts:
+        if mount in files or any(mount == p or p in mount.parents for p in trees):
+            raise Invalid(f'Environment blocked by mountpoint {mount}; use an ordinary terminal')
+
+
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -734,6 +784,7 @@ def main(argv=None):
         parser.error('Use the actual client root, not a symlink')
     root = args.root.absolute()
     try:
+        mount_preflight(root)
         refuse_migration(root)
         if args.command in ('plan', 'apply'):
             actions, state = package(args, root)
