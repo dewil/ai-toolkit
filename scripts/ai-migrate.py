@@ -111,9 +111,6 @@ def migration_plan(args, root):
         raise Invalid('Existing .agents requires a separate migration plan')
     if ab.descriptor(root, BACKUP) is not None:
         raise Invalid('Existing migration backup; refusing to overwrite')
-    for name in REGISTRIES - {'canon.yaml'}:
-        if ab.descriptor(root, '.claude/' + name) is not None:
-            raise Invalid('Split legacy registry is not supported by this migration adapter')
     hashes, exclusions = legacy_registry(ab.read_file(root, '.claude/canon.yaml'))
     context = ab.read_file(root, 'CLAUDE.md').decode('utf-8')
     archive_inputs = {p: tree(root, p) for p in MOVES if ab.descriptor(root, p) is not None}
