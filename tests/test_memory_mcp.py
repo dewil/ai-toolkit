@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / 'scripts' / 'memory-mcp.py'
-TMP = '/data/ai-canon-deploy-tmp'
+TMP = tempfile.gettempdir()
 
 
 class MemoryMCPTest(unittest.TestCase):
