@@ -241,15 +241,19 @@
       "mode": "100644"
     },
     "scripts/ai-bootstrap.py": {
-      "blob_sha": "b8f1895ebbeec05f500100ba5edcc6c3b46d548c",
+      "blob_sha": "586220ef0602d5f2e98dc9e39b11302df878cca1",
+      "mode": "100644"
+    },
+    "scripts/ai-migrate-terminal.py": {
+      "blob_sha": "d42ca381e8931836afde51b02da92a02f6f70b67",
       "mode": "100644"
     },
     "scripts/ai-migrate.py": {
-      "blob_sha": "d3d1f2616aa871d8c73b14012b6eff1baa78a960",
+      "blob_sha": "943b7884b198934aab1901f66592cabd371e27bc",
       "mode": "100644"
     },
     "scripts/ai-sync.py": {
-      "blob_sha": "378bb743c54d80ca0cd301a8ad5280d6a3a63385",
+      "blob_sha": "48ac1e13e2e0d3f7dfdcf7643d923b94f607a460",
       "mode": "100644"
     },
     "scripts/asana-blockers.py": {
@@ -433,7 +437,7 @@
       "mode": "100644"
     },
     "skills/migrate/SKILL.md": {
-      "blob_sha": "c74c6577c08c17025736dff56ed574dfba0c470a",
+      "blob_sha": "c2a54fb47ccb9351d1bb14ea15227d8fed9b2668",
       "mode": "100644"
     },
     "skills/minimal-code/SKILL.md": {
@@ -493,7 +497,7 @@
       "mode": "100644"
     }
   },
-  "manifest_digest": "e6739d94dde1e23e4241d131dfa16e291f78155315ddd5c5c9687d556295b005",
+  "manifest_digest": "bcaa7700a2b5631cb07f5c15537158e79634f242c8bae17a329c610b57eb5a67",
   "membership": {
     "agents/architect.md": [
       "universal"
@@ -677,6 +681,9 @@
       "wiki"
     ],
     "scripts/ai-bootstrap.py": [
+      "universal"
+    ],
+    "scripts/ai-migrate-terminal.py": [
       "universal"
     ],
     "scripts/ai-migrate.py": [
