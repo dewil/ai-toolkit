@@ -23,6 +23,8 @@
 # при сборке type-set'а.
 
 universal:
+  - skills/memory-search/SKILL.md       # read-only MCP поиск по текущему клиенту и свежая файловая память
+  - scripts/memory-mcp.py              # stdio MCP адаптер существующего локального backend, без admin/actions
   - skills/canon-sync/SKILL.md          # общий вход sync: .AI pinned plan/apply/check/recover и отдельный legacy маршрут
   - scripts/ai-sync.py                 # детерминированное обновление установленного .AI с digest и собственным журналом
   - skills/migrate/SKILL.md             # /migrate: короткий запуск отдельной миграции legacy в общий .AI
