@@ -312,6 +312,10 @@
       "blob_sha": "da675582fe2d45235ce34064464ddb96a44fca39",
       "mode": "100755"
     },
+    "scripts/memory-mcp.py": {
+      "blob_sha": "b5afb41c3c60a53df41b17f2594dcb9be2051e4b",
+      "mode": "100644"
+    },
     "scripts/mymeet-snapshot.py": {
       "blob_sha": "2440a6d30820addc273c4b06b978be225f0341bd",
       "mode": "100755"
@@ -436,6 +440,10 @@
       "blob_sha": "bf531bd00f1bce3809d10d4fe92d183b6111556f",
       "mode": "100644"
     },
+    "skills/memory-search/SKILL.md": {
+      "blob_sha": "09ce860cb21e7dba17d5d54c7589ca4a154be430",
+      "mode": "100644"
+    },
     "skills/migrate/SKILL.md": {
       "blob_sha": "c2a54fb47ccb9351d1bb14ea15227d8fed9b2668",
       "mode": "100644"
@@ -497,7 +505,7 @@
       "mode": "100644"
     }
   },
-  "manifest_digest": "84d1d5a14ef6ac786063247fa7ce87f375321cae1a8736bded9aac5d3eac36aa",
+  "manifest_digest": "969e3a98de7712774c7b7fb10de40ab8715a8f654b98bceaa8f47688e5754842",
   "membership": {
     "agents/architect.md": [
       "universal"
@@ -734,6 +742,9 @@
     "scripts/md-pptx.py": [
       "universal"
     ],
+    "scripts/memory-mcp.py": [
+      "universal"
+    ],
     "scripts/mymeet-snapshot.py": [
       "management"
     ],
@@ -830,6 +841,9 @@
       "universal"
     ],
     "skills/memory-compact/SKILL.md": [
+      "universal"
+    ],
+    "skills/memory-search/SKILL.md": [
       "universal"
     ],
     "skills/migrate/SKILL.md": [
