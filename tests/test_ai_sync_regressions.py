@@ -1,5 +1,9 @@
 """Regressions for defects found during implementation; blind tests unchanged."""
+import argparse
+import base64
 import hashlib
+import json
+import runpy
 import shutil
 import subprocess
 import sys
@@ -10,6 +14,50 @@ from test_ai_sync_recovery import WRAPPER
 
 
 class AiSyncRegressions(SyncFixture):
+    def test_recovery_rejects_rehashed_journal_claiming_existing_unknown_file(self):
+        # A coherent future generation does not establish ownership of an
+        # existing file. Rehash every dependent receipt so refusal must come
+        # from ownership validation, rather than a stale digest/context.
+        module = runpy.run_path(str(SCRIPT), run_name='sync_ownership_regression')
+        ab = module['ab']
+        path = 'rules/unknown-existing.md'
+        target = ab.destination(path)
+        self.put(self.root / target, b'# User-owned existing content\n')
+        self.upstream('rules/coding.md', b'# Reviewed coding update\n')
+        journal = module['proposal'](argparse.Namespace(bundle=self.bundle, source_base=None), self.root)
+        pending = {action['path']: action for action in journal['actions']}
+        state = json.loads(base64.b64decode(pending[ab.STATE]['data']))
+        payload = b'# FORGED_OVERWRITE_UNKNOWN_OWNER\n'
+        state['source_files'][path] = {'path': target, 'sha256': ab.sha(payload),
+                                      'blob_sha': ab.blob(payload), 'mode': '100644'}
+        sources = {}
+        for canonical, receipt in state['source_files'].items():
+            if canonical == path:
+                sources[canonical] = payload
+            elif receipt['path'] in pending:
+                sources[canonical] = base64.b64decode(pending[receipt['path']]['data'])
+            else:
+                sources[canonical] = ab.read_file(self.root, receipt['path'])
+        start_path = module['START']
+        start = (base64.b64decode(pending[start_path]['data']) if start_path in pending
+                 else ab.read_file(self.root, start_path))
+        outputs, context = ab.context(ab.json_file(self.root, ab.PROJECT), sources, start,
+                                      ab.json_file(self.root, ab.POLICY))
+        state['context'] = context
+        pending[target] = ab.file_action(target, payload, ab.descriptor(self.root, target))
+        for output, body in outputs.items():
+            pending[output] = ab.file_action(output, body, ab.descriptor(self.root, output))
+        pending[ab.STATE] = ab.file_action(ab.STATE, ab.encoded(state), ab.descriptor(self.root, ab.STATE))
+        journal['actions'] = sorted(pending.values(), key=lambda action:
+                                    (action['after']['kind'] != 'dir', action['path'] == ab.STATE, action['path']))
+        journal['effective_sha256'] = {p: ab.sha(body) for p, body in sorted(sources.items())}
+        journal['plan_sha256'] = module['digest']({k: v for k, v in journal.items() if k != 'plan_sha256'})
+        self.put(self.root / module['JOURNAL'], ab.encoded(journal))
+        before = tree(self.root)
+        self.cli('recover', reject=True)
+        self.assertEqual(tree(self.root), before)
+        self.assertEqual((self.root / target).read_bytes(), b'# User-owned existing content\n')
+
     def test_new_skill_installs_through_missing_parent_directory(self):
         path = 'skills/new-skill/SKILL.md'
         self.add_upstream(path, b'# New skill\nNEW_DIRECTORY_GENERATION\n')
