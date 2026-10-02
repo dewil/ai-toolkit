@@ -200,6 +200,18 @@ def dispatch(request, backend, timeout):
     params = request.get('params', {})
     if not isinstance(params, dict):
         return rpc_error(rid, -32602)
+    try:
+        if '_meta' in params:
+            meta = params['_meta']
+            if not isinstance(meta, dict):
+                raise ValueError()
+            if 'progressToken' in meta:
+                token = meta['progressToken']
+                if not isinstance(token, str) and (type(token) not in (int, float) or not math.isfinite(token)):
+                    raise ValueError()
+            # Transport metadata is opaque: it never selects scope or backend.
+    except (ValueError, TypeError, OverflowError):
+        return rpc_error(rid, -32602)
     method = request['method']
     if method == 'initialize':
         version = params.get('protocolVersion')
@@ -213,15 +225,6 @@ def dispatch(request, backend, timeout):
         try:
             if not {'name', 'arguments'} <= params.keys() or params.keys() - {'name', 'arguments', '_meta'} or params['name'] != 'memory_search':
                 raise ValueError()
-            if '_meta' in params:
-                meta = params['_meta']
-                if not isinstance(meta, dict):
-                    raise ValueError()
-                if 'progressToken' in meta:
-                    token = meta['progressToken']
-                    if not isinstance(token, str) and (type(token) not in (int, float) or not math.isfinite(token)):
-                        raise ValueError()
-                # Transport metadata is opaque: it never selects scope or backend.
             args = arguments(params['arguments'])
         except (ValueError, TypeError, OverflowError):
             return rpc_error(rid, -32602)
