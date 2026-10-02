@@ -192,11 +192,11 @@ def rpc_error(rid, code):
 def dispatch(request, backend, timeout):
     if not isinstance(request, dict):
         return rpc_error(None, -32600)
-    if 'id' not in request:
-        return None
-    rid = request['id']
+    rid = request.get('id')
     if request.get('jsonrpc') != '2.0' or not isinstance(request.get('method'), str) or type(rid) not in (str, int, type(None)) or request.keys() - {'jsonrpc', 'id', 'method', 'params'}:
         return rpc_error(None, -32600)
+    if 'id' not in request:
+        return None
     params = request.get('params', {})
     if not isinstance(params, dict):
         return rpc_error(rid, -32602)
