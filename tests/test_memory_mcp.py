@@ -258,6 +258,87 @@ def log_query(*args, **kwargs):
         self.assertEqual(len(responses), 1)
         self.assertFalse(self.marker.exists())
 
+    def test_transport_meta_accepted_and_ignored(self):
+        self.synthetic()
+        args = {'query': 'remember', 'project': 'Eng', 'limit': 2}
+        baseline, _ = self.run_rpc([self.call(args)])
+        self.assertIn('result', baseline[0])
+        expected_calls = self.marker.read_text()
+        for meta in ({}, {'progressToken': 'token'}, {'progressToken': 0},
+                     {'progressToken': -1.25},
+                     {'vendor.example/custom': {'arbitrary': [None, True, 7]},
+                      'threadId': 'Other', 'sessionId': 'Other', 'project': 'Other'}):
+            with self.subTest(meta=meta):
+                self.marker.unlink(missing_ok=True)
+                request = self.call(args)
+                request['params']['_meta'] = meta
+                responses, _ = self.run_rpc([request, self.request('ping', rid=2)])
+                self.assertIn('result', responses[0], 'valid transport metadata must be accepted')
+                self.assertEqual(responses[0], baseline[0], 'metadata must not alter result or project scope')
+                self.assertEqual(self.marker.read_text(), expected_calls,
+                                 'metadata must not reach backend calls')
+                self.assertIn('result', responses[1])
+
+    def test_transport_meta_rejects_malformed_types(self):
+        self.synthetic()
+        invalid = [None, [], 'meta', 1, True,
+                   *[{'progressToken': token} for token in (None, True, False, [], {})]]
+        for meta in invalid:
+            with self.subTest(meta=meta):
+                request = self.call({'query': 'x', 'project': 'Eng'})
+                request['params']['_meta'] = meta
+                responses, _ = self.run_rpc([request, self.request('ping', rid=2)])
+                self.assertEqual(responses[0]['error']['code'], -32602)
+                self.assertIn('result', responses[1])
+        # JSON number syntax is valid, but decoding overflows to a nonfinite number.
+        for number in ('1e999', '-1e999'):
+            with self.subTest(number=number):
+                request = self.call({'query': 'x', 'project': 'Eng'})
+                request['params']['_meta'] = {'progressToken': 'OVERFLOW_NUMBER'}
+                wire = json.dumps(request).replace('"OVERFLOW_NUMBER"', number)
+                process = subprocess.run([sys.executable, str(SCRIPT), '--backend', str(self.backend)],
+                    input=wire + '\n' + json.dumps(self.request('ping', rid=2)) + '\n',
+                    capture_output=True, text=True, cwd=self.dir, timeout=5,
+                    env={**os.environ, 'TMPDIR': TMP})
+                self.assertEqual(process.returncode, 0)
+                responses = [json.loads(line) for line in process.stdout.splitlines()]
+                self.assertEqual(responses[0]['error']['code'], -32602)
+                self.assertIn('result', responses[1])
+        self.assertFalse(self.marker.exists(), 'invalid metadata must not invoke backend')
+
+    def test_transport_meta_does_not_relax_argument_or_outer_fields(self):
+        self.synthetic()
+        valid = {'query': 'x', 'project': 'Eng'}
+        requests = []
+        for key in ('_meta', 'threadId', 'sessionId', 'backend', 'url', 'command', 'path', 'model'):
+            request = self.call({**valid, key: 'extra'})
+            request['params']['_meta'] = {'progressToken': 'valid'}
+            requests.append(request)
+        for key in ('threadId', 'sessionId', 'project', 'backend', 'url', 'command', 'path', 'model'):
+            request = self.call(valid)
+            request['params'].update({'_meta': {}, key: 'extra'})
+            requests.append(request)
+        for request in requests:
+            with self.subTest(params=request['params']):
+                responses, _ = self.run_rpc([request, self.request('ping', rid=2)])
+                self.assertEqual(responses[0]['error']['code'], -32602)
+                self.assertIn('result', responses[1])
+        self.assertFalse(self.marker.exists(), 'extra fields must not invoke backend')
+
+    def test_transport_meta_notifications_never_execute(self):
+        self.synthetic()
+        notifications = []
+        for meta in ({'progressToken': 'token', 'threadId': 'Other'}, None,
+                     {'progressToken': True}):
+            request = self.call({'query': 'x', 'project': 'Eng'})
+            del request['id']
+            request['params']['_meta'] = meta
+            notifications.append(request)
+        responses, _ = self.run_rpc([*notifications, self.request('ping', rid=7)])
+        self.assertEqual([r['id'] for r in responses], [7])
+        self.assertIn('result', responses[0])
+        self.assertFalse(self.marker.exists(), 'notifications must never execute backend')
+
     def test_malformed_protocol_and_duplicate_keys(self):
         cases = [('not-json', -32700),
                  ('{"jsonrpc":"2.0","id":1,"id":2,"method":"ping"}', -32700),
