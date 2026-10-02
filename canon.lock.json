@@ -245,7 +245,7 @@
       "mode": "100644"
     },
     "scripts/ai-migrate-terminal.py": {
-      "blob_sha": "d42ca381e8931836afde51b02da92a02f6f70b67",
+      "blob_sha": "5fd379afa58fc558d24cf2c46f3f859f973ae963",
       "mode": "100644"
     },
     "scripts/ai-migrate.py": {
@@ -497,7 +497,7 @@
       "mode": "100644"
     }
   },
-  "manifest_digest": "bcaa7700a2b5631cb07f5c15537158e79634f242c8bae17a329c610b57eb5a67",
+  "manifest_digest": "84d1d5a14ef6ac786063247fa7ce87f375321cae1a8736bded9aac5d3eac36aa",
   "membership": {
     "agents/architect.md": [
       "universal"
