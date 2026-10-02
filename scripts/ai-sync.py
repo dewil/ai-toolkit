@@ -302,6 +302,10 @@ def validate_future(root, journal):
     if state.get('local_files', []) != sorted(intent['local_only']):
         raise Invalid('Future local ownership differs')
     for p, receipt in state['source_files'].items():
+        if p not in old['source_files']:
+            action = pending.get(ab.destination(p))
+            if action is None or action['after']['kind'] != 'file' or action['before'] is not None:
+                raise Invalid('New source requires an originally absent destination')
         if receipt != old['source_files'].get(p):
             data = future(ab.destination(p))
             if receipt['sha256'] != ab.sha(data) or receipt['blob_sha'] != ab.blob(data):
