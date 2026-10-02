@@ -313,7 +313,7 @@
       "mode": "100755"
     },
     "scripts/memory-mcp.py": {
-      "blob_sha": "b5afb41c3c60a53df41b17f2594dcb9be2051e4b",
+      "blob_sha": "ba22d7bfd4d1eefeec79db3e5bc996f8e63b362e",
       "mode": "100644"
     },
     "scripts/mymeet-snapshot.py": {
@@ -505,7 +505,7 @@
       "mode": "100644"
     }
   },
-  "manifest_digest": "969e3a98de7712774c7b7fb10de40ab8715a8f654b98bceaa8f47688e5754842",
+  "manifest_digest": "e66f751b1433030bac75fdf311e043ffbf640b907e4c5b1ac294b3b79669f1f6",
   "membership": {
     "agents/architect.md": [
       "universal"
