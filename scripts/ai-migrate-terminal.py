@@ -79,7 +79,9 @@ def validate_config(data, ab):
         # The shared loader validates a pinned URL without fetching any content.
         ab.loader(argparse.Namespace(source_base=source['base'], bundle=None))
     elif source.get('kind') == 'bundle' and set(source) == {'kind', 'path'}:
-        absolute_path(source['path'])
+        bundle = absolute_path(source['path'])
+        if data['operation'] in ('plan', 'apply') and not bundle.is_dir():
+            raise Invalid('Bundle directory does not exist')
         # An offline check/recover does not need the source directory to survive.
     else:
         raise Invalid('Invalid request source fields')
