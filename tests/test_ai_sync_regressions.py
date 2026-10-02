@@ -14,15 +14,14 @@ from test_ai_sync_recovery import WRAPPER
 
 
 class AiSyncRegressions(SyncFixture):
-    def test_recovery_rejects_rehashed_journal_claiming_existing_unknown_file(self):
+    def coherent_source_overwrite_journal(self, path, current):
         # A coherent future generation does not establish ownership of an
         # existing file. Rehash every dependent receipt so refusal must come
         # from ownership validation, rather than a stale digest/context.
         module = runpy.run_path(str(SCRIPT), run_name='sync_ownership_regression')
         ab = module['ab']
-        path = 'rules/unknown-existing.md'
         target = ab.destination(path)
-        self.put(self.root / target, b'# User-owned existing content\n')
+        self.put(self.root / target, current)
         self.upstream('rules/coding.md', b'# Reviewed coding update\n')
         journal = module['proposal'](argparse.Namespace(bundle=self.bundle, source_base=None), self.root)
         pending = {action['path']: action for action in journal['actions']}
@@ -50,13 +49,61 @@ class AiSyncRegressions(SyncFixture):
         pending[ab.STATE] = ab.file_action(ab.STATE, ab.encoded(state), ab.descriptor(self.root, ab.STATE))
         journal['actions'] = sorted(pending.values(), key=lambda action:
                                     (action['after']['kind'] != 'dir', action['path'] == ab.STATE, action['path']))
+        journal['inputs'].pop(target, None)
         journal['effective_sha256'] = {p: ab.sha(body) for p, body in sorted(sources.items())}
         journal['plan_sha256'] = module['digest']({k: v for k, v in journal.items() if k != 'plan_sha256'})
-        self.put(self.root / module['JOURNAL'], ab.encoded(journal))
+        return module, journal
+
+    def test_recovery_rejects_rehashed_journal_claiming_existing_unknown_file(self):
+        current = b'# User-owned existing content\n'
+        module, journal = self.coherent_source_overwrite_journal('rules/unknown-existing.md', current)
+        self.put(self.root / module['JOURNAL'], module['ab'].encoded(journal))
         before = tree(self.root)
         self.cli('recover', reject=True)
         self.assertEqual(tree(self.root), before)
-        self.assertEqual((self.root / target).read_bytes(), b'# User-owned existing content\n')
+        self.assertEqual(self.destination('rules/unknown-existing.md').read_bytes(), current)
+
+    def test_recovery_rejects_coherent_overwrite_of_tracked_local_edit(self):
+        path = 'rules/wiki.md'
+        current = self.sources[path] + b'LEGITIMATE_OWNER_EDIT\n'
+        module, journal = self.coherent_source_overwrite_journal(path, current)
+        self.put(self.root / module['JOURNAL'], module['ab'].encoded(journal))
+        before = tree(self.root)
+        self.cli('recover', reject=True)
+        self.assertEqual(tree(self.root), before)
+        self.assertEqual(self.destination(path).read_bytes(), current)
+        self.assert_base(path, self.sources[path])
+
+    def test_recovery_requires_integer_versions_in_original_and_future_state(self):
+        for side in ('original', 'future'):
+            for key, value in (('schema_version', 2.0), ('layout_version', True), ('layout_version', 1.0)):
+                with self.subTest(side=side, key=key, value=value):
+                    fixture = SyncFixture()
+                    fixture.setUp()
+                    try:
+                        module = runpy.run_path(str(SCRIPT), run_name='sync_state_version_regression')
+                        ab = module['ab']
+                        fixture.upstream('rules/coding.md', b'# Version test update\n')
+                        journal = module['proposal'](argparse.Namespace(bundle=fixture.bundle, source_base=None), fixture.root)
+                        action = journal['actions'][-1]
+                        if side == 'original':
+                            old = json.loads(base64.b64decode(journal['state_before']))
+                            old[key] = value
+                            body = ab.encoded(old)
+                            fixture.state_path.write_bytes(body)
+                            journal['state_before'] = base64.b64encode(body).decode()
+                            action['before'] = ab.descriptor(fixture.root, ab.STATE)
+                        else:
+                            future = json.loads(base64.b64decode(action['data']))
+                            future[key] = value
+                            journal['actions'][-1] = ab.file_action(ab.STATE, ab.encoded(future), action['before'])
+                        journal['plan_sha256'] = module['digest']({k: v for k, v in journal.items() if k != 'plan_sha256'})
+                        fixture.put(fixture.root / module['JOURNAL'], ab.encoded(journal))
+                        before = tree(fixture.root)
+                        fixture.cli('recover', reject=True)
+                        self.assertEqual(tree(fixture.root), before)
+                    finally:
+                        fixture.doCleanups()
 
     def test_new_skill_installs_through_missing_parent_directory(self):
         path = 'skills/new-skill/SKILL.md'

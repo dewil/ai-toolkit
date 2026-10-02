@@ -287,9 +287,15 @@ def validate_future(root, journal):
         return ab.read_file(root, path)
     state = json.loads(future(ab.STATE))
     config = ab.json_file(root, ab.PROJECT)
+    if any(type(config.get(k)) is not int for k in ('schema_version', 'layout_version')):
+        raise Invalid('Project versions must be integers')
+    if any(type(state.get(k)) is not int for k in ('schema_version', 'layout_version')):
+        raise Invalid('Future state versions must be integers')
     ab.validate_state(state, config)
     old_bytes = base64.b64decode(journal['state_before'], validate=True)
     old = json.loads(old_bytes)
+    if any(type(old.get(k)) is not int for k in ('schema_version', 'layout_version')):
+        raise Invalid('Original state versions must be integers')
     ab.validate_state(old, config)
     if pending[ab.STATE]['before']['sha256'] != ab.sha(old_bytes):
         raise Invalid('Original state receipt differs')
@@ -302,8 +308,12 @@ def validate_future(root, journal):
     if state.get('local_files', []) != sorted(intent['local_only']):
         raise Invalid('Future local ownership differs')
     for p, receipt in state['source_files'].items():
+        action = pending.get(ab.destination(p))
+        if p in old['source_files'] and action is not None:
+            before = action['before']
+            if before is None or before['sha256'] not in (old['source_files'][p]['sha256'], action['after']['sha256']):
+                raise Invalid('Tracked source action would overwrite a local edit')
         if p not in old['source_files']:
-            action = pending.get(ab.destination(p))
             if action is None or action['after']['kind'] != 'file' or action['before'] is not None:
                 raise Invalid('New source requires an originally absent destination')
         if receipt != old['source_files'].get(p):
