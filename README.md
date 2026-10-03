@@ -40,7 +40,7 @@ flowchart LR
 Выполни инструкции из https://raw.githubusercontent.com/dewil/ai-toolkit/main/start.md для нового проекта.
 ```
 
-Если установленный клиент хранит HTTP-источник `https://raw.githubusercontent.com/dewil/claude-toolkit/main`, при следующем обычном sync явно выбери новый source URL `https://raw.githubusercontent.com/dewil/ai-toolkit/main`. Redirect сам по себе не меняет источник клиента. Уже закрепленная операция сохраняет выбранные SHA и URL; обычный sync не переписывает pins, provenance, архивы, историю или локальные папки.
+Если сохраненный HTTPS `source.base` клиента указывает на старый origin `dewil/claude-toolkit` (в том числе с ref или SHA), при следующем обычном sync явно выбери новый source URL `https://raw.githubusercontent.com/dewil/ai-toolkit/main`. Redirect сам по себе не меняет сохраненный origin. Активные operation pins, исторические receipts и retained generations сохраняются; обычный sync из выбранного нового источника записывает provenance следующего установленного поколения.
 
 [Точка входа](start.md) направит в [bootstrap `.AI`](bootstrap/bootstrap-ai.prompt.md). Корень клиента должен существовать. Bootstrap поверх `.claude`, `.AI` или конфликтующих входов не выполняется; контейнер всех рабочих проектов автоматически не сканируется.
 
