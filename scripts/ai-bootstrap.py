@@ -137,6 +137,31 @@ def destination(rel):
     return rel if top == 'scripts' else '.AI/' + ('roles' if top == 'agents' else top) + '/' + tail
 
 
+def unjournaled_transaction_dir(root):
+    """Identify a transaction directory without inspecting unknown entries."""
+    if (root / '.AI').exists() or (root / '.AI').is_symlink():
+        return False
+    folder = root / TXN
+    try:
+        if not stat.S_ISDIR(folder.lstat().st_mode):
+            return False
+    except FileNotFoundError:
+        return False
+    for name in ('journal.json', 'sync.json', 'migration.json'):
+        try:
+            (folder / name).lstat()
+        except FileNotFoundError:
+            continue
+        return False
+    return True
+
+
+def unjournaled_diagnostic():
+    return ('No bootstrap journal is present. Automatic replay is '
+            'unavailable; artifacts are preserved. Perform a read-only inventory '
+            'and make a separate manual decision.')
+
+
 def checked(root, rel):
     """Never follow an intermediate symlink, even one resolving inside root."""
     safe_relative(rel)
@@ -459,6 +484,9 @@ def package(args, root):
         return [], state
     for rel in ('.claude', '.agents', 'AGENTS.md', 'CLAUDE.md', TXN):
         if descriptor(root, rel) is not None:
+            if rel == TXN and unjournaled_transaction_dir(root):
+                raise Invalid('Unjournaled bootstrap artifacts found. ' +
+                              unjournaled_diagnostic())
             raise Invalid(f'Existing agent path requires migration: {rel}')
     for rel in files:
         if descriptor(root, rel) is not None:
@@ -584,6 +612,9 @@ def check(root):
     refuse_migration(root)
     if (root / JOURNAL).exists() or (root / JOURNAL).is_symlink():
         raise Invalid('Unfinished transaction: run recover')
+    if unjournaled_transaction_dir(root):
+        raise Invalid('Unjournaled bootstrap artifacts found. ' +
+                      unjournaled_diagnostic())
     state = load_state(root)
     assert_layout(root)
     assert_links(root)
@@ -831,6 +862,10 @@ def main(argv=None):
                 validate_journal(json_file(root, JOURNAL))
                 print('Unfinished transaction: run recover', file=sys.stderr)
                 return 1
+            if unjournaled_transaction_dir(root):
+                print('ai-bootstrap: Unjournaled bootstrap artifacts found. ' +
+                      unjournaled_diagnostic(), file=sys.stderr)
+                return 1
             load_state(root)
             try:
                 check(root)
@@ -844,6 +879,8 @@ def main(argv=None):
         else:
             if descriptor(root, JOURNAL) is None:
                 print(json.dumps({'status': 'no-transaction'}))
+                if unjournaled_transaction_dir(root):
+                    print('ai-bootstrap: ' + unjournaled_diagnostic(), file=sys.stderr)
                 return 0
             journal = json_file(root, JOURNAL)
             validate_future(root, journal)
