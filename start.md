@@ -1,10 +1,10 @@
-# claude-toolkit - точка входа
+# AI Toolkit - точка входа
 
 Этот файл - точка входа в AI Toolkit. Если пользователь сказал "выполни инструкции из `<...>/start.md`", определи, хочет ли он настроить новый проект, обновить `.AI`, отдельно мигрировать legacy в `.AI` или только посмотреть репозиторий. Уточняй только недостающее и направляй в нужный промт.
 
 ## Определи canon_base (всегда HTTP)
 
-`<canon_base>` = директория, из которой загружен ЭТОТ файл, - всегда HTTP-URL. Пример: загружен по `https://raw.githubusercontent.com/dewil/claude-toolkit/main/start.md` -> `<canon_base> = https://raw.githubusercontent.com/dewil/claude-toolkit/main`.
+`<canon_base>` = директория, из которой загружен ЭТОТ файл, - всегда HTTP-URL. Пример: загружен по `https://raw.githubusercontent.com/dewil/ai-toolkit/main/start.md` -> `<canon_base> = https://raw.githubusercontent.com/dewil/ai-toolkit/main`.
 
 **Канон тянется только по HTTP.** Даже если на машине есть локальный клон toolkit (например, соседней папкой с проектом) - не ищи его, не подхватывай, не переключайся на чтение с диска. Никаких `dirname` до клона, никаких git-путей к нему. Единственный источник канона - `<canon_base>` по HTTP. Это держит изоляцию: проект работает с HTTP-снимком канона, а не с чьим-то рабочим деревом. Обновление `.AI` также использует pinned HTTP-снимок.
 

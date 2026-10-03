@@ -18,7 +18,7 @@
 
 ## ШАГ 1. Аудит (только чтение)
 
-1. Прочитай `.claude/canon.yaml` -> возьми `canon.raw_base` (например, `https://raw.githubusercontent.com/dewil/claude-toolkit/main`). Если `canon.yaml` нет - проект не подключен к канону; сообщи и остановись.
+1. Прочитай `.claude/canon.yaml` -> возьми `canon.raw_base` (например, `https://raw.githubusercontent.com/dewil/ai-toolkit/main`). Если `canon.yaml` нет - проект не подключен к канону; сообщи и остановись.
 2. Проверь наличие и содержимое:
    - `README.md` в корне проекта - есть ли, и если есть, что это. Три состояния, нормализуй их так:
      - **полноценный человеческий манифест** - считаем "README есть";
