@@ -13,6 +13,7 @@ from pathlib import Path
 
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
+NO_SNAPSHOT = object()
 
 
 class Invalid(Exception):
@@ -55,7 +56,21 @@ def read_regular(path: Path) -> bytes:
         os.close(fd)
 
 
-def atomic_replace(path: Path, data: bytes, mode: int) -> None:
+def assert_snapshot(path: Path, expected: bytes | None, message: str) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise Invalid(message) from None
+    if expected is None or not stat.S_ISREG(mode) or read_regular(path) != expected:
+        raise Invalid(message)
+
+
+def atomic_replace(path: Path, data: bytes, mode: int,
+                   expected: bytes | None | object = NO_SNAPSHOT,
+                   changed_message: str = "target changed during write",
+                   guards: tuple[tuple[Path, bytes | None, str], ...] = ()) -> None:
     fd, temporary = tempfile.mkstemp(prefix=".memory-write-", suffix=".tmp",
                                      dir=path.parent)
     try:
@@ -64,6 +79,10 @@ def atomic_replace(path: Path, data: bytes, mode: int) -> None:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
+        for guarded_path, snapshot, message in guards:
+            assert_snapshot(guarded_path, snapshot, message)
+        if expected is not NO_SNAPSHOT:
+            assert_snapshot(path, expected, changed_message)
         os.replace(temporary, path)
         directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
@@ -154,16 +173,18 @@ def write_fact(memory: Path, index_path: Path, lock_path: Path,
             if read_regular(fact_path) != fact:
                 raise Invalid("fact ID already exists with different content")
         else:
-            atomic_replace(fact_path, fact, 0o600)
+            atomic_replace(fact_path, fact, 0o600, expected=None,
+                           changed_message="fact ID appeared during write; refusing to overwrite it")
 
         if link_pattern(name).search(current_index):
             return "unchanged" if existing_fact else "created"
 
         updated_index = append_link(current_index, name, description)
-        if read_regular(index_path) != current_index:
-            raise Invalid("MEMORY.md changed during write; fact is complete and index was preserved")
         index_mode = stat.S_IMODE(index_path.lstat().st_mode)
-        atomic_replace(index_path, updated_index, index_mode)
+        atomic_replace(index_path, updated_index, index_mode, expected=current_index,
+                       changed_message="MEMORY.md changed during write; fact is complete and index was preserved",
+                       guards=((fact_path, fact,
+                                "fact changed during write; MEMORY.md was preserved"),))
         return "index-repaired" if existing_fact else "created"
     finally:
         os.close(lock_fd)
