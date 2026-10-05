@@ -77,6 +77,7 @@ universal:
   - skills/llm-ru/SKILL.md              # прогон документа через российское облако (YandexGPT, GigaChat): маскировка ПД, прайс с датой сверки, свой журнал расхода; замер, а не гейт
   - skills/jev-decide/SKILL.md          # публичный пакетный предфильтр через Jev и advisory уровня исполнителя по явно разрешенному публичному описанию
   - scripts/jev-executor-questions.json # frozen вопрос executor_tier для безопасной рекомендации уровня исполнителя
+  - scripts/jev-feedback-questions.json # frozen вопросы Jev для advisory по подтвержденным поправкам пользователя
   - scripts/jev-decide.py               # вызов Jev (Decisions API OpenRouter, alpha) со сверкой полноты ответов, stdlib
   - skills/repo-publication/SKILL.md    # аудит приватного репозитория (секреты, ПД, NDA, история) и публикация с проверкой снаружи
   - skills/local-transcription/SKILL.md # локальная (offline) транскрипция записи встречи/лекции: выбор ASR, token-free диаризация, очередь прогонов, грабли
