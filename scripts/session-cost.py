@@ -236,7 +236,10 @@ def _tokens(value):
     for key, item in value.items():
         if item is None and key not in ("input", "output"): continue
         if not _integer(item): _err("token values must be nonnegative integers or null")
-    if value["cache_read"] is not None and value["cache_write"] is not None and value["cache_read"] + value["cache_write"] > value["input"]:
+    if ((value["cache_read"] is not None and value["cache_read"] > value["input"])
+            or (value["cache_write"] is not None and value["cache_write"] > value["input"])
+            or (value["cache_read"] is not None and value["cache_write"] is not None
+                and value["cache_read"] + value["cache_write"] > value["input"])):
         _err("cache breakdown exceeds input")
     if value["reasoning"] is not None and value["reasoning"] > value["output"]:
         _err("reasoning exceeds output")
@@ -309,8 +312,15 @@ def task_report(path):
         key = tuple(rec[k] for k in ("role", "vendor", "model", "platform", "access"))
         row = grouped.setdefault(key, {"records": 0, "tokens": {k: 0 for k in TOKEN_KEYS}, "null": set(), "total": 0, "unknown_records": 0, "money": defaultdict(Decimal), "money_unknown_records": 0})
         row["records"] += 1
+        money = rec.get("money")
+        if money is None:
+            row["money_unknown_records"] += 1; money_unknown += 1
+        else:
+            mk = (money["currency"], money["kind"])
+            amount = Decimal(money["amount"])
+            row["money"][mk] += amount; money_totals[mk] += amount
         if rec["status"] == "unknown":
-            row["unknown_records"] += 1; row["money_unknown_records"] += 1; money_unknown += 1
+            row["unknown_records"] += 1
             for k in TOKEN_KEYS: row["null"].add(k)
             continue
         t = rec["tokens"]
@@ -318,12 +328,6 @@ def task_report(path):
         for k in TOKEN_KEYS:
             if t[k] is None: row["null"].add(k)
             else: row["tokens"][k] += t[k]
-        money = rec.get("money")
-        if money is None: row["money_unknown_records"] += 1; money_unknown += 1
-        else:
-            mk = (money["currency"], money["kind"])
-            amount = Decimal(money["amount"])
-            row["money"][mk] += amount; money_totals[mk] += amount
     rows = []
     for key, value in sorted(grouped.items()):
         rows.append(dict(zip(("role", "vendor", "model", "platform", "access"), key)) | {
@@ -381,7 +385,7 @@ def snapshot(provider, path, since=None):
     else: start = 0
     if raw[:start] and not raw[:start].endswith(b"\n"): _err("checkpoint is not at a line boundary")
     if provider == "codex":
-        sid = None; model = None; cumulative = {k: 0 for k in TOKEN_KEYS}; per_model = defaultdict(lambda: {k: 0 for k in TOKEN_KEYS}); totals_by_model = defaultdict(lambda: {k: 0 for k in TOKEN_KEYS}); touched = set(); optional_seen = defaultdict(set); seen_models = set()
+        sid = None; model = None; vendor = "unknown"; cumulative = {k: 0 for k in TOKEN_KEYS}; per_model = defaultdict(lambda: {k: 0 for k in TOKEN_KEYS}); totals_by_model = defaultdict(lambda: {k: 0 for k in TOKEN_KEYS}); touched = set(); seen_models = set(); optional_complete = {k: True for k in ("cache_read", "cache_write", "reasoning")}; interval_optional_complete = {k: True for k in ("cache_read", "cache_write", "reasoning")}
         bytepos = 0; begin = saved["offset"] if saved else 0
         for obj, rawline in zip(lines, raw.splitlines(keepends=True)):
             is_new = bytepos >= begin
@@ -392,6 +396,10 @@ def snapshot(provider, path, since=None):
                 if not isinstance(ident, str) or not ident: _err("missing session identity")
                 if sid and sid != ident: _err("conflicting session identity")
                 sid = ident
+                if isinstance(payload, dict) and "model_provider" in payload:
+                    provider_name = payload["model_provider"]
+                    if provider_name is not None and (not isinstance(provider_name, str) or not provider_name.strip()): _err("invalid vendor metadata")
+                    if isinstance(provider_name, str): vendor = provider_name
             elif typ == "turn_context":
                 model = payload.get("model") if isinstance(payload, dict) else None
                 if not isinstance(model, str) or not model: _err("missing model")
@@ -399,8 +407,11 @@ def snapshot(provider, path, since=None):
                 info = payload.get("info", {}).get("total_token_usage") if isinstance(payload.get("info"), dict) else None
                 curr = _counter(info)
                 seen_models.add(model)
-                optional_seen[model].update(k for k in ("cache_read", "cache_write", "reasoning") if curr[k] is not None)
                 if not model: _err("usage without model")
+                for key in optional_complete:
+                    if curr[key] is None:
+                        optional_complete[key] = False
+                        if is_new: interval_optional_complete[key] = False
                 old = dict(cumulative)
                 delta = {}
                 for key, value in curr.items():
@@ -420,7 +431,7 @@ def snapshot(provider, path, since=None):
         groups = {m: {k: totals_by_model[m][k] for k in TOKEN_KEYS} for m in seen_models}
         for mod in groups:
             for key in ("cache_read", "cache_write", "reasoning"):
-                if key not in optional_seen[mod]: groups[mod][key] = None
+                if not optional_complete[key]: groups[mod][key] = None
     elif provider == "claude":
         sid = None; by_id = {}
         for obj in lines:
@@ -449,6 +460,7 @@ def snapshot(provider, path, since=None):
                 per_model[mod][key] += values[key]
             touched.add(mod)
         groups = {m: {k: per_model[m][k] for k in TOKEN_KEYS} for m in touched}
+        for group in groups.values(): group["reasoning"] = None
     else: _err("unsupported provider")
     if saved and sid != saved["session_id"]: _err("session identity changed")
     if saved:
@@ -456,10 +468,19 @@ def snapshot(provider, path, since=None):
             for mod, prior in oldgroups.items():
                 if mod not in groups: _err("checkpoint model missing")
                 for key in TOKEN_KEYS:
-                    if prior.get(key) is not None and (not _integer(prior[key]) or groups[mod][key] is None or groups[mod][key] < prior[key]): _err("usage counter rollback")
+                    if prior.get(key) is not None:
+                        if not _integer(prior[key]): _err("invalid checkpoint counter")
+                        if groups[mod][key] is None and key not in ("input", "output"): continue
+                        if groups[mod][key] is None or groups[mod][key] < prior[key]: _err("usage counter rollback")
             for mod, cur in list(groups.items()):
                 prev = oldgroups.get(mod, {k: (0 if cur[k] is not None else None) for k in TOKEN_KEYS})
                 per_model[mod] = {k: (None if cur[k] is None or prev.get(k) is None else cur[k] - prev[k]) for k in TOKEN_KEYS}
+                if provider == "codex":
+                    for key in interval_optional_complete:
+                        if not interval_optional_complete[key] or prev.get(key) is None:
+                            per_model[mod][key] = None
+                else:
+                    per_model[mod]["reasoning"] = None
             touched = {m for m in groups if any(v not in (0, None) for v in per_model[m].values())}
     checkpoint = {"schema_version": 1, "provider": provider, "session_id": sid, "source_file": str(path), "offset": len(raw), "prefix_sha256": digest, "groups": groups}
     if not saved:
@@ -472,8 +493,8 @@ def snapshot(provider, path, since=None):
         if provider == "claude": rec_tokens["reasoning"] = None
         begin = saved["offset"]
         if len(raw) <= begin: continue
-        source = {"session_id": sid, "provider": provider, "begin": begin, "end": len(raw), "source_file": str(path), "prefix_sha256": hashlib.sha256(raw[:begin]).hexdigest()}
-        records.append({"id": f"{provider}:{sid}:{begin}:{len(raw)}:{mod}", "role": "author", "vendor": provider, "model": mod, "platform": "cli", "access": "subscription" if provider == "claude" else "api", "status": "measured", "source": source, "tokens": rec_tokens})
+        source = {"session_id": sid, "provider": provider, "begin": begin, "end": len(raw), "source_file": str(path), "prefix_sha256": hashlib.sha256(raw[:len(raw)]).hexdigest()}
+        records.append({"id": f"{provider}:{sid}:{begin}:{len(raw)}:{mod}", "role": "author", "vendor": vendor if provider == "codex" else "unknown", "model": mod, "platform": "codex" if provider == "codex" else "claude-code", "access": "unknown", "status": "measured", "source": source, "tokens": rec_tokens})
     print(json.dumps({"schema_version": 1, "provider": provider, "session_id": sid, "source_file": str(path), "begin": saved["offset"], "end": len(raw), "prefix_sha256": digest, "records": records, "checkpoint": checkpoint}, ensure_ascii=False, indent=2)); return 0
 
 
@@ -484,7 +505,7 @@ def render_task(data):
     print("|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|")
     for r in data["rows"]:
         t = r["tokens"]; money = ", ".join(f"{m['amount']} {m['currency']} {m['kind']}" for m in r["money"]) or "unknown"
-        vals = [r[k] for k in ("role", "vendor", "model", "platform", "access")]+[t[k] if t[k] is not None else "unknown" for k in TOKEN_KEYS]+[r["total"], money, "partial" if r["unknown_records"] else "measured"]
+        vals = [r[k] for k in ("role", "vendor", "model", "platform", "access")]+[t[k] if t[k] is not None else "unknown" for k in ("input", "cache_read", "cache_write", "output", "reasoning")]+[r["total"], money, "partial" if r["unknown_records"] else "measured"]
         print("| " + " | ".join(esc(v) for v in vals) + " |")
 
 
