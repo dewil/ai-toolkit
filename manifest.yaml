@@ -105,6 +105,8 @@ coding:
   - skills/minimal-code/SKILL.md        # минимальный код: лестница ступеней сложности
   - skills/requirements/SKILL.md        # сбор размытых бизнес-требований в ТЗ + user stories до кода
   - skills/qa-browser/SKILL.md          # report-only QA-проход по веб-UI через браузер (chrome-devtools MCP)
+  - skills/android-apk-release/SKILL.md # выпуск и проверка подписанного APK в собственном HTTPS-канале
+  - skills/android-apk-release/runbook.md # проверки отдельно запрошенного updater по принятой проектной спеке
 
 documentation:
   - rules/doc-style-guide.md            # стиль страницы документации: каркас, регистр заголовков, роли выделений, ссылки, глоссарий
