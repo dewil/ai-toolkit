@@ -1048,14 +1048,14 @@ class RetryScopedToConnect(unittest.TestCase):
             and n.func.id == helper
         ]
 
-    def _assert_routed_through(self, helper: str, methods: set[str]) -> None:
+    def _assert_routed_through(self, helper: str, methods: set[str], extra_helpers=()) -> None:
         for name in self.CLIENT_SCRIPTS:
             tree = self._tree(name)
             for func in self._functions(tree):
                 for call in self._method_calls(func, methods):
-                    self.assertEqual(
+                    self.assertIn(
                         func.name,
-                        helper,
+                        (helper, *extra_helpers),
                         f"{name}:{call.lineno} - {ast.unparse(call)} мимо {helper}",
                     )
             # без этой сверки тест зеленел бы и на скрипте, где вызовы исчезли:
@@ -1073,7 +1073,10 @@ class RetryScopedToConnect(unittest.TestCase):
     def test_disconnect_only_inside_quiet_helper(self):
         """Блокер: cleanup на живом локе падает тем же locked - в finally он
         подменял исходное исключение, а после отправки давал ненулевой exit."""
-        self._assert_routed_through("disconnect_quietly", {"disconnect"})
+        # Album cleanup separately catches errors and preserves unknown delivery;
+        # reviewed behavior is exercised by test_telegram_album_failures.py.
+        self._assert_routed_through("disconnect_quietly", {"disconnect"},
+                                    extra_helpers=("disconnect_album",))
 
     def test_helper_wraps_nothing_but_connect(self):
         """Отправка не должна попасть внутрь вызова connect_with_retry."""
@@ -1384,4 +1387,3 @@ class MediaSettingsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
