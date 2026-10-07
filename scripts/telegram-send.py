@@ -762,7 +762,10 @@ def external_cancel() -> bool:
     return task is None or not hasattr(task, "cancelling") or bool(task.cancelling())
 
 
-async def disconnect_quietly(client) -> None:
+_album_disconnect_strict = False
+
+
+async def disconnect_quietly(client) -> bool:
     """Best-effort закрытие клиента: своей ошибкой ничего не рвет.
 
     telethon при отключении пишет состояние в ту же sqlite-сессию
@@ -774,6 +777,7 @@ async def disconnect_quietly(client) -> None:
     """
     try:
         await client.disconnect()
+        return True
     except asyncio.CancelledError:
         # CancelledError - BaseException: без этой ветки отмена футур telethon
         # в cleanup рвала бы finally и глушила итог прогона.
@@ -781,8 +785,146 @@ async def disconnect_quietly(client) -> None:
         if external_cancel():
             raise
         sys.stderr.write("disconnect не отработал (CancelledError)\n")
+        return False
     except Exception as exc:
+        if _album_disconnect_strict:
+            sys.stderr.write(f"disconnect не отработал ({type(exc).__name__})\n")
+            return False
         sys.stderr.write(f"disconnect не отработал ({type(exc).__name__}: {exc})\n")
+    return False
+
+
+def file_values(value) -> list:
+    """Сохраняет программный args.file=str/None и поддерживает CLI append."""
+    if value is None:
+        return []
+    return list(value) if isinstance(value, (list, tuple)) else [value]
+
+
+def validate_file_values(value, *, caption: str | None = None, schedule=None,
+                         voice: bool = False, html: bool = False) -> list[Path]:
+    """Проверить вложения до auth/client; дополнительные гарантии для альбома."""
+    values = file_values(value)
+    if not values:
+        return []
+    if len(values) > 10:
+        raise ValueError("в одном альбоме допустимо от 2 до 10 файлов")
+
+    paths = []
+    identities = set()
+    resolved_paths = set()
+    album = len(values) > 1
+    for raw in values:
+        if not isinstance(raw, str):
+            raise ValueError("некорректный путь в --file")
+        if not raw:
+            raise ValueError("--file задан пустой строкой - проверь переменную с путем")
+        try:
+            path = Path(raw).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            raise ValueError("путь пустой, недоступен или некорректен") from None
+        try:
+            info = path.stat()
+        except OSError:
+            raise ValueError(f"Файл не найден или недоступен: {path}") from None
+        if not path.is_file():
+            raise ValueError(f"путь не является обычным файлом: {path}")
+        if album:
+            if not os.access(path, os.R_OK):
+                raise ValueError(f"файл недоступен для чтения: {path}")
+            try:
+                with path.open("rb"):
+                    pass
+            except (OSError, RuntimeError, ValueError):
+                raise ValueError(f"файл недоступен для чтения: {path}") from None
+            identity = (info.st_dev, info.st_ino)
+            if path in resolved_paths or identity in identities:
+                raise ValueError("один и тот же файл нельзя добавить в альбом повторно")
+            resolved_paths.add(path)
+            identities.add(identity)
+        paths.append(path)
+
+    if album:
+        if schedule is not None or voice or html:
+            raise ValueError("альбом пока несовместим с --schedule, --voice и --html")
+        if caption is not None:
+            validate_album_caption(caption)
+    return paths
+
+
+def validate_album_caption(caption: str) -> None:
+    try:
+        caption_length = len(caption.encode("utf-16-le")) // 2
+    except UnicodeEncodeError:
+        raise ValueError("подпись содержит некорректную Unicode-последовательность") from None
+    if caption_length > 1024:
+        raise ValueError(f"подпись к альбому длиннее лимита 1024 UTF-16 code units ({caption_length})")
+
+
+async def disconnect_album(client) -> bool:
+    """Закрыть album-клиент, не теряя статус отправки из-за cleanup error."""
+    global _album_disconnect_strict
+    previous = _album_disconnect_strict
+    _album_disconnect_strict = True
+    try:
+        return (await disconnect_quietly(client)) is not False
+    except asyncio.CancelledError:
+        if external_cancel():
+            raise
+        sys.stderr.write("disconnect не отработал (CancelledError)\n")
+        return False
+    except Exception as exc:
+        sys.stderr.write(f"disconnect не отработал ({type(exc).__name__})\n")
+        return False
+    finally:
+        _album_disconnect_strict = previous
+
+
+async def send_document_album(client, entity, paths: list[Path], caption: str, *,
+                              reply_to, silent: bool, account: str) -> tuple[int, list[int]]:
+    """Один document-album send; IDs выводятся до pacing/cleanup."""
+    send_error = None
+    returned = None
+    try:
+        captions = [caption] + [""] * (len(paths) - 1)
+        returned = await client.send_file(
+            entity, [str(path) for path in paths], caption=captions,
+            reply_to=reply_to, force_document=True, parse_mode=None, silent=silent,
+            schedule=None,
+        )
+    except Exception as exc:
+        send_error = type(exc).__name__
+
+    ids = []
+    if isinstance(returned, (list, tuple)):
+        for item in returned:
+            ident = getattr(item, "id", None)
+            if isinstance(ident, int) and not isinstance(ident, bool) and ident > 0:
+                ids.append(ident)
+                print(f"ID документа: {ident}")
+    sys.stdout.flush()
+
+    pace_error = None
+    try:
+        pace_record(account, entity, len(caption or ""))
+    except Exception as exc:
+        pace_error = type(exc).__name__
+
+    valid = (
+        isinstance(returned, (list, tuple))
+        and len(returned) == len(paths)
+        and len(ids) == len(paths)
+        and all(ident > 0 for ident in ids)
+        and len(set(ids)) == len(ids)
+    )
+    if send_error or pace_error or not valid:
+        reason = send_error or pace_error or "неполное или некорректное подтверждение"
+        sys.stderr.write(
+            f"НЕОПРЕДЕЛЕННО: альбом не подтвержден ({reason}); проверь свежую историю чата "
+            "перед решением о повторе, автоматического повтора нет.\n"
+        )
+        return 4, ids
+    return 0, ids
 
 
 async def connect_with_retry(
@@ -960,18 +1102,24 @@ async def amain(args) -> int:
     schedule_dt = getattr(args, "schedule", None)
     schedule_tz = getattr(args, "schedule_tz", None)
 
-    if args.file is not None and not args.file:
-        sys.stderr.write("--file задан пустой строкой - проверь переменную с путем.\n")
+    try:
+        file_paths = validate_file_values(
+            args.file, schedule=schedule_dt, voice=getattr(args, "voice", False),
+            html=getattr(args, "html", False),
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"Файл: {exc}\n")
         return 2
+    is_album = len(file_paths) > 1
+    file_path = file_paths[0] if len(file_paths) == 1 else None
 
-    file_path = None
-    if args.file:
-        file_path = Path(args.file).expanduser().resolve()
-        if not file_path.is_file():
-            sys.stderr.write(f"Файл не найден: {file_path}\n")
+    text = read_text(args, allow_empty=bool(file_paths))
+    if is_album:
+        try:
+            validate_album_caption(text)
+        except ValueError as exc:
+            sys.stderr.write(f"Подпись: {exc}\n")
             return 2
-
-    text = read_text(args, allow_empty=args.file is not None)
 
     auth = load_auth(entry["account"])
     session_path = str(AUTH_DIR / auth["session_name"])
@@ -990,6 +1138,8 @@ async def amain(args) -> int:
         )
         return 2
 
+    album_send_started = False
+    album_success_ids = None
     try:
         # Прогрев: строим карту {unmarked_id -> свежий entity}. Нужна и для
         # резолва (get_entity на голый int на свежей сессии трактует его как
@@ -1023,12 +1173,16 @@ async def amain(args) -> int:
             # ошибиться отправителем так же легко, как чатом
             print(f"  от аккаунта: {entry['account']}")
             print(f"  тема: {topic_id if topic_id is not None else '-'}   ответ на: {reply_id if reply_id is not None else '-'}   звук: {'нет' if args.silent else 'да'}")
-            if file_path:
+            if is_album:
+                print(f"  файлы альбома ({len(file_paths)}):")
+                for index, path in enumerate(file_paths, 1):
+                    print(f"  {index}. {path} ({path.stat().st_size} байт)")
+            elif file_path:
                 # полный резолвленный путь и точный размер: dry-run - это
                 # предохранитель "тот ли файл", по одному имени его не проверить
                 print(f"  файл: {file_path} ({file_path.stat().st_size} байт)")
             if text:
-                print(f"  {'подпись' if file_path else 'текст'} ({len(lines)} строк):")
+                print(f"  {'подпись' if file_path or is_album else 'текст'} ({len(lines)} строк):")
                 for ln in lines:
                     print(f"  | {ln}")
             else:
@@ -1059,6 +1213,15 @@ async def amain(args) -> int:
                 return 2
 
         reply_to = build_reply_to(topic_id, reply_id)
+        if is_album:
+            album_send_started = True
+            album_rc, album_ids = await send_document_album(
+                client, entity, file_paths, text, reply_to=reply_to,
+                silent=args.silent, account=entry["account"],
+            )
+            if album_rc == 0:
+                album_success_ids = album_ids
+            return album_rc
         if file_path:
             file_to_send = str(file_path)
             file_attrs, file_mime = None, None
@@ -1153,7 +1316,13 @@ async def amain(args) -> int:
             print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
-        await disconnect_quietly(client)
+        if album_send_started:
+            if not await disconnect_album(client):
+                return 4
+            if album_success_ids is not None:
+                print("OK: отправлен альбом (id сообщений " + ", ".join(map(str, album_success_ids)) + ")")
+        else:
+            await disconnect_quietly(client)
 
 
 def main() -> int:
@@ -1162,7 +1331,7 @@ def main() -> int:
     )
     parser.add_argument("--to", required=True, help="label чата из .telegram-snapshot.json")
     parser.add_argument("--text", help="текст сообщения; если опущен - читается из stdin")
-    parser.add_argument("--file", help="путь к файлу-вложению; текст уходит подписью к нему")
+    parser.add_argument("--file", action="append", help="путь к файлу-вложению; повтори для альбома")
     parser.add_argument("--send", action="store_true", help="реально отправить (без флага - dry-run)")
     parser.add_argument("--no-pace-check", action="store_true", dest="no_pace_check",
                         help="не проверять паузу после предыдущего сообщения в этот чат. "

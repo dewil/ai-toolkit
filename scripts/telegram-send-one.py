@@ -59,29 +59,33 @@ async def amain(args) -> int:
     if want is not None and not want:
         sys.stderr.write("expected_username задан пустой строкой - проверь значение username.\n")
         return 2
-    # None и "" различаются: --file "$VAR" с пустой переменной - это заданный
-    # файловый режим, а не его отсутствие; молча уйти текстом было бы враньем
-    if args.file is not None and not args.file:
-        sys.stderr.write("--file задан пустой строкой - проверь переменную с путем.\n")
+    try:
+        file_paths = tgs.validate_file_values(
+            args.file, schedule=schedule_dt, voice=getattr(args, "voice", False),
+            html=getattr(args, "html", False),
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"Файл не найден или недоступен: {exc}\n")
         return 2
-    text = tgs.read_text(args, allow_empty=args.file is not None)
+    is_album = len(file_paths) > 1
+    file_path = file_paths[0] if len(file_paths) == 1 else None
+    text = tgs.read_text(args, allow_empty=bool(file_paths))
 
-    file_path = None
-    if args.file:
-        # проверка ДО соединения: падать раньше, чем занимать общую сессию
-        file_path = Path(args.file).expanduser().resolve()
-        if not file_path.is_file():
-            sys.stderr.write(f"Файл не найден: {file_path}\n")
+    if is_album:
+        try:
+            tgs.validate_album_caption(text)
+        except ValueError as exc:
+            sys.stderr.write(f"Подпись: {exc}\n")
             return 2
-        if text and len(text) > 1024:
-            # лимит Telegram на подпись к файлу; длинный текст + файл - это
-            # два сообщения (сначала --text без файла, потом файл с короткой
-            # подписью), резать сами не пытаемся
-            sys.stderr.write(
-                f"Подпись к файлу длиннее лимита Telegram в 1024 символа "
-                f"({len(text)}). Отправь текст и файл двумя сообщениями.\n"
-            )
-            return 2
+    elif file_path and text and len(text) > 1024:
+        # лимит Telegram на подпись к файлу; длинный текст + файл - это
+        # два сообщения (сначала --text без файла, потом файл с короткой
+        # подписью), резать сами не пытаемся
+        sys.stderr.write(
+            f"Подпись к файлу длиннее лимита Telegram в 1024 символа "
+            f"({len(text)}). Отправь текст и файл двумя сообщениями.\n"
+        )
+        return 2
 
     auth = tgs.load_auth(args.account)
     session_path = str(tgs.AUTH_DIR / auth["session_name"])
@@ -96,6 +100,8 @@ async def amain(args) -> int:
         )
         return 2
 
+    album_send_started = False
+    album_success_ids = None
     try:
         # Прогрев диалогов (как в telegram-snapshot/-send): карта свежих entity,
         # иначе resolve голого int на свежей сессии трактует его как PeerUser.
@@ -135,13 +141,17 @@ async def amain(args) -> int:
                 if tgs.is_round_minute(schedule_dt):
                     # Дошло сюда только через --exact-minute - см. telegram-send.py.
                     print("  ровная минута: разрешена явно")
-            print(f"  ответ на: {args.reply_to if args.reply_to is not None else '-'}   формат: {'html' if args.html else 'сырой текст'}   аккаунт: {args.account}   звук: {'нет' if args.silent else 'да'}")
-            if file_path:
+            print(f"  тема: {args.topic if args.topic is not None else '-'}   ответ на: {args.reply_to if args.reply_to is not None else '-'}   формат: {'html' if args.html else 'сырой текст'}   аккаунт: {args.account}   звук: {'нет' if args.silent else 'да'}")
+            if is_album:
+                print(f"  файлы альбома ({len(file_paths)}):")
+                for index, path in enumerate(file_paths, 1):
+                    print(f"  {index}. {path} ({path.stat().st_size} байт)")
+            elif file_path:
                 # полный резолвленный путь и точный размер: dry-run - это
                 # предохранитель "тот ли файл", по одному имени его не проверить
                 print(f"  файл: {file_path} ({file_path.stat().st_size} байт)")
             if text:
-                print(f"  {'подпись' if file_path else 'текст'} ({len(lines)} строк):")
+                print(f"  {'подпись' if file_path or is_album else 'текст'} ({len(lines)} строк):")
                 for ln in lines:
                     print(f"  | {ln}")
             else:
@@ -172,6 +182,15 @@ async def amain(args) -> int:
 
         reply_to = tgs.build_reply_to(args.topic, args.reply_to)
         parse_mode = "html" if args.html else None
+        if is_album:
+            album_send_started = True
+            album_rc, album_ids = await tgs.send_document_album(
+                client, entity, file_paths, text, reply_to=reply_to,
+                silent=args.silent, account=args.account,
+            )
+            if album_rc == 0:
+                album_success_ids = album_ids
+            return album_rc
         if file_path:
             file_to_send = str(file_path)
             file_attrs, file_mime = None, None
@@ -257,7 +276,13 @@ async def amain(args) -> int:
             print(f"OK: отправлено в \"{title}\" (id сообщения {sent.id})")
         return 0
     finally:
-        await tgs.disconnect_quietly(client)
+        if album_send_started:
+            if not await tgs.disconnect_album(client):
+                return 4
+            if album_success_ids is not None:
+                print("OK: отправлен альбом (id сообщений " + ", ".join(map(str, album_success_ids)) + ")")
+        else:
+            await tgs.disconnect_quietly(client)
 
 
 def main() -> int:
@@ -269,7 +294,7 @@ def main() -> int:
     parser.add_argument("username", nargs="?", default=None,
                         help="ожидаемый username для сверки (без @); при несовпадении - стоп")
     parser.add_argument("--text", help="текст сообщения; если опущен - читается из stdin")
-    parser.add_argument("--file", help="путь к файлу-вложению; текст уходит подписью к нему "
+    parser.add_argument("--file", action="append", help="путь к файлу-вложению; повтори для альбома "
                                        "(лимит Telegram - 1024 символа, длиннее - двумя сообщениями)")
     parser.add_argument("--voice", action="store_true",
                         help="отправить файл голосовым сообщением (ogg/opus), а не вложением. "
