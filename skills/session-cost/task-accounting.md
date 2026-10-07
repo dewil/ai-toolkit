@@ -4,15 +4,31 @@
 
 ## Один владелец и журнал
 
-Владелец задачи - единственный писатель `task-ledger.json`, рядом с Markdown-владельцем задачи. Обновляет его атомарной заменой, сохраняет ID задачи, ограничения и handoff в Markdown. Субагент возвращает receipt: роль, vendor, точную модель (или `unknown`), платформу, доступ (`api`, `subscription`, `local`, `unknown`), status, источник и числовые токены; если измерение недоступно - `status: unknown`, `tokens: null`, причина. Прежний владелец прекращает запись до передачи следующему.
+Для каждой активной задачи держи отдельный `<taskID>.usage.json` рядом с Markdown-владельцем, записывай его атомарной заменой и не объединяй параллельные задачи. Checkpoint именуй `<taskID>.<role>.<session-id>.checkpoint.json`; новый этап той же сессии продолжает ее checkpoint, новый role/session получает свой. Владелец сохраняет ID задачи, цель, ограничения, старты отдельных ролей/сессий и handoff в Markdown. До делегирования передай task ID, роль, начало/checkpoint-файл и попроси receipt даже при сбое или retry. Каждая реальная retry-попытка - отдельный вызов; незамеренный расход помечается `unknown`, не нулем. Субагент возвращает receipt, но не редактирует общий ledger. Прежний владелец прекращает запись до передачи следующему.
 
-Начни с пустого ledger:
+Начни с отдельного пустого ledger для конкретного task ID:
 
 ```json
 {"schema_version":1,"task_id":"TASK-123","records":[]}
 ```
 
-Каждый record содержит `id`, `role`, `vendor`, `model`, `platform`, `access`, `status`, `source`, `tokens`; optional `reason` и `money`. `tokens` имеет ровно `input`, `output`, `cache_read`, `cache_write`, `reasoning`: неотрицательные целые или `null` для неизвестного разложения. У неизвестного расхода все `tokens` равны null. Input уже включает cache read/write, output уже включает reasoning: итоги считают только input + output. Деньги - необязательная оценка/факт в отдельной валюте и с датой; фактическую сумму нельзя приписывать subscription.
+Каждый record содержит `id`, `role`, `vendor`, `model`, `platform`, `access`, `status`, `source`, `tokens`; optional `reason` и `money`. Используй `unknown` для неподтвержденной модели, вендора или способа биллинга. Provider в имени адаптера сам по себе не доказывает vendor или `api`/`subscription`; фиксируй подтвержденное значение отдельно.
+
+`tokens` имеет ровно `input`, `output`, `cache_read`, `cache_write`, `reasoning`: обязательные неотрицательные целые `input/output` и необязательные числовые разложения или `null`, когда источник их не сообщает. У неизвестного usage все `tokens` равны null. Input уже включает cache read/write, output уже включает reasoning: итоги считают только input + output. `money` необязателен; если известен, содержит `amount` (конечная десятичная строка >=0), `currency` (три прописные ASCII буквы), `kind` (`actual` или `estimate`), `source` (непустая ссылка/метод) и `as_of` (реальная ISO-дата). Сохраняй деньги независимо от token status; actual нельзя приписывать subscription.
+
+Пример ручного receipt с известной оценкой:
+
+```json
+{"id":"TASK-123:codex:request-7","role":"implementer","vendor":"openai","model":"gpt-6.1","platform":"codex","access":"api","status":"measured","source":"local-usage-receipt:request-7","tokens":{"input":1200,"output":180,"cache_read":800,"cache_write":100,"reasoning":40},"money":{"amount":"0.012","currency":"USD","kind":"estimate","source":"dated model rate x measured tokens","as_of":"2026-10-07"}}
+```
+
+Native receipt использует объект `source` с `session_id`, `provider`, `begin/end` (байтовые границы, `begin < end`), `source_file` и `prefix_sha256` (SHA-256 исходного файла до `end`). Стабильный record ID описывает вызов/интервал, не номер строки; повтор точного ID и данных учитывается один раз, конфликтующее содержимое того же ID - ошибка. Пересекающиеся native-интервалы одного provider/session/model запрещены независимо от ID и роли. Для ручного источника включай стабильный request ID; не добавляй второй агрегат, перекрывающий отдельные вызовы.
+
+Полная форма native receipt:
+
+```json
+{"id":"TASK-123:codex:session-7:120-240:model-a","role":"reviewer","vendor":"unknown","model":"model-a","platform":"codex","access":"unknown","status":"measured","source":{"session_id":"session-7","provider":"codex","begin":120,"end":240,"source_file":"/local/session.jsonl","prefix_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"tokens":{"input":100,"output":20,"cache_read":40,"cache_write":10,"reasoning":5}}
+```
 
 ## Явный локальный snapshot
 
@@ -25,7 +41,7 @@ python3 scripts/session-cost.py --snapshot --provider codex --file /explicit/pat
 
 Для Claude укажи `--provider claude`. Проверь JSON snapshot и передай его `records` владельцу ledger. Ответ с `--since` также содержит следующий `checkpoint`; сохрани именно его для новой стадии и не применяй один интервал дважды. Checkpoint хранит идентификатор, длину и хеш префикса, агрегаты по модели, но не содержимое транскрипта. Файл должен быть полным UTF-8 JSONL; усеченный хвост, неверная идентичность, rollback счетчиков или измененный префикс требуют остановки и явного unknown/разбора.
 
-Не включай файлы субагентов Claude автоматически: каждый receipt должен соответствовать одной явно выбранной сессии и этой задаче. Сессия, начавшаяся до учета без baseline, записывается как unknown, если ее нельзя безопасно отделить.
+Не включай файлы субагентов Claude автоматически: каждый receipt должен соответствовать одной явно выбранной сессии и этой задаче. Сессия, начавшаяся до учета без baseline, записывается как unknown, если ее нельзя безопасно отделить. Закрывая задачу, перенеси usage-ledger и ее task/role/session checkpoints вместе с Markdown-владельцем в `docs/done/`. Уже закрытые задачи автоматически не пересчитывай.
 
 ## Сводка и ограничения
 
