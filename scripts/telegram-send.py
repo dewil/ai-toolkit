@@ -886,6 +886,10 @@ async def send_document_album(client, entity, paths: list[Path], caption: str, *
             reply_to=reply_to, force_document=True, parse_mode=None, silent=silent,
             schedule=None,
         )
+    except asyncio.CancelledError:
+        if external_cancel():
+            raise
+        send_error = "CancelledError"
     except Exception as exc:
         send_error = type(exc).__name__
 
