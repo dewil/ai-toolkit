@@ -98,6 +98,7 @@
 @./rules/docs-maintenance.md
 @./rules/typography-ru.md
 @./rules/compact-results.md
+@./rules/task-cost.md
 @./rules/addressing.md
 @./rules/agent-as-user-voice.md
 @./rules/outbound-timing.md

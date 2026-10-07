@@ -26,6 +26,7 @@ universal:
   - scripts/ai-migrate.py              # отдельный переход legacy клиента в .AI с архивом и recover
   - scripts/ai-migrate-terminal.py     # подготовка одной host-команды и проверяемого результата миграции
   - rules/agent-portability.md         # общий .AI-контекст, клиентский зонтик, файловые задачи и границы адаптеров
+  - rules/task-cost.md                 # проверяемый учет расхода токенов по отдельной задаче, receipts, unknown и один владелец ledger
   - scripts/ai-bootstrap.py            # bootstrap нового .AI-проекта, сборка контекста, проверка и восстановление
   - rules/typography-ru.md              # русская типографика: кавычки "...", тире-дефис, "е" вместо "ё"; запрет нейроштампов ("честно скажу", пустой контраст "не X, а Y")
   - rules/subagents-usage.md            # когда и как делегировать субагентам, экономия токенов
@@ -63,7 +64,8 @@ universal:
   - skills/harvest-canon/SKILL.md       # оформить переиспользуемый прием проекта в upstream-кандидат канона
   - skills/backlog-task/SKILL.md        # побочную находку - в файл-таску бэклога, а не в текущий диф
   - skills/memory-compact/SKILL.md      # свертка разросшейся автопамяти: слить записи об одном сюжете, снять отработавшее, пересобрать индекс
-  - skills/session-cost/SKILL.md        # подсчет токенов сессии Claude Code из транскрипта (смета, отчет)
+  - skills/session-cost/SKILL.md        # внутренний учет токенов задачи и подсчет локальной Claude Code сессии
+  - skills/session-cost/task-accounting.md # schema ledger, явные snapshots и операционная процедура учета задачи
   - commands/canon.md                   # /canon = синхронизация проекта с каноном
   - commands/feedback-inbox.md          # разбор очереди поправок пользователя: кандидат -> память проекта или канон-инбокс
   - scripts/md-pdf.py                   # движок рендера markdown в PDF (для скилла md-pdf)
