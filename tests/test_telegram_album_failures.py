@@ -16,6 +16,36 @@ tgs, tgs_one = fixtures.tgs, fixtures.tgs_one
 
 
 class AlbumFailures(unittest.TestCase):
+    def test_internal_send_cancellation_is_unknown_without_retry(self):
+        class Client:
+            calls = 0
+
+            async def send_file(self, *args, **kwargs):
+                self.calls += 1
+                raise asyncio.CancelledError('SYNTHETIC_PRIVATE_ERROR')
+
+        for core in (tgs, tgs_one.tgs):
+            client = Client()
+            out, err = io.StringIO(), io.StringIO()
+
+            async def send():
+                self.assertEqual(asyncio.current_task().cancelling(), 0)
+                try:
+                    return await core.send_document_album(
+                        client, SimpleNamespace(id=111), [Path('synthetic-a'), Path('synthetic-b')],
+                        'caption', reply_to=None, silent=False, account='default')
+                except asyncio.CancelledError:
+                    self.fail('TARGET: internal send cancellation must be unknown4, not escape')
+
+            with patch.object(core, 'pace_record', return_value=True), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                status, ids = asyncio.run(send())
+            self.assertEqual(status, 4)
+            self.assertEqual(client.calls, 1, 'TARGET: no automatic retry after cancellation')
+            self.assertNotIn('OK:', out.getvalue())
+            self.assertIn('CancelledError', err.getvalue())
+            self.assertNotIn('SYNTHETIC_PRIVATE_ERROR', out.getvalue() + err.getvalue())
+
     def test_actual_pace_io_failure_is_unknown_after_ids(self):
         class Client:
             async def send_file(self, *args, **kwargs):
