@@ -260,8 +260,9 @@ def pace_check(account: str, chat_id, at: datetime | None = None) -> tuple[float
 
 
 def pace_record(
-    account: str, chat_id, chars: int, *, at: datetime | None = None, scheduled: bool = False
-) -> None:
+    account: str, chat_id, chars: int, *, at: datetime | None = None,
+    scheduled: bool = False, safe: bool = False,
+) -> bool:
     """Запомнить момент отправки (или назначенное время доставки для
     отложенной) и паузу, которую он требует. Сбой записи отправку не отменяет.
 
@@ -335,7 +336,13 @@ def pace_record(
             tmp.replace(PACE_STATE_PATH)
         finally:
             tmp.unlink(missing_ok=True)
+        return True
     except OSError as exc:
+        if safe:
+            sys.stderr.write(f"Предупреждение: состояние темпа не записано ({type(exc).__name__}).\n")
+        else:
+            sys.stderr.write(f"Предупреждение: не удалось записать состояние темпа ({exc}).\n")
+        return False
         sys.stderr.write(f"Предупреждение: не удалось записать состояние темпа ({exc}).\n")
 
 
@@ -762,10 +769,7 @@ def external_cancel() -> bool:
     return task is None or not hasattr(task, "cancelling") or bool(task.cancelling())
 
 
-_album_disconnect_strict = False
-
-
-async def disconnect_quietly(client) -> bool:
+async def disconnect_quietly(client) -> None:
     """Best-effort закрытие клиента: своей ошибкой ничего не рвет.
 
     telethon при отключении пишет состояние в ту же sqlite-сессию
@@ -777,7 +781,6 @@ async def disconnect_quietly(client) -> bool:
     """
     try:
         await client.disconnect()
-        return True
     except asyncio.CancelledError:
         # CancelledError - BaseException: без этой ветки отмена футур telethon
         # в cleanup рвала бы finally и глушила итог прогона.
@@ -785,13 +788,8 @@ async def disconnect_quietly(client) -> bool:
         if external_cancel():
             raise
         sys.stderr.write("disconnect не отработал (CancelledError)\n")
-        return False
     except Exception as exc:
-        if _album_disconnect_strict:
-            sys.stderr.write(f"disconnect не отработал ({type(exc).__name__})\n")
-            return False
         sys.stderr.write(f"disconnect не отработал ({type(exc).__name__}: {exc})\n")
-    return False
 
 
 def file_values(value) -> list:
@@ -863,11 +861,9 @@ def validate_album_caption(caption: str) -> None:
 
 async def disconnect_album(client) -> bool:
     """Закрыть album-клиент, не теряя статус отправки из-за cleanup error."""
-    global _album_disconnect_strict
-    previous = _album_disconnect_strict
-    _album_disconnect_strict = True
     try:
-        return (await disconnect_quietly(client)) is not False
+        await client.disconnect()
+        return True
     except asyncio.CancelledError:
         if external_cancel():
             raise
@@ -876,8 +872,6 @@ async def disconnect_album(client) -> bool:
     except Exception as exc:
         sys.stderr.write(f"disconnect не отработал ({type(exc).__name__})\n")
         return False
-    finally:
-        _album_disconnect_strict = previous
 
 
 async def send_document_album(client, entity, paths: list[Path], caption: str, *,
@@ -906,7 +900,9 @@ async def send_document_album(client, entity, paths: list[Path], caption: str, *
 
     pace_error = None
     try:
-        pace_record(account, entity, len(caption or ""))
+        pace_result = pace_record(account, entity, len(caption or ""), safe=True)
+        if pace_result is False:
+            pace_error = "OSError"
     except Exception as exc:
         pace_error = type(exc).__name__
 
@@ -1318,6 +1314,8 @@ async def amain(args) -> int:
     finally:
         if album_send_started:
             if not await disconnect_album(client):
+                if external_cancel():
+                    raise asyncio.CancelledError
                 return 4
             if album_success_ids is not None:
                 print("OK: отправлен альбом (id сообщений " + ", ".join(map(str, album_success_ids)) + ")")

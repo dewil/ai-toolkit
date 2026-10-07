@@ -278,6 +278,8 @@ async def amain(args) -> int:
     finally:
         if album_send_started:
             if not await tgs.disconnect_album(client):
+                if tgs.external_cancel():
+                    raise asyncio.CancelledError
                 return 4
             if album_success_ids is not None:
                 print("OK: отправлен альбом (id сообщений " + ", ".join(map(str, album_success_ids)) + ")")
