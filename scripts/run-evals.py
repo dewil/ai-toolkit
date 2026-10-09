@@ -176,30 +176,34 @@ def compare_measurements(previous_entry: dict, current_entry: dict, vary=()) -> 
     reasons, changed, limited = [], [], []
     p = previous_entry.get("provenance") if isinstance(previous_entry, dict) else None
     c = current_entry.get("provenance") if isinstance(current_entry, dict) else None
-    if before["rate"] is None or now["rate"] is None:
-        return {"baseline": before, "current": now, "delta": None,
-                "comparability": "unknown", "reasons": ["measurement counts unavailable"]}
+    vary = set(vary)
+    for axis in vary:
+        if axis not in VARY_AXES:
+            raise ValueError(f"unknown vary axis: {axis}")
     if not isinstance(p, dict) or not isinstance(c, dict):
         limited.append("provenance unavailable")
     else:
         _validate_provenance(p); _validate_provenance(c)
-        vary = set(vary)
-        for axis in vary:
-            if axis not in VARY_AXES:
-                raise ValueError(f"unknown vary axis: {axis}")
         # A judge that was not used has no identity and cannot create drift.
         keys = set(k for fields in VARY_AXES.values() for k in fields)
         if not p["judge_used"] and not c["judge_used"]:
             keys -= set(VARY_AXES["judge"])
         for key in sorted(keys):
+            axis = next(a for a, fields in VARY_AXES.items() if key in fields)
+            if p.get(key) == "unknown" or c.get(key) == "unknown":
+                limited.append(f"{key} unknown")
             if p.get(key) != c.get(key):
-                axis = next(a for a, fields in VARY_AXES.items() if key in fields)
                 if axis not in vary:
                     changed.append(key)
-        for key in ("model_version", "judge_version"):
-            if (key != "judge_version" or p["judge_used"] or c["judge_used"]):
-                if p.get(key) == "unknown" or c.get(key) == "unknown":
-                    limited.append(f"{key} unknown")
+    if before["rate"] is None or now["rate"] is None:
+        if changed:
+            comparability = "incomparable"
+            reasons = changed + limited
+        else:
+            comparability = "unknown"
+            reasons = ["measurement counts unavailable"] + limited
+        return {"baseline": before, "current": now, "delta": None,
+                "comparability": comparability, "reasons": reasons}
     reasons.extend(changed)
     reasons.extend(limited)
     delta = now["rate"] - before["rate"] if not changed else None
@@ -227,10 +231,12 @@ def _provenance(sid, spec, prompt, fixture, model, judge_model):
     criteria = json.dumps({"hard": spec.get("hard", []), "soft": spec.get("soft", [])},
                           ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     judge_used = any("judge" in a for a in spec.get("soft", []))
-    # Hash only actual option labels/settings; never persist prompts or paths.
-    config = json.dumps({"model": model or "default", "setting_sources": "project",
-                         "strict_mcp_config": True, "no_session_persistence": True},
-                        sort_keys=True, separators=(",", ":")).encode()
+    # Hash the actual runner options, excluding command and prompt contents.
+    # Prompt and cwd are positional/implicit, so argv[3:] contains only options.
+    argv = build_argv(prompt, model, spec)
+    config_options = argv[3:]
+    config = json.dumps(config_options, ensure_ascii=False,
+                        separators=(",", ":")).encode()
     rubric = _digest(JUDGE_PROMPT.encode()) if judge_used else None
     return {"prompt_sha256": _digest(prompt.encode()), "criteria_sha256": _digest(criteria),
             "fixture_sha256": _fixture_digest(fixture), "harness_sha256": _digest(Path(__file__).read_bytes()),
@@ -906,10 +912,7 @@ def main() -> int:
                 measured_hard += failed_hard
                 measured_soft += failed_soft
                 behavior_fail_runs += bool(failed_hard or failed_soft)
-        # Error-only completed runs cannot make the behavior denominator look
-        # healthy; the existing hard/soft fail counters still drive the gate.
-        gate_runs = args.runs - judge_error_runs
-        st = status_of(hard_fail_runs, soft_fail_runs, gate_runs, bool(spec.get("hard")))
+        st = status_of(hard_fail_runs, soft_fail_runs, args.runs, bool(spec.get("hard")))
         measured = {"attempts": args.runs, "completed": completed, "evaluated": evaluated,
                     "behavior_fail_runs": behavior_fail_runs, "hard_fail_runs": measured_hard,
                     "soft_fail_runs": measured_soft,
@@ -937,7 +940,9 @@ def main() -> int:
                 vary.append("model")
             comparison = compare_measurements(previous, results[sid], vary=vary)
             b, c = comparison["baseline"], comparison["current"]
-            ratio = lambda x: "unknown" if x["rate"] is None else f'{x["failures"]}/{x["evaluated"]} ({x["rate"]:.1%})'
+            ratio = lambda x: ("unknown" if x["failures"] is None else
+                               f'{x["failures"]}/{x["evaluated"]} '
+                               f'({"unknown rate" if x["rate"] is None else f"{x["rate"]:.1%}"})')
             delta = "unknown" if comparison["delta"] is None else f'{comparison["delta"] * 100:+.1f} pp'
             print(f"       частоты отказов: baseline {ratio(b)}, current {ratio(c)}, delta {delta}; "
                   f'{comparison["comparability"]}'
@@ -969,7 +974,7 @@ def main() -> int:
                 compare_vary.append("model")
             comparison = compare_measurements(cmp_entry, r, vary=compare_vary)
             b, c = comparison["baseline"], comparison["current"]
-            count = lambda x: "unknown" if x["rate"] is None else f'{x["failures"]}/{x["evaluated"]}'
+            count = lambda x: "unknown" if x["failures"] is None else f'{x["failures"]}/{x["evaluated"]}'
             delta = "unknown" if comparison["delta"] is None else f'{comparison["delta"] * 100:+.1f} pp'
             print(f"  {sid:28} rates {count(b)} -> {count(c)}, delta {delta}; "
                   f'{comparison["comparability"]}'
