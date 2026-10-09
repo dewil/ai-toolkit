@@ -129,6 +129,26 @@ class MeasurementsContract(unittest.TestCase):
         self.assertTrue(result["reasons"])
         self.assertAlmostEqual(result["delta"], .3)
 
+    def test_unknown_provenance_hash_never_claims_full_comparability(self):
+        for field in ("prompt_sha256", "criteria_sha256", "fixture_sha256", "harness_sha256",
+                      "model_config_sha256", "judge_rubric_sha256", "model", "judge_model"):
+            previous, current = entry(), entry(4)
+            previous["provenance"][field] = current["provenance"][field] = "unknown"
+            with self.subTest(field=field):
+                result = engine.compare_measurements(previous, current)
+                self.assertEqual(result["comparability"], "limited")
+                self.assertTrue(result["reasons"])
+                self.assertAlmostEqual(result["delta"], .3)
+
+    def test_zero_evaluated_does_not_hide_known_undeclared_drift(self):
+        previous, current = entry(), entry(0)
+        current["measurements"] = measurements(attempts=1, failures=0, judge=1)
+        current["provenance"]["fixture_sha256"] = "b"*64
+        result = engine.compare_measurements(previous, current)
+        self.assertEqual(result["comparability"], "incomparable")
+        self.assertIn("fixture_sha256", " ".join(result["reasons"]))
+        self.assertIsNone(result["delta"])
+
     def test_unused_judge_fields_do_not_create_drift(self):
         previous, current = entry(), entry(4)
         for e in (previous, current):
@@ -308,6 +328,12 @@ class CLIRoundtrip(unittest.TestCase):
         self.assertRegex(report, r"4\s*/\s*10")
         self.assertRegex(report, r"\+30(?:[.,]0+)?\s*(?:pp|п\.?\s*п\.?|percentage\s*points)")
 
+    def test_zero_evaluated_report_keeps_counts_beside_unknown_rate(self):
+        self.cli([self.run_object(infra="synthetic unavailable")], "--baseline")
+        _, output = self.cli([self.run_object(infra="synthetic unavailable")])
+        self.assertRegex(output, r"0\s*/\s*0")
+        self.assertRegex(output.lower(), r"unknown|неизвест|не определ")
+
     def test_compare_model_and_repeated_vary_do_not_change_execution(self):
         self.cli([self.run_object()], "--baseline")
         previous = self.baseline()
@@ -345,9 +371,9 @@ class CLIRoundtrip(unittest.TestCase):
         errors = [dict(outcome="judge_error", reason="JUDGE_PRIVATE_PAYLOAD")]*2
         code, output = self.cli([self.run_object(infra="STDERR_PRIVATE_PAYLOAD"),
                                  self.run_object()], "--baseline", judge_results=errors)
-        self.assertEqual(code, 1)  # Existing gate: one infra hard failure among two is red.
+        self.assertEqual(code, 0)  # Old gate uses all attempts: 1/2 hard failures is yellow.
         e = self.baseline()["scenarios"]["99-probe"]
-        self.assertEqual(e["status"], "red")
+        self.assertEqual(e["status"], "yellow")
         self.assertEqual(e["hard_fail_runs"], 1)
         self.assertEqual(e["soft_fail_runs"], 1)
         self.assertEqual(e["measurements"], measurements(attempts=2, failures=0, infra=1, judge=1))
@@ -360,6 +386,35 @@ class CLIRoundtrip(unittest.TestCase):
         self.assertRegex(report, r"infra|инфра")
         self.assertRegex(report, r"judge|судь")
         self.assertRegex(report, r"unknown|неизвест|не определ")
+
+    def test_excluding_judge_errors_does_not_shrink_legacy_gate_denominator(self):
+        self.expect["soft"] = [{"judge": "criterion"}]
+        self.write_expect()
+        runs = [self.run_object(infra="synthetic unavailable") for _ in range(5)]
+        runs.extend(self.run_object() for _ in range(5))
+        outcomes = [dict(outcome="judge_error", reason="unavailable")]
+        outcomes.extend(dict(outcome="pass", reason="ok") for _ in range(4))
+        self.assertEqual(engine.status_of(5, 1, 10, True), "yellow")
+        code, _ = self.cli(runs, "--baseline", judge_results=outcomes)
+        self.assertEqual(code, 0)
+        e = self.baseline()["scenarios"]["99-probe"]
+        self.assertEqual(e["status"], "yellow")
+        self.assertEqual(e["measurements"], measurements(attempts=10, failures=0, infra=5, judge=1))
+
+    def test_actual_tool_options_change_model_config_provenance(self):
+        self.cli([self.run_object()], "--baseline")
+        first = self.baseline()["scenarios"]["99-probe"]
+        for option in ("allowed_tools", "disallowed_tools"):
+            self.expect[option] = ["Read"]
+            self.write_expect()
+            self.cli([self.run_object()], "--baseline")
+            current = self.baseline()["scenarios"]["99-probe"]
+            with self.subTest(option=option):
+                self.assertNotEqual(current["provenance"]["model_config_sha256"],
+                                    first["provenance"]["model_config_sha256"])
+                self.assertEqual(current["provenance"]["criteria_sha256"],
+                                 first["provenance"]["criteria_sha256"])
+            del self.expect[option]
 
     def test_observed_fail_with_judge_error_is_not_fully_evaluated(self):
         self.expect["soft"] = [{"judge": "failing"}, {"judge": "unavailable"}]
