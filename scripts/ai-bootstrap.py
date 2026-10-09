@@ -71,6 +71,9 @@ def mount_preflight(root):
                           lambda m: chr(int(m[1], 8)), field)
 
         mounts = []
+        namespace_root = re.compile(
+            r'(?:mnt|net|uts|ipc|pid|user|cgroup|time|'
+            r'pid_for_children|time_for_children):\[[0-9]+\]')
         for line in text.splitlines():
             fields = line.split(' ')
             if ('' in fields or fields.count('-') != 1 or len(fields) < 10):
@@ -82,11 +85,19 @@ def mount_preflight(root):
                 raise Invalid('Malformed mountinfo fields')
             for field in fields:
                 decode(field)
-            for index in (3, 4):
-                path = decode(fields[index])
-                if not path.startswith('/') or '..' in Path(path).parts:
-                    raise Invalid('Invalid mountinfo path')
-            mounts.append(Path(decode(fields[4])))
+            mount_root = decode(fields[3])
+            mountpoint = decode(fields[4])
+            filesystem = decode(fields[separator + 1])
+            if (not mountpoint.startswith('/') or
+                    '..' in Path(mountpoint).parts):
+                raise Invalid('Invalid mountinfo path')
+            if not mount_root.startswith('/'):
+                if (filesystem != 'nsfs' or
+                        not namespace_root.fullmatch(mount_root)):
+                    raise Invalid('Invalid mountinfo root')
+            elif '..' in Path(mount_root).parts:
+                raise Invalid('Invalid mountinfo path')
+            mounts.append(Path(mountpoint))
     except (OSError, ValueError, TypeError) as error:
         raise Invalid(guidance + ': mountinfo unavailable or malformed') from error
     actual = root.resolve()
