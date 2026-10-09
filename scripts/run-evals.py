@@ -470,9 +470,14 @@ def _regular_files(root: Path, max_bytes=None):
     a raced FIFO open from hanging; O_NOFOLLOW and fstat reject links and
     special files even when an entry changes after it was listed.
     """
+    required = ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK")
+    values = [getattr(os, name, 0) for name in required]
+    if any(not isinstance(value, int) or value == 0 for value in values):
+        return
+    nofollow, directory, nonblock = values
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    dir_flags = flags | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    file_flags = flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    dir_flags = flags | directory | nofollow
+    file_flags = flags | nofollow | nonblock
     try:
         root_fd = os.open(root, dir_flags)
     except (OSError, ValueError):
@@ -553,7 +558,7 @@ def capture(root: Path) -> dict[str, str]:
         if len(data) > MAX_CAPTURE:
             continue
         try:
-            out[path] = data.decode("utf-8")
+            out[path] = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         except UnicodeDecodeError:
             continue
     return out
