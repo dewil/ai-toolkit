@@ -82,6 +82,164 @@ ROUTING_BASH = re.compile(
 PIPE_FILTERS = re.compile(r"^\s*(head|tail|sort|uniq|cut|tr|column|nl|xargs\s+ls)\b")
 SOFT_TYPES = HARD_TYPES | {"judge"}
 
+MEASUREMENT_FIELDS = ("attempts", "completed", "evaluated", "behavior_fail_runs",
+                      "hard_fail_runs", "soft_fail_runs", "infrastructure_error_runs",
+                      "judge_error_runs")
+VARY_AXES = {
+    "model": ("model", "model_version", "model_config_sha256"),
+    "judge": ("judge_used", "judge_model", "judge_version", "judge_rubric_sha256"),
+    "prompt": ("prompt_sha256",), "criteria": ("criteria_sha256",),
+    "fixture": ("fixture_sha256",), "harness": ("harness_sha256",),
+}
+
+
+def validate_measurements(value: dict) -> None:
+    """Validate run-level evidence, rejecting bools as integer counts."""
+    if not isinstance(value, dict) or set(value) != set(MEASUREMENT_FIELDS):
+        raise ValueError("measurements must contain exactly the required counters")
+    for key in MEASUREMENT_FIELDS:
+        n = value[key]
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            raise ValueError(f"measurements.{key} must be an integer >= 0")
+    m = value
+    if m["attempts"] < 1:
+        raise ValueError("measurements.attempts must be > 0")
+    if m["completed"] + m["infrastructure_error_runs"] != m["attempts"]:
+        raise ValueError("completed + infrastructure_error_runs must equal attempts")
+    if m["evaluated"] + m["judge_error_runs"] != m["completed"]:
+        raise ValueError("evaluated + judge_error_runs must equal completed")
+    b, h, s, e = (m[k] for k in ("behavior_fail_runs", "hard_fail_runs", "soft_fail_runs", "evaluated"))
+    if max(h, s) > b or b > min(e, h + s):
+        raise ValueError("behavior_fail_runs must be the hard/soft failure union within evaluated runs")
+
+
+def _validate_provenance(p: dict) -> None:
+    if not isinstance(p, dict):
+        raise ValueError("provenance must be an object")
+    hashes = ("prompt_sha256", "criteria_sha256", "fixture_sha256", "harness_sha256",
+              "model_config_sha256", "judge_rubric_sha256")
+    for key in hashes:
+        v = p.get(key)
+        if key == "judge_rubric_sha256" and p.get("judge_used") is False and v is None:
+            continue
+        if not (v == "unknown" or (isinstance(v, str) and re.fullmatch(r"[0-9a-f]{64}", v))):
+            raise ValueError(f"provenance.{key} must be a lowercase SHA-256 or unknown")
+    for key in ("model", "model_version"):
+        if not isinstance(p.get(key), str) or not p[key].strip():
+            raise ValueError(f"provenance.{key} must be a nonempty string")
+    if not isinstance(p.get("judge_used"), bool):
+        raise ValueError("provenance.judge_used must be boolean")
+    if p["judge_used"]:
+        for key in ("judge_model", "judge_version"):
+            if not isinstance(p.get(key), str) or not p[key].strip():
+                raise ValueError(f"provenance.{key} must be a nonempty string when judge_used")
+    elif any(p.get(k) is not None for k in ("judge_model", "judge_version", "judge_rubric_sha256")):
+        raise ValueError("unused judge provenance fields must be null")
+
+
+def _validate_baseline(document: dict) -> None:
+    if not isinstance(document, dict):
+        raise ValueError("baseline must be an object")
+    if "schema_version" in document and document["schema_version"] != 2:
+        raise ValueError("unsupported baseline schema_version")
+    scenarios = document.get("scenarios", {})
+    if not isinstance(scenarios, dict):
+        raise ValueError("baseline.scenarios must be an object")
+    for sid, entry in scenarios.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"baseline scenario {sid} must be an object")
+        if "measurements" in entry:
+            validate_measurements(entry["measurements"])
+            if "provenance" not in entry:
+                raise ValueError(f"baseline scenario {sid} has measurements without provenance")
+            _validate_provenance(entry["provenance"])
+            m = entry["measurements"]
+            if entry.get("runs") != m["attempts"]:
+                raise ValueError(f"baseline scenario {sid} runs contradict measurements.attempts")
+            for key in ("hard_fail_runs", "soft_fail_runs"):
+                n = entry.get(key)
+                measured_key = key
+                if isinstance(n, bool) or not isinstance(n, int) or n < m[measured_key]:
+                    raise ValueError(f"baseline scenario {sid} {key} contradict measurements")
+
+
+def compare_measurements(previous_entry: dict, current_entry: dict, vary=()) -> dict:
+    """Compare observed failure rates; frequency deltas carry no significance claim."""
+    def counts(entry):
+        m = entry.get("measurements") if isinstance(entry, dict) else None
+        if m is None:
+            return {"failures": None, "evaluated": None, "rate": None}
+        validate_measurements(m)
+        n, e = m["behavior_fail_runs"], m["evaluated"]
+        return {"failures": n, "evaluated": e, "rate": n / e if e else None}
+    before, now = counts(previous_entry), counts(current_entry)
+    reasons, changed, limited = [], [], []
+    p = previous_entry.get("provenance") if isinstance(previous_entry, dict) else None
+    c = current_entry.get("provenance") if isinstance(current_entry, dict) else None
+    if before["rate"] is None or now["rate"] is None:
+        return {"baseline": before, "current": now, "delta": None,
+                "comparability": "unknown", "reasons": ["measurement counts unavailable"]}
+    if not isinstance(p, dict) or not isinstance(c, dict):
+        limited.append("provenance unavailable")
+    else:
+        _validate_provenance(p); _validate_provenance(c)
+        vary = set(vary)
+        for axis in vary:
+            if axis not in VARY_AXES:
+                raise ValueError(f"unknown vary axis: {axis}")
+        # A judge that was not used has no identity and cannot create drift.
+        keys = set(k for fields in VARY_AXES.values() for k in fields)
+        if not p["judge_used"] and not c["judge_used"]:
+            keys -= set(VARY_AXES["judge"])
+        for key in sorted(keys):
+            if p.get(key) != c.get(key):
+                axis = next(a for a, fields in VARY_AXES.items() if key in fields)
+                if axis not in vary:
+                    changed.append(key)
+        for key in ("model_version", "judge_version"):
+            if (key != "judge_version" or p["judge_used"] or c["judge_used"]):
+                if p.get(key) == "unknown" or c.get(key) == "unknown":
+                    limited.append(f"{key} unknown")
+    reasons.extend(changed)
+    reasons.extend(limited)
+    delta = now["rate"] - before["rate"] if not changed else None
+    comparability = "incomparable" if changed else "limited" if limited else "comparable"
+    return {"baseline": before, "current": now, "delta": delta,
+            "comparability": comparability, "reasons": reasons}
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _fixture_digest(root: Path) -> str:
+    rows = []
+    if root.exists():
+        for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
+            if path.is_symlink():
+                continue
+            if path.is_file():
+                rows.append((path.relative_to(root).as_posix(), _digest(path.read_bytes())))
+    return _digest(json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def _provenance(sid, spec, prompt, fixture, model, judge_model):
+    criteria = json.dumps({"hard": spec.get("hard", []), "soft": spec.get("soft", [])},
+                          ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    judge_used = any("judge" in a for a in spec.get("soft", []))
+    # Hash only actual option labels/settings; never persist prompts or paths.
+    config = json.dumps({"model": model or "default", "setting_sources": "project",
+                         "strict_mcp_config": True, "no_session_persistence": True},
+                        sort_keys=True, separators=(",", ":")).encode()
+    rubric = _digest(JUDGE_PROMPT.encode()) if judge_used else None
+    return {"prompt_sha256": _digest(prompt.encode()), "criteria_sha256": _digest(criteria),
+            "fixture_sha256": _fixture_digest(fixture), "harness_sha256": _digest(Path(__file__).read_bytes()),
+            "model": model or "default", "model_version": "unknown",
+            "model_config_sha256": _digest(config), "judge_used": judge_used,
+            "judge_model": (judge_model or model or "default") if judge_used else None,
+            "judge_version": "unknown" if judge_used else None,
+            "judge_rubric_sha256": rubric}
+
 
 # ---------------------------------------------------------------- транскрипт
 
@@ -461,7 +619,7 @@ def transcript_text(run: Run, limit: int = 24000) -> str:
     return body[-limit:] if len(body) > limit else body
 
 
-def judge(criterion: str, run: Run, model: str | None) -> tuple[bool, str]:
+def judge_outcome(criterion: str, run: Run, model: str | None) -> dict:
     """Мягкий критерий второй моделью. Провал по любой неясности: судья, который
     не ответил разбираемым вердиктом, не должен засчитываться как "прошло"."""
     calls = transcript_text(run) or "пусто"
@@ -480,13 +638,13 @@ def judge(criterion: str, run: Run, model: str | None) -> tuple[bool, str]:
                              stdin=subprocess.DEVNULL, cwd=empty,
                              env=sandbox_env(empty))
         if res.returncode != 0:
-            return False, f"судья завершился с кодом {res.returncode}"
+            return {"outcome": "judge_error", "reason": "nonzero_exit"}
         body = json.loads(res.stdout or "{}")
         if not isinstance(body, dict) or body.get("is_error"):
-            return False, "судья вернул ошибку"
+            return {"outcome": "judge_error", "reason": "reported_error"}
         raw = body.get("result")
         if not isinstance(raw, str):
-            return False, "судья не вернул текст вердикта"
+            return {"outcome": "judge_error", "reason": "missing_text"}
         # нежадный разбор: берем первый полный объект, а не все от первой
         # скобки до последней - иначе цитата из стенограммы утянет разбор
         verdict = {}
@@ -499,12 +657,18 @@ def judge(criterion: str, run: Run, model: str | None) -> tuple[bool, str]:
                 verdict = cand
                 break
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
-        return False, f"судья не ответил разбираемым JSON ({type(e).__name__})"
+        return {"outcome": "judge_error", "reason": type(e).__name__}
     finally:
         shutil.rmtree(empty, ignore_errors=True)
     if verdict.get("verdict") not in ("pass", "fail"):
-        return False, "вердикт судьи не распознан"
-    return verdict["verdict"] == "pass", verdict.get("why", "")
+        return {"outcome": "judge_error", "reason": "unrecognized_verdict"}
+    return {"outcome": verdict["verdict"], "reason": str(verdict.get("why", ""))[:240]}
+
+
+def judge(criterion: str, run: Run, model: str | None) -> tuple[bool, str]:
+    """Legacy tuple API; unavailable judge responses remain failures."""
+    result = judge_outcome(criterion, run, model)
+    return result["outcome"] == "pass", result["reason"]
 
 
 # ------------------------------------------------------------------ сценарии
@@ -562,9 +726,20 @@ def merge_baseline(base: dict, results: dict, stamp: str) -> dict:
     (--scenario, --rule), а это обычный рабочий случай - перепрогнать один
     сценарий после правки. Молча потерянная база - потерянные регрессии.
     """
+    if not results:
+        raise ValueError("cannot write an empty baseline update")
+    _validate_baseline(base)
     merged = dict(base.get("scenarios") or {})
     for sid, result in results.items():
-        merged[sid] = {"status": result["status"], "stamp": stamp}
+        if "measurements" in result:
+            validate_measurements(result["measurements"])
+            _validate_provenance(result["provenance"])
+            # Reports may contain raw stderr or judge explanations. Persist only
+            # counters and safe provenance in the committed baseline.
+            fields = ("status", "runs", "hard_fail_runs", "soft_fail_runs",
+                      "measurements", "provenance")
+            result = {key: result[key] for key in fields}
+        merged[sid] = {**result, "stamp": stamp}
     return merged
 
 
@@ -584,8 +759,10 @@ def load_baseline(model: str) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        _validate_baseline(document)
+        return document
+    except (json.JSONDecodeError, OSError, ValueError, TypeError) as e:
         # Битая база - не повод считать, что базы нет: тогда регрессии молча
         # перестанут находиться, и прогон будет выглядеть чистым.
         sys.exit(f"не читается база {path}: {e}")
@@ -662,6 +839,8 @@ def main() -> int:
                     help="записать результат как базу этой модели")
     ap.add_argument("--compare", metavar="MODEL",
                     help="сравнить с базой другой модели: подходит ли кандидат")
+    ap.add_argument("--vary", action="append", choices=tuple(VARY_AXES), default=[],
+                    help="объявить измененную экспериментальную ось (можно повторить)")
     ap.add_argument("--list", action="store_true", help="перечислить сценарии и выйти")
     args = ap.parse_args()
 
@@ -689,6 +868,8 @@ def main() -> int:
 
     for sid, spec, prompt, fixture in scenarios:
         hard_fail_runs, soft_fail_runs, notes, infra = 0, 0, [], []
+        completed = evaluated = behavior_fail_runs = measured_hard = measured_soft = 0
+        infrastructure_error_runs = judge_error_runs = 0
         for n in range(args.runs):
             run, before = run_once(sid, spec, prompt, fixture, args.model,
                                    run_dir / f"{sid}-{n + 1}.jsonl")
@@ -696,8 +877,10 @@ def main() -> int:
             if run.infra:
                 infra.append(run.infra)
                 hard_fail_runs += 1
+                infrastructure_error_runs += 1
                 continue
-            failed_hard = failed_soft = False
+            completed += 1
+            failed_hard = failed_soft = judge_error = False
             for a in spec.get("hard", []):
                 ok, why = check(a, run, before)
                 if not ok:
@@ -706,7 +889,9 @@ def main() -> int:
             for a in spec.get("soft", []):
                 kind = next(iter(a))
                 if kind == "judge":
-                    ok, why = judge(a["judge"], run, args.judge_model or args.model)
+                    outcome = judge_outcome(a["judge"], run, args.judge_model or args.model)
+                    ok, why = outcome["outcome"] == "pass", outcome["reason"]
+                    judge_error |= outcome["outcome"] == "judge_error"
                 else:
                     ok, why = check(a, run, before)
                 if not ok:
@@ -714,10 +899,29 @@ def main() -> int:
                     notes.append(f"soft {kind}: {why}")
             hard_fail_runs += failed_hard
             soft_fail_runs += failed_soft
-        st = status_of(hard_fail_runs, soft_fail_runs, args.runs, bool(spec.get("hard")))
+            if judge_error:
+                judge_error_runs += 1
+            else:
+                evaluated += 1
+                measured_hard += failed_hard
+                measured_soft += failed_soft
+                behavior_fail_runs += bool(failed_hard or failed_soft)
+        # Error-only completed runs cannot make the behavior denominator look
+        # healthy; the existing hard/soft fail counters still drive the gate.
+        gate_runs = args.runs - judge_error_runs
+        st = status_of(hard_fail_runs, soft_fail_runs, gate_runs, bool(spec.get("hard")))
+        measured = {"attempts": args.runs, "completed": completed, "evaluated": evaluated,
+                    "behavior_fail_runs": behavior_fail_runs, "hard_fail_runs": measured_hard,
+                    "soft_fail_runs": measured_soft,
+                    "infrastructure_error_runs": infrastructure_error_runs,
+                    "judge_error_runs": judge_error_runs}
+        validate_measurements(measured)
+        prov = _provenance(sid, spec, prompt, fixture, args.model,
+                           args.judge_model or args.model)
         results[sid] = {"status": st, "hard_fail_runs": hard_fail_runs,
                         "soft_fail_runs": soft_fail_runs,
-                        "runs": args.runs, "notes": notes[:6], "infra": infra[:2]}
+                        "runs": args.runs, "notes": notes[:6], "infra": infra[:2],
+                        "measurements": measured, "provenance": prov}
         was = (base.get("scenarios") or {}).get(sid, {}).get("status")
         mark = {"green": "OK  ", "yellow": "WARN", "red": "FAIL"}[st]
         regress = " <- РЕГРЕССИЯ" if was == "green" and st != "green" else ""
@@ -726,6 +930,22 @@ def main() -> int:
             print(f"       {note}")
         for note in results[sid]["infra"]:
             print(f"       ПРОГОН НЕ СОСТОЯЛСЯ: {note}")
+        previous = (base.get("scenarios") or {}).get(sid)
+        if previous is not None:
+            vary = list(args.vary)
+            if args.compare and "model" not in vary:
+                vary.append("model")
+            comparison = compare_measurements(previous, results[sid], vary=vary)
+            b, c = comparison["baseline"], comparison["current"]
+            ratio = lambda x: "unknown" if x["rate"] is None else f'{x["failures"]}/{x["evaluated"]} ({x["rate"]:.1%})'
+            delta = "unknown" if comparison["delta"] is None else f'{comparison["delta"] * 100:+.1f} pp'
+            print(f"       частоты отказов: baseline {ratio(b)}, current {ratio(c)}, delta {delta}; "
+                  f'{comparison["comparability"]}'
+                  + (f' ({", ".join(comparison["reasons"])})' if comparison["reasons"] else ""))
+        m = measured
+        print(f"       исключено из знаменателя: infra {m['infrastructure_error_runs']}, "
+              f"judge {m['judge_error_runs']}; evaluated {m['evaluated']}/{m['attempts']}"
+              + ("; rate unknown" if not m["evaluated"] else ""))
 
     red = [s for s, r in results.items() if r["status"] == "red"]
     regressions = [s for s, r in results.items()
@@ -743,6 +963,17 @@ def main() -> int:
             if was is None:
                 print(f"  {sid:28} нет в базе '{args.compare}'")
                 continue
+            cmp_entry = (other.get("scenarios") or {}).get(sid)
+            compare_vary = list(args.vary)
+            if "model" not in compare_vary:
+                compare_vary.append("model")
+            comparison = compare_measurements(cmp_entry, r, vary=compare_vary)
+            b, c = comparison["baseline"], comparison["current"]
+            count = lambda x: "unknown" if x["rate"] is None else f'{x["failures"]}/{x["evaluated"]}'
+            delta = "unknown" if comparison["delta"] is None else f'{comparison["delta"] * 100:+.1f} pp'
+            print(f"  {sid:28} rates {count(b)} -> {count(c)}, delta {delta}; "
+                  f'{comparison["comparability"]}'
+                  + (f' ({", ".join(comparison["reasons"])})' if comparison["reasons"] else ""))
             if was == r["status"]:
                 continue
             arrow = f"{was} -> {r['status']}"
@@ -764,9 +995,19 @@ def main() -> int:
         # (--scenario, --rule), а это обычный рабочий случай: перепрогнать один
         # сценарий после правки. Молча потерянная база - потерянные регрессии.
         merged = merge_baseline(base, results, stamp)
-        path.write_text(json.dumps(
-            {"stamp": stamp, "model": label, "scenarios": merged},
-            ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        document = {"schema_version": 2, "stamp": stamp, "model": label,
+                    "scenarios": merged}
+        payload = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as target:
+                target.write(payload)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(temp_name, path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
         kept = len(merged) - len(results)
         print(f"база модели '{label}' обновлена: {path}"
               + (f" (обновлено {len(results)}, сохранено прежних {kept})" if kept else ""))
