@@ -940,11 +940,13 @@ def main() -> int:
                 vary.append("model")
             comparison = compare_measurements(previous, results[sid], vary=vary)
             b, c = comparison["baseline"], comparison["current"]
-            ratio = lambda x: ("unknown" if x["failures"] is None else
-                               f'{x["failures"]}/{x["evaluated"]} '
-                               f'({"unknown rate" if x["rate"] is None else f"{x["rate"]:.1%}"})')
+            def format_rate(counts):
+                if counts["failures"] is None:
+                    return "unknown"
+                rate = "unknown rate" if counts["rate"] is None else f'{counts["rate"]:.1%}'
+                return f'{counts["failures"]}/{counts["evaluated"]} ({rate})'
             delta = "unknown" if comparison["delta"] is None else f'{comparison["delta"] * 100:+.1f} pp'
-            print(f"       частоты отказов: baseline {ratio(b)}, current {ratio(c)}, delta {delta}; "
+            print(f"       частоты отказов: baseline {format_rate(b)}, current {format_rate(c)}, delta {delta}; "
                   f'{comparison["comparability"]}'
                   + (f' ({", ".join(comparison["reasons"])})' if comparison["reasons"] else ""))
         m = measured
