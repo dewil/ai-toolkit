@@ -35,6 +35,7 @@ import os
 import posixpath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -462,13 +463,84 @@ def check(assertion: dict, run: Run, before: dict[str, str]) -> tuple[bool, str]
 
 # ------------------------------------------------------------------ песочница
 
+def _regular_files(root: Path, max_bytes=None):
+    """Yield (relative path, bytes) from a pinned tree without following links.
+
+    Each directory stays pinned by its fd during traversal. O_NONBLOCK prevents
+    a raced FIFO open from hanging; O_NOFOLLOW and fstat reject links and
+    special files even when an entry changes after it was listed.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    dir_flags = flags | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        root_fd = os.open(root, dir_flags)
+    except (OSError, ValueError):
+        return
+
+    def walk(dir_fd, prefix):
+        try:
+            names = sorted(os.listdir(dir_fd))
+        except OSError:
+            return
+        for name in names:
+            if name in (".git", ".eval-home"):
+                continue
+            rel = f"{prefix}/{name}" if prefix else name
+            try:
+                before = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISDIR(before.st_mode):
+                try:
+                    child_fd = os.open(name, dir_flags, dir_fd=dir_fd)
+                except OSError:
+                    continue
+                try:
+                    opened = os.fstat(child_fd)
+                    if (stat.S_ISDIR(opened.st_mode) and
+                            (opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino)):
+                        yield from walk(child_fd, rel)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(before.st_mode):
+                try:
+                    fd = os.open(name, file_flags, dir_fd=dir_fd)
+                except OSError:
+                    continue
+                try:
+                    opened = os.fstat(fd)
+                    if (not stat.S_ISREG(opened.st_mode) or
+                            (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+                        continue
+                    if max_bytes is not None and opened.st_size > max_bytes:
+                        continue
+                    chunks = []
+                    total = 0
+                    while True:
+                        amount = 1024 * 1024 if max_bytes is None else min(1024 * 1024, max_bytes + 1 - total)
+                        chunk = os.read(fd, amount)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if max_bytes is not None and total > max_bytes:
+                            break
+                    yield rel, b"".join(chunks)
+                except OSError:
+                    continue
+                finally:
+                    os.close(fd)
+
+    try:
+        yield from walk(root_fd, "")
+    finally:
+        os.close(root_fd)
+
+
 def snapshot(root: Path) -> dict[str, str]:
-    """sha256 всех файлов песочницы, ключ - путь относительно корня."""
-    out = {}
-    for p in sorted(root.rglob("*")):
-        if p.is_file() and ".git" not in p.parts:
-            out[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
-    return out
+    """sha256 обычных файлов песочницы; ключ - путь относительно корня."""
+    return {path: hashlib.sha256(data).hexdigest() for path, data in _regular_files(root)}
 
 
 MAX_CAPTURE = 64 * 1024
@@ -477,12 +549,12 @@ MAX_CAPTURE = 64 * 1024
 def capture(root: Path) -> dict[str, str]:
     """Текст небольших файлов песочницы - для проверок по содержимому."""
     out = {}
-    for p in sorted(root.rglob("*")):
-        if not p.is_file() or ".git" in p.parts or p.stat().st_size > MAX_CAPTURE:
+    for path, data in _regular_files(root, MAX_CAPTURE):
+        if len(data) > MAX_CAPTURE:
             continue
         try:
-            out[str(p.relative_to(root))] = p.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+            out[path] = data.decode("utf-8")
+        except UnicodeDecodeError:
             continue
     return out
 
