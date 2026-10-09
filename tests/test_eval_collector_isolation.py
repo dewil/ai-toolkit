@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("collector_contract_run_evals", ROOT / "scripts/run-evals.py")
@@ -82,6 +83,26 @@ class CollectorContract(unittest.TestCase):
         for method in ("snapshot", "capture"):
             with self.subTest(method=method):
                 self.assert_only_good(method)
+
+    def test_capture_preserves_universal_newline_text_behavior(self):
+        (self.root / "lines.txt").write_bytes(b"line1\r\nline2\rline3\n")
+        self.assertEqual(self.collect("capture")["lines.txt"], "line1\nline2\nline3\n")
+
+    def test_missing_or_zero_security_flags_fail_closed(self):
+        for flag in ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK"):
+            for missing in (False, True):
+                for method in ("snapshot", "capture"):
+                    with self.subTest(flag=flag, missing=missing, method=method):
+                        with mock.patch.dict(collector.os.__dict__):
+                            if missing:
+                                collector.os.__dict__.pop(flag, None)
+                            else:
+                                setattr(collector.os, flag, 0)
+                            try:
+                                result = self.collect(method)
+                            except (OSError, ValueError, RuntimeError):
+                                continue  # Explicit rejection is safe too.
+                            self.assertEqual(result, {}, "unsupported primitives silently weakened collection")
 
     def test_symlink_files_absolute_relative_and_internal_are_skipped(self):
         for name, target in (("absolute", self.outside / "note.txt"),
