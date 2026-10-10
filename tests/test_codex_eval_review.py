@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import select
+import struct
 import subprocess
 import sys
 import tempfile
@@ -112,6 +114,21 @@ class TraceAndTimeoutReview(unittest.TestCase):
         self.assertTrue(all(not state.exists() for state in created_states),
                         "judge caller left synthetic private auth state after timeout")
 
+    def test_startup_runtime_error_cannot_turn_green_after_completed_turn(self):
+        events = [
+            {"type": "thread.started", "thread_id": "synthetic"},
+            {"type": "item.completed", "item": {"id": "startup-error", "type": "error",
+                "message": "Code Mode unavailable: required host disabled"}},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"id": "final", "type": "agent_message",
+                "text": "synthetic final text"}},
+            {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1,
+                                                   "cached_input_tokens": 0}},
+        ]
+        run = engine.parse_codex_transcript([json.dumps(event) for event in events])
+        self.assertTrue(run.completed)
+        self.assertTrue(run.infra, "startup runtime error vanished after successful turn terminal")
+
     def test_generic_no_tool_assertion_cannot_pass_after_observed_file_change(self):
         assertion = {"no_tool_call": {}}
         try:
@@ -130,6 +147,48 @@ class TraceAndTimeoutReview(unittest.TestCase):
             return  # An unsupported tool trace must not become a behavioral PASS.
         self.assertFalse(engine.check(assertion, run, {})[0],
                          "observed file-changing tool vanished from generic negative assertion")
+
+
+class RequiredHostRefusals(unittest.TestCase):
+    def test_missing_or_invalid_bundled_host_refuses_before_inference_with_safe_reason(self):
+        for broken_protocol in (False, True):
+            with self.subTest(broken_protocol=broken_protocol), tempfile.TemporaryDirectory(prefix="review-host-refusal-") as name:
+                base = Path(name)
+                fixture = base / "fixture"
+                fixture.mkdir()
+                binary_dir = base / "bin"
+                binary_dir.mkdir()
+                auth = base / "auth.json"
+                auth.write_text('{"synthetic":"HOST_AUTH_NEVER_PRINT"}', encoding="utf-8")
+                auth.chmod(0o600)
+                called = base / "inference-called"
+                def executable(path, source):
+                    path.write_text("#!" + sys.executable + "\n" + source, encoding="utf-8")
+                    path.chmod(0o755)
+                executable(binary_dir / "bwrap", "import os,sys\n"
+                    "if '--' in sys.argv:\n i=sys.argv.index('--'); os.execv(sys.argv[i+1],sys.argv[i+1:])\n")
+                executable(binary_dir / "codex", "import pathlib,sys\n"
+                    "if '--version' in sys.argv: print('codex-cli 0.162.1'); raise SystemExit(0)\n"
+                    "if '--help' in sys.argv: print('--no-daemon --ask-for-approval --strict-config --ignore-rules --ephemeral --skip-git-repo-check --json --output-schema --permission-profile'); raise SystemExit(0)\n"
+                    "if 'sandbox' in sys.argv: raise SystemExit(0)\n"
+                    "if '--output-schema' in sys.argv: print('Failed to read output schema file', file=sys.stderr); raise SystemExit(1)\n"
+                    + "pathlib.Path(" + repr(str(called)) + ").write_text('UNEXPECTED'); raise SystemExit(98)\n")
+                if broken_protocol:
+                    executable(binary_dir / "codex-code-mode-host", "import sys\n"
+                        "if '--help' in sys.argv: print('codex-code-mode-host --listen stdio'); raise SystemExit(0)\n"
+                        "print('HOST_PROTOCOL_SECRET_NEVER_PRINT',file=sys.stderr); raise SystemExit(97)\n")
+                env = {"PATH": str(binary_dir), "HOME": str(base / "home"), "LANG": "C.UTF-8"}
+                flags = ("--preflight",) if broken_protocol else ("--dry-run", "--preflight")
+                for flag in flags:
+                    done = subprocess.run([sys.executable, str(ROOT / "scripts/codex-sandbox.py"),
+                        "--mode", "eval", "--root", str(fixture), "--model", "synthetic-model",
+                        "--auth-file", str(auth), flag], input="synthetic", capture_output=True,
+                        text=True, env=env, timeout=10)
+                    self.assertNotEqual(done.returncode, 0, "required bundled runtime was not checked")
+                    self.assertRegex(done.stderr.lower(), r"code.?mode.*host|host.*(?:unavailable|readiness|protocol)")
+                    self.assertNotIn("HOST_PROTOCOL_SECRET_NEVER_PRINT", done.stdout + done.stderr)
+                    self.assertNotIn("HOST_AUTH_NEVER_PRINT", done.stdout + done.stderr)
+                    self.assertFalse(called.exists(), "inference attempted during offline refusal")
 
 
 @unittest.skipUnless(sys.platform == "linux" and shutil.which("codex") and shutil.which("bwrap"),
@@ -217,6 +276,114 @@ class NativeWrapperReview(unittest.TestCase):
                       "strict executor rejected config before the pre-model schema sentinel")
         self.assertNotIn("unknown configuration field", check.stderr)
         self.assertNotIn("AUTH_REVIEW_CANARY_NEVER_PRINT", check.stdout + check.stderr)
+
+    def test_executor_enables_required_local_code_mode_host(self):
+        for judge in (False, True):
+            with self.subTest(judge=judge):
+                done = self.invoke("--dry-run", judge=judge)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                config = tomllib.loads(json.loads(done.stdout)["config"])
+                self.assertIs(config["features"].get("code_mode_host"), True,
+                              "selected native model requires local Code Mode host")
+
+    def test_bundled_code_mode_host_runs_from_trusted_outer_runtime_without_network(self):
+        done = self.invoke("--dry-run")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        manifest = json.loads(done.stdout)
+        config = tomllib.loads(manifest["config"])
+        binaries = [Path(name) for name, mode in config["permissions"]["eval"]["filesystem"].items()
+                    if name.startswith("/") and Path(name).name == "codex" and mode == "read"]
+        self.assertEqual(len(binaries), 1, "trusted native runtime path unavailable")
+        host = binaries[0].parent / "codex-code-mode-host"
+        self.assertTrue(host.is_file(), "installed bundled Code Mode host unavailable")
+        state = self.base / "bundled-host-state"
+        state.mkdir(mode=0o700)
+        argv = list(manifest["argv"])
+        argv.remove("--share-net")
+        for index, word in enumerate(argv[:-2]):
+            if word == "--bind" and argv[index + 2] == "/state/codex":
+                argv[index + 1] = str(state)
+        boundary = argv.index("--")
+        argv = [*argv[:boundary + 1], str(host), "--help"]
+        check = subprocess.run(argv, input="", capture_output=True, text=True,
+                               env=self.env, timeout=5)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertIn("codex-code-mode-host", check.stdout)
+        self.assertIn("stdio", check.stdout)
+
+    def test_actual_bundled_host_readiness_cell_has_no_raw_io(self):
+        done = self.invoke("--dry-run")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        manifest = json.loads(done.stdout)
+        config = tomllib.loads(manifest["config"])
+        native = next(Path(name) for name, mode in config["permissions"]["eval"]["filesystem"].items()
+                      if name.startswith("/") and Path(name).name == "codex" and mode == "read")
+        state = self.base / "readiness-state"
+        state.mkdir(mode=0o700)
+        argv = list(manifest["argv"])
+        argv.remove("--share-net")
+        for index, word in enumerate(argv[:-2]):
+            if word == "--bind" and argv[index + 2] == "/state/codex":
+                argv[index + 1] = str(state)
+        argv = [*argv[:argv.index("--") + 1], str(native.parent / "codex-code-mode-host")]
+        process = subprocess.Popen(argv, env=self.env, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        def send(value):
+            payload = json.dumps(value, separators=(",", ":")).encode()
+            process.stdin.write(struct.pack("<I", len(payload)) + payload)
+            process.stdin.flush()
+        def read_exact(length):
+            result = b""
+            while len(result) < length:
+                self.assertTrue(select.select([process.stdout], [], [], 3)[0], "host protocol timed out")
+                part = os.read(process.stdout.fileno(), length - len(result))
+                self.assertTrue(part, "host closed before readiness result")
+                result += part
+            return result
+        def receive():
+            size = struct.unpack("<I", read_exact(4))[0]
+            self.assertLessEqual(size, 1024 * 1024)
+            return json.loads(read_exact(size))
+        try:
+            send({"type": "connection/hello", "supportedVersions": [1],
+                  "requiredCapabilities": [], "optionalCapabilities": []})
+            self.assertEqual(receive()["type"], "connection/ready")
+            send({"type": "operation/request", "id": 1,
+                  "request": {"method": "session/open", "sessionId": "review"}})
+            self.assertEqual(receive()["result"]["status"], "ok")
+            source = ("const r={positive:2+3};for(const n of ['node:fs','node:net','file:///state/codex/auth.json'])"
+                      "{try{await import(n);r[n]='UNSAFE';}catch(e){r[n]=String(e);}}"
+                      "r.globals={process:typeof process,require:typeof require,fetch:typeof fetch,Deno:typeof Deno,"
+                      "Bun:typeof Bun,WebSocket:typeof WebSocket,XMLHttpRequest:typeof XMLHttpRequest,"
+                      "Worker:typeof Worker,Buffer:typeof Buffer};r.toolKeys=Object.keys(tools);"
+                      "r.toolCount=ALL_TOOLS.length;text(JSON.stringify(r));")
+            send({"type": "operation/request", "id": 2, "request": {"method": "session/execute",
+                  "sessionId": "review", "request": {"tool_call_id": "synthetic", "source": source,
+                  "enabled_tools": [], "max_output_tokens": 2000}}})
+            result = None
+            for _ in range(6):
+                frame = receive()
+                if frame.get("type") == "execute/initialResponse" and frame.get("id") == 2:
+                    result = frame["result"]["value"]["Result"]
+                    break
+            self.assertIsNotNone(result)
+            self.assertIsNone(result["error_text"])
+            value = json.loads(result["content_items"][0]["text"])
+            self.assertEqual(value["positive"], 5)
+            self.assertTrue(all(v == "undefined" for v in value["globals"].values()))
+            for module in ("node:fs", "node:net", "file:///state/codex/auth.json"):
+                self.assertEqual(value[module], "unsupported import in exec")
+            self.assertEqual(value["toolKeys"], [])
+            self.assertEqual(value["toolCount"], 0)
+        finally:
+            process.terminate()
+            try: process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            process.stdin.close()
+            process.stdout.close()
+            process.stderr.close()
 
     def test_actual_preflight_accepts_real_network_denial_and_cleans_fixture(self):
         before = sorted(p.relative_to(self.fixture).as_posix() for p in self.fixture.rglob("*"))
