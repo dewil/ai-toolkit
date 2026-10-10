@@ -934,6 +934,8 @@ def codex_wrapper_failure(stderr: str) -> str:
         (("bwrap not found",), "bubblewrap unavailable"),
         (("bubblewrap namespace",), "bubblewrap namespace unavailable"),
         (("native profile/offline canary",), "native profile preflight failed"),
+        (("unknown configuration field", "strict native exec startup"),
+         "Codex strict native exec startup validation failed"),
         (("unsupported codex cli version",), "unsupported Codex CLI version"),
         (("required flag",), "required Codex CLI capability unavailable"),
         (("approved codex auth.json",), "approved Codex auth.json unavailable"),
@@ -1027,7 +1029,7 @@ def run_once(sid: str, scenario: dict, prompt: str, fixture: Path | None,
             run = parse_codex_transcript(out_path.read_text(encoding="utf-8").splitlines())
             run.metadata = runtime
             if timed_out: run.infra = run.infra or "Codex run timed out"
-            elif rc != 0: run.infra = run.infra or wrapper_error
+            elif rc != 0: run.infra = wrapper_error
             run.files, run.contents = snapshot(box), capture(box)
             return run, before
         before = snapshot(box)
