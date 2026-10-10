@@ -17,6 +17,8 @@ temporary regular file and removes it on exit.
 """
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import fnmatch
@@ -24,10 +26,12 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import platform
+import re
 
 
 SECRET_PATTERNS = (
@@ -220,11 +224,18 @@ def command(args, forwarded, empty_file):
 def _safe_proxy(name, value):
     from urllib.parse import urlsplit
     try:
+        if not isinstance(value, str) or any(ch.isspace() or ord(ch) < 0x20 for ch in value): return False
+        if "?" in value or "#" in value: return False
         parsed = urlsplit(value)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname: return False
-        if parsed.username is not None or parsed.password is not None: return False
-        if any(word in (parsed.path + parsed.query + parsed.fragment).lower()
-               for word in ("token", "secret", "key", "bearer", "password", "passwd")): return False
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname: return False
+        if "@" in parsed.netloc or parsed.username is not None or parsed.password is not None: return False
+        if parsed.path not in ("", "/") or parsed.query or parsed.fragment: return False
+        if "%" in parsed.netloc: return False
+        try: port = parsed.port
+        except ValueError: return False
+        if port is not None and not 1 <= port <= 65535: return False
+        host = parsed.hostname
+        if not re.fullmatch(r"[A-Za-z0-9.:-]+", host): return False
         return True
     except ValueError:
         return False
@@ -281,11 +292,11 @@ def _codex_config(binary, *, judge=False):
     for name in ("apps", "hooks", "plugins", "remote_plugin", "multi_agent", "multi_agent_v2",
         "browser_use", "browser_use_external", "browser_use_full_cdp_access", "in_app_browser",
         "computer_use", "image_generation", "view_image", "code_mode_host", "shell_snapshot",
-        "skill_search", "skill_mcp_dependency_install", "workspace_dependencies", "daemon_auto_start"):
+        "skill_search", "skill_mcp_dependency_install", "workspace_dependencies", "daemon_auto_start",
+        "shell_tool", "unified_exec"):
         fields.append(f"{name} = false")
     if judge:
-        fields += ["", "[permissions.judge.workspace_roots]", '"." = "read"',
-                   "", "[tools.shell_tool]", "enabled = false", "", "[tools.unified_exec]", "enabled = false"]
+        fields += ["", '[permissions.judge.filesystem.":workspace_roots"]', '"." = "read"']
     return "\n".join(fields) + "\n"
 
 
@@ -305,6 +316,8 @@ def _check_cli(codex, env, *, judge=False):
     try:
         version = subprocess.run([str(codex), "--version"], env=env, capture_output=True,
                                  text=True, timeout=10, check=False)
+        global_help = subprocess.run([str(codex), "--help"], env=env, capture_output=True,
+                                     text=True, timeout=10, check=False)
         help_result = subprocess.run([str(codex), "exec", "--help"], env=env, capture_output=True,
                                      text=True, timeout=10, check=False)
         sandbox_help = subprocess.run([str(codex), "sandbox", "--help"], env=env, capture_output=True,
@@ -312,13 +325,15 @@ def _check_cli(codex, env, *, judge=False):
     except (OSError, subprocess.TimeoutExpired):
         raise PreflightError("Codex CLI capability check failed") from None
     version_text = (version.stdout + version.stderr).strip()
-    if version.returncode or EVAL_VERSION not in version_text:
+    if version.returncode or not re.search(r"(?:^|\s)codex-cli\s+" + re.escape(EVAL_VERSION) + r"(?:\s|$)", version_text):
         raise PreflightError("unsupported Codex CLI version")
-    if help_result.returncode or sandbox_help.returncode:
+    if global_help.returncode or help_result.returncode or sandbox_help.returncode:
         raise PreflightError("Codex CLI required command is unavailable")
+    global_text = global_help.stdout + global_help.stderr
+    for flag in ("--no-daemon", "--ask-for-approval"):
+        if flag not in global_text: raise PreflightError("required global Codex CLI flag is unavailable")
     help_text = help_result.stdout + help_result.stderr
-    for flag in ("--no-daemon", "--ask-for-approval", "--strict-config", "--ignore-rules",
-                 "--ephemeral", "--skip-git-repo-check", "--json") + (("--output-schema",) if judge else ()):
+    for flag in ("--strict-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--json") + (("--output-schema",) if judge else ()):
         if flag not in help_text: raise PreflightError("Codex CLI required flag is unavailable")
     sandbox_text = sandbox_help.stdout + sandbox_help.stderr
     if "--permission-profile" not in sandbox_text and "-P" not in sandbox_text:
@@ -375,26 +390,128 @@ def _bwrap_eval(args, codex, binary, state, home, env, *, dry=False):
         profile = "judge" if args.judge else "eval"
         code = "import errno,os,pathlib,socket,sys\n"
         if args.judge:
-            code += "p=pathlib.Path('/workspace/.eval-canary')\n"
-            code += "try: p.write_text('no'); raise SystemExit(34)\nexcept OSError: pass\n"
+            code += "import tempfile\n"
+            code += "try:\n with tempfile.NamedTemporaryFile(dir='/workspace',prefix='.codex-eval-probe-'): raise SystemExit(34)\nexcept OSError: pass\n"
         else:
-            code += "p=pathlib.Path('/workspace/.eval-canary'); p.write_text('ok'); assert p.read_text()=='ok'\n"
-        code += "assert os.environ.get('SYNTHETIC_PARENT_SECRET') is None\n"
-        code += "for q in ('/state/codex/auth.json','/proc/1/root/state/codex/auth.json'):\n try: open(q,'rb').read(); raise SystemExit(32)\n except (PermissionError,FileNotFoundError): pass\n"
-        code += "for fam,typ,addr in ((socket.AF_INET,socket.SOCK_STREAM,('127.0.0.1',0)),(socket.AF_INET,socket.SOCK_DGRAM,('127.0.0.1',0)),(socket.AF_INET6,socket.SOCK_STREAM,('::1',0,0,0))):\n s=socket.socket(fam,typ)\n try:\n  s.bind(addr); raise SystemExit(33)\n except OSError as e:\n  if e.errno not in (errno.EPERM,errno.EACCES): raise\n finally:s.close()\n"
+            code += "import tempfile\n"
+            code += "with tempfile.NamedTemporaryFile(mode='w+',dir='/workspace',prefix='.codex-eval-probe-') as f:\n f.write('ok'); f.flush(); f.seek(0); assert f.read()=='ok'\n"
+        host_canary = state.parent / "host-canary.txt"
+        host_canary.write_text("SYNTHETIC_HOST_CANARY", encoding="utf-8")
+        code += f"host=pathlib.Path({str(host_canary)!r})\n"
+        code += "try: host.read_text(); raise SystemExit(35)\nexcept FileNotFoundError: pass\n"
+        code += "try: host.write_text('changed'); raise SystemExit(36)\nexcept FileNotFoundError: pass\n"
+        code += "if os.environ.get('SYNTHETIC_PARENT_SECRET') is not None: raise SystemExit(40)\n"
+        code += "bad={'ALL_PROXY','NO_PROXY','all_proxy','no_proxy','SSH_AUTH_SOCK','ASANA_TOKEN','TELEGRAM_TOKEN','GH_TOKEN','GITHUB_TOKEN','OPENAI_API_KEY','AWS_SECRET_ACCESS_KEY','PARENT_CANARY_SECRET'}\n"
+        code += "if any(k in bad or any(x in k.upper() for x in ('TOKEN','SECRET','API_KEY','PASSWORD','CREDENTIAL')) for k in os.environ): raise SystemExit(41)\n"
+        code += "try:\n env=open('/proc/1/environ','rb').read(1024*1024)\nexcept OSError: env=b''\nif b'SYNTHETIC_PARENT_SECRET=' in env: raise SystemExit(42)\n"
+        code += "for q in ('/state/codex/auth.json','/proc/1/root/state/codex/auth.json'):\n try: open(q,'rb').close(); raise SystemExit(32)\n except OSError: pass\n"
+        code += "for fam,typ,addr in ((socket.AF_INET,socket.SOCK_STREAM,('127.0.0.1',0)),(socket.AF_INET,socket.SOCK_DGRAM,('127.0.0.1',0)),(socket.AF_INET6,socket.SOCK_STREAM,('::1',0,0,0)),(socket.AF_INET6,socket.SOCK_DGRAM,('::1',0,0,0))):\n s=None\n try:\n  s=socket.socket(fam,typ); s.bind(addr); raise SystemExit(33)\n except OSError as e:\n  if e.errno not in (errno.EPERM,errno.EACCES): raise\n finally:\n  if s is not None:s.close()\n"
+        code += "try: os.fstat(int(sys.argv[1])); raise SystemExit(43)\nexcept OSError: pass\n"
         return cmd + ["--", str(codex), "sandbox", "-P", profile, "-C", "/workspace", "--",
-                      "/usr/bin/python3", "-c", code]
-    native = ["--no-daemon", "--ask-for-approval", "never", "exec", "--strict-config",
-              "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--json", "-C", "/workspace"]
-    if args.model: native += ["-m", args.model]
+                      "/usr/bin/python3", "-c", code, "64"]
     if args.judge:
         schema = state / "output-schema.json"
         schema.write_text(json.dumps({"type":"object","required":["verdict","why"],
           "additionalProperties":False,"properties":{"verdict":{"type":"string","enum":["pass","fail"]},
           "why":{"type":"string"}}}), encoding="utf-8")
-        native += ["--output-schema", str(schema)]
-    native.append("-")
+    native = _native_exec_argv(args)
     return cmd + ["--", str(codex), *native]
+
+
+@contextlib.contextmanager
+def _private_workspace(args):
+    if not args.state_dir:
+        with tempfile.TemporaryDirectory(prefix="codex-eval-private-") as temp:
+            yield Path(temp)
+        return
+    root = Path(args.state_dir)
+    if root.is_symlink(): raise PreflightError("private state directory cannot be a symlink")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    st = root.stat()
+    if not root.is_dir() or st.st_mode & 0o077:
+        raise PreflightError("private state directory must be mode 700")
+    if any(root.iterdir()): raise PreflightError("private state directory must be empty")
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _run_process_group(argv, env, timeout):
+    process = subprocess.Popen(argv, env=env, stdin=sys.stdin, stdout=sys.stdout,
+        stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+    try:
+        code = process.wait(timeout=timeout)
+        return code if code >= 0 else 128 - code
+    except subprocess.TimeoutExpired:
+        try: os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError: pass
+        try: process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+            process.wait()
+        return 124
+
+
+def _run_offline_canary(command, env, root, marker):
+    prefix = ".codex-eval-probe-"
+    if any(path.name.startswith(prefix) for path in root.iterdir()):
+        raise PreflightError("fixture reserves the offline canary filename prefix")
+    marker_fd = os.open(marker, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        inherited_fd = fcntl.fcntl(marker_fd, fcntl.F_DUPFD, 64)
+        os.set_inheritable(inherited_fd, True)
+    finally: os.close(marker_fd)
+    cmd = list(command)
+    # The last argv word is the synthetic descriptor id expected by the canary.
+    cmd[-1] = str(inherited_fd)
+    try:
+        result = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+            check=False, close_fds=True)
+        return result
+    finally:
+        try: os.close(inherited_fd)
+        except OSError: pass
+        for path in root.iterdir():
+            if path.name.startswith(prefix):
+                try: path.unlink()
+                except OSError: pass
+
+
+def _native_exec_argv(args):
+    native = ["--no-daemon", "--ask-for-approval", "never", "exec", "--strict-config",
+              "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--json", "-C", "/workspace"]
+    if args.model: native += ["-m", args.model]
+    if args.judge: native += ["--output-schema", "/state/codex/output-schema.json"]
+    native.append("-")
+    return native
+
+
+def _write_metadata(args, version, config, native_binary):
+    if not args.metadata_file: return
+    metadata_path = Path(args.metadata_file)
+    expected = Path(args.state_dir).parent / "metadata.json" if args.state_dir else None
+    if expected is None or metadata_path != expected:
+        raise PreflightError("metadata output must be adjacent to private state")
+    normalized_config = config.replace(json.dumps(str(native_binary)), '"<native-codex-binary>"')
+    argv = ["codex", *_native_exec_argv(args)]
+    isolation_argv, model_argv = list(argv), list(argv)
+    if "-m" in isolation_argv:
+        index = isolation_argv.index("-m")
+        isolation_argv[index + 1] = "<model>"
+    doc = {"cli_version": version, "config_toml": normalized_config,
+           "argv": model_argv, "isolation_argv": isolation_argv}
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(metadata_path, flags, 0o600)
+    try:
+        view = memoryview(json.dumps(doc, sort_keys=True, separators=(",", ":")).encode())
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+    finally: os.close(fd)
 
 
 def eval_main(argv):
@@ -403,6 +520,9 @@ def eval_main(argv):
     parser.add_argument("--root", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--auth-file")
+    parser.add_argument("--state-dir")
+    parser.add_argument("--timeout", type=float, default=300)
+    parser.add_argument("--metadata-file")
     parser.add_argument("--judge", action="store_true")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--dry-run", action="store_true")
@@ -423,8 +543,9 @@ def eval_main(argv):
         approved_auth = None
     else:
         approved_auth = _auth_source(args)
-    with tempfile.TemporaryDirectory(prefix="codex-eval-private-") as temp:
-        private = Path(temp); state = private / "state"; state.mkdir(mode=0o700)
+    if args.timeout <= 0 or args.timeout > 3600: raise PreflightError("timeout must be between 0 and 3600 seconds")
+    with _private_workspace(args) as private:
+        state = private / "state"; state.mkdir(mode=0o700)
         home = private / "home"; home.mkdir(mode=0o700)
         auth_target = state / "auth.json"
         if approved_auth is None:
@@ -448,28 +569,27 @@ def eval_main(argv):
               "cli_version":version,"argv":printable,"config":config}, ensure_ascii=False))
             return 0
         if args.preflight:
-            probe = subprocess.run([bwrap, "--ro-bind", "/usr", "/usr", "true"], env=env,
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=15, check=False)
-            if probe.returncode: raise PreflightError("bubblewrap namespace preflight failed")
-            canary = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, timeout=30, check=False)
-            if canary.returncode: raise PreflightError("native profile/offline canary preflight failed")
+            canary = _run_offline_canary(cmd, env, root, state.parent / "host-canary.txt")
+            if canary.returncode: raise PreflightError(f"native profile/offline canary failed at control {canary.returncode}")
+            marker = state.parent / "host-canary.txt"
+            if marker.read_text(encoding="utf-8") != "SYNTHETIC_HOST_CANARY":
+                raise PreflightError("host canary changed during native preflight")
+            marker.unlink()
             return 0
         # Every live model execution first runs the same offline controls.
-        probe = subprocess.run([bwrap, "--ro-bind", "/usr", "/usr", "true"], env=env,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=15, check=False)
-        if probe.returncode: raise PreflightError("bubblewrap namespace preflight failed")
         preflight_args = argparse.Namespace(**vars(args)); preflight_args.preflight = True
         preflight_cmd = _bwrap_eval(preflight_args, codex, codex, state, home, env)
-        canary = subprocess.run(preflight_cmd, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False)
-        if canary.returncode: raise PreflightError("native profile/offline canary preflight failed")
+        canary = _run_offline_canary(preflight_cmd, env, root, state.parent / "host-canary.txt")
+        if canary.returncode: raise PreflightError(f"native profile/offline canary failed at control {canary.returncode}")
+        marker = state.parent / "host-canary.txt"
+        if marker.read_text(encoding="utf-8") != "SYNTHETIC_HOST_CANARY":
+            raise PreflightError("host canary changed during native preflight")
+        marker.unlink()
+        _write_metadata(args, version, config, native)
         live = _bwrap_eval(args, codex, codex, state, home, env)
-        completed = subprocess.run(live, env=env, stdin=sys.stdin, stdout=sys.stdout,
-                                   stderr=subprocess.DEVNULL, check=False)
-        return completed.returncode if completed.returncode >= 0 else 128 - completed.returncode
+        completed = _run_process_group(live, env, args.timeout)
+        if completed == 124: print("codex-sandbox: isolated eval timed out", file=sys.stderr)
+        return completed
 
 
 def main(argv=None):
