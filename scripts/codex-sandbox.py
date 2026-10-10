@@ -292,11 +292,11 @@ def _codex_config(binary, *, judge=False):
     for name in ("apps", "hooks", "plugins", "remote_plugin", "multi_agent", "multi_agent_v2",
         "browser_use", "browser_use_external", "browser_use_full_cdp_access", "in_app_browser",
         "computer_use", "image_generation", "view_image", "code_mode_host", "shell_snapshot",
-        "skill_search", "skill_mcp_dependency_install", "workspace_dependencies", "daemon_auto_start",
-        "shell_tool", "unified_exec"):
+        "skill_search", "skill_mcp_dependency_install", "workspace_dependencies", "daemon_auto_start"):
         fields.append(f"{name} = false")
     if judge:
-        fields += ["", '[permissions.judge.filesystem.":workspace_roots"]', '"." = "read"']
+        fields += ["shell_tool = false", "unified_exec = false", "",
+                   '[permissions.judge.filesystem.":workspace_roots"]', '"." = "read"']
     return "\n".join(fields) + "\n"
 
 
