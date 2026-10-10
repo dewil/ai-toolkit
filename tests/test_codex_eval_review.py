@@ -150,6 +150,36 @@ class TraceAndTimeoutReview(unittest.TestCase):
 
 
 class RequiredHostRefusals(unittest.TestCase):
+    def test_cli_version_uses_normalized_version_without_stderr_warning_values(self):
+        with tempfile.TemporaryDirectory(prefix="review-version-warning-") as name:
+            base = Path(name)
+            fixture = base / "fixture"
+            fixture.mkdir()
+            binary_dir = base / "bin"
+            binary_dir.mkdir()
+            auth = base / "auth.json"
+            auth.write_text('{"synthetic":true}', encoding="utf-8")
+            auth.chmod(0o600)
+            warning = "SYNTHETIC_VERSION_WARNING_NEVER_EXPORT " + str(base / "private-state")
+            called = base / "inference-called"
+            def executable(path, source):
+                path.write_text("#!" + sys.executable + "\n" + source, encoding="utf-8")
+                path.chmod(0o755)
+            executable(binary_dir / "bwrap", "raise SystemExit(0)\n")
+            executable(binary_dir / "codex-code-mode-host", "print('codex-code-mode-host --listen stdio')\n")
+            executable(binary_dir / "codex", "import pathlib,sys\n"
+                "if '--version' in sys.argv:\n print('codex-cli 0.162.1'); print(" + repr(warning) + ",file=sys.stderr); raise SystemExit(0)\n"
+                "if '--help' in sys.argv: print('--no-daemon --ask-for-approval --strict-config --ignore-rules --ephemeral --skip-git-repo-check --json --output-schema --permission-profile'); raise SystemExit(0)\n"
+                "pathlib.Path(" + repr(str(called)) + ").write_text('UNEXPECTED'); raise SystemExit(98)\n")
+            done = subprocess.run([sys.executable, str(ROOT / "scripts/codex-sandbox.py"), "--mode", "eval",
+                "--root", str(fixture), "--model", "synthetic", "--auth-file", str(auth), "--dry-run"],
+                capture_output=True, text=True, timeout=10,
+                env={"PATH": str(binary_dir), "HOME": str(base / "home"), "LANG": "C.UTF-8"})
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(json.loads(done.stdout)["cli_version"], "codex-cli 0.162.1")
+            self.assertNotIn("SYNTHETIC_VERSION_WARNING_NEVER_EXPORT", done.stdout + done.stderr)
+            self.assertFalse(called.exists())
+
     def test_missing_or_invalid_bundled_host_refuses_before_inference_with_safe_reason(self):
         for broken_protocol in (False, True):
             with self.subTest(broken_protocol=broken_protocol), tempfile.TemporaryDirectory(prefix="review-host-refusal-") as name:
@@ -384,6 +414,15 @@ class NativeWrapperReview(unittest.TestCase):
             process.stdin.close()
             process.stdout.close()
             process.stderr.close()
+
+    def test_actual_cli_version_is_exact_and_stable_across_temporary_homes(self):
+        versions = []
+        for _ in range(2):
+            done = self.invoke("--dry-run")
+            self.assertEqual(done.returncode, 0, done.stderr)
+            versions.append(json.loads(done.stdout)["cli_version"])
+        self.assertEqual(versions, ["codex-cli 0.162.1", "codex-cli 0.162.1"],
+                         "ephemeral helper warnings polluted stable CLI identity")
 
     def test_actual_preflight_accepts_real_network_denial_and_cleans_fixture(self):
         before = sorted(p.relative_to(self.fixture).as_posix() for p in self.fixture.rglob("*"))
