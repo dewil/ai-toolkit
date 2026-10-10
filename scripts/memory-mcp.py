@@ -78,6 +78,8 @@ def validate_result(value, args):
     expected_fields = {'status', 'project', 'project_id', 'matches'} if stable else {'status', 'project', 'matches'}
     if set(value) != expected_fields or (not stable and value.get('project') != args.get('project')):
         raise ValueError()
+    if 'project_id' in args and not stable:
+        raise ValueError()
     if stable:
         ident = value['project_id']
         if not isinstance(ident, str) or len(ident) != 36 or str(uuid.UUID(ident)) != ident:
