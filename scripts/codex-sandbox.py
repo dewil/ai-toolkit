@@ -558,7 +558,8 @@ def eval_main(argv):
         (state / "config.toml").write_text(config, encoding="utf-8"); os.chmod(state / "config.toml", 0o600)
         env = _eval_env(home, state)
         if not args.model.strip(): raise PreflightError("an explicit model is required")
-        version = _check_cli(codex, env, judge=args.judge)
+        check_env = dict(env, CODEX_HOME=str(state), HOME=str(home))
+        version = _check_cli(codex, check_env, judge=args.judge)
         cmd = _bwrap_eval(args, codex, codex, state, home, env, dry=args.dry_run)
         if args.dry_run:
             printable = list(cmd)
