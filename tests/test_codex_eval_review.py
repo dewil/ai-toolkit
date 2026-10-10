@@ -74,6 +74,29 @@ class TraceAndTimeoutReview(unittest.TestCase):
             self.assertTrue(run.infra)
             self.assertEqual(run.provider, "codex")
 
+    def test_judge_timeout_uses_parent_owned_private_state_and_cleanup_grace(self):
+        created_states = []
+        def interrupted_wrapper(argv, **kwargs):
+            self.assertIn("--state-dir", argv,
+                          "judge auth state is unowned if wrapper is killed")
+            self.assertIn("--timeout", argv,
+                          "judge wrapper needs its own shorter cleanup deadline")
+            state = Path(argv[argv.index("--state-dir") + 1])
+            inner_timeout = float(argv[argv.index("--timeout") + 1])
+            self.assertGreaterEqual(kwargs["timeout"], inner_timeout + 35,
+                                    "outer judge deadline precedes wrapper cleanup")
+            state.mkdir(parents=True, exist_ok=True)
+            (state / "auth.json").write_text("SYNTHETIC_JUDGE_AUTH", encoding="utf-8")
+            created_states.append(state)
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output=b"partial")
+        run = engine.Run(provider="codex", completed=True, text="synthetic")
+        with patch.object(engine.subprocess, "run", side_effect=interrupted_wrapper):
+            result = engine.codex_judge_outcome("synthetic criterion", run, "synthetic-model")
+        self.assertEqual(result["outcome"], "judge_error")
+        self.assertTrue(created_states)
+        self.assertTrue(all(not state.exists() for state in created_states),
+                        "judge caller left synthetic private auth state after timeout")
+
     def test_generic_no_tool_assertion_cannot_pass_after_observed_file_change(self):
         assertion = {"no_tool_call": {}}
         try:
@@ -139,6 +162,18 @@ class NativeWrapperReview(unittest.TestCase):
         self.assertIn("--ask-for-approval", body["argv"])
         self.assertNotIn("--sandbox", body["argv"])
         self.assertEqual(tomllib.loads(body["config"])["default_permissions"], "eval")
+
+    def test_eval_keeps_a_native_command_capability_while_judge_disables_commands(self):
+        configurations = {}
+        for judge in (False, True):
+            done = self.invoke("--dry-run", judge=judge)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            configurations[judge] = tomllib.loads(json.loads(done.stdout)["config"])["features"]
+        self.assertTrue(configurations[False].get("shell_tool", True) or
+                        configurations[False].get("unified_exec", True),
+                        "executor disabled every native command capability")
+        self.assertFalse(configurations[True]["shell_tool"])
+        self.assertFalse(configurations[True]["unified_exec"])
 
     def test_actual_preflight_accepts_real_network_denial_and_cleans_fixture(self):
         before = sorted(p.relative_to(self.fixture).as_posix() for p in self.fixture.rglob("*"))
