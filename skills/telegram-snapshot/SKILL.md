@@ -1,6 +1,6 @@
 ---
 name: telegram-snapshot
-description: Настроить или починить инкрементальный pull Telegram-чатов на устройстве: "my.telegram.org выдает ERROR", "telethon не видит чаты". НЕ для отправки сообщений - скилл `telegram-send`.
+description: "Настроить или починить инкрементальный pull Telegram-чатов на устройстве: \"my.telegram.org выдает ERROR\", \"telethon не видит чаты\". НЕ для отправки сообщений - скилл `telegram-send`."
 ---
 
 # telegram-snapshot
