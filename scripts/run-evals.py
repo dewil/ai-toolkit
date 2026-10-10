@@ -92,6 +92,10 @@ VARY_AXES = {
     "prompt": ("prompt_sha256",), "criteria": ("criteria_sha256",),
     "fixture": ("fixture_sha256",), "harness": ("harness_sha256",),
 }
+CODEX_HASH_FIELDS = ("isolation_config_sha256", "effective_context_sha256")
+CODEX_PROVENANCE_FIELDS = ("provider", "cli_version", "isolation_contract_version",
+                          "isolation_config_sha256", "effective_context_sha256",
+                          "context_adapter_version", "judge_provider")
 
 
 def validate_measurements(value: dict) -> None:
@@ -136,6 +140,17 @@ def _validate_provenance(p: dict) -> None:
                 raise ValueError(f"provenance.{key} must be a nonempty string when judge_used")
     elif any(p.get(k) is not None for k in ("judge_model", "judge_version", "judge_rubric_sha256")):
         raise ValueError("unused judge provenance fields must be null")
+    if "provider" in p and p["provider"] not in ("codex", "claude"):
+        raise ValueError("provenance.provider must be codex or claude")
+    for key in CODEX_HASH_FIELDS:
+        if key in p and not (p[key] == "unknown" or
+                             (isinstance(p[key], str) and re.fullmatch(r"[0-9a-f]{64}", p[key]))):
+            raise ValueError(f"provenance.{key} must be a lowercase SHA-256 or unknown")
+    for key in ("cli_version", "isolation_contract_version", "context_adapter_version"):
+        if key in p and (not isinstance(p[key], str) or not p[key].strip()):
+            raise ValueError(f"provenance.{key} must be a nonempty string")
+    if "judge_provider" in p and p["judge_provider"] not in (None, "codex", "claude"):
+        raise ValueError("provenance.judge_provider must be codex, claude, or null")
 
 
 def _validate_baseline(document: dict) -> None:
@@ -196,6 +211,18 @@ def compare_measurements(previous_entry: dict, current_entry: dict, vary=()) -> 
             if p.get(key) != c.get(key):
                 if axis not in vary:
                     changed.append(key)
+        # Provider and effective-context identity are hard comparability
+        # boundaries. --vary is an experimental model/prompt axis, not an
+        # override for a different executor or missing isolation evidence.
+        codex_side = p.get("provider") == "codex" or c.get("provider") == "codex"
+        if codex_side:
+            for key in CODEX_PROVENANCE_FIELDS:
+                if key == "judge_provider" and p.get("judge_used") is False and c.get("judge_used") is False:
+                    continue
+                if key not in p or key not in c or p.get(key) in (None, "unknown") or c.get(key) in (None, "unknown"):
+                    changed.append(key + " unavailable")
+                elif p.get(key) != c.get(key):
+                    changed.append(key)
     if before["rate"] is None or now["rate"] is None:
         if changed:
             comparability = "incomparable"
@@ -239,13 +266,22 @@ def _provenance(sid, spec, prompt, fixture, model, judge_model):
     config = json.dumps(config_options, ensure_ascii=False,
                         separators=(",", ":")).encode()
     rubric = _digest(JUDGE_PROMPT.encode()) if judge_used else None
-    return {"prompt_sha256": _digest(prompt.encode()), "criteria_sha256": _digest(criteria),
+    provider = spec.get("_provider", "claude")
+    data = {"prompt_sha256": _digest(prompt.encode()), "criteria_sha256": _digest(criteria),
             "fixture_sha256": _fixture_digest(fixture), "harness_sha256": _digest(Path(__file__).read_bytes()),
             "model": model or "default", "model_version": "unknown",
             "model_config_sha256": _digest(config), "judge_used": judge_used,
             "judge_model": (judge_model or model or "default") if judge_used else None,
             "judge_version": "unknown" if judge_used else None,
             "judge_rubric_sha256": rubric}
+    if provider == "codex":
+        data.update(provider="codex", cli_version="0.162.1",
+            isolation_contract_version=CODEX_ISOLATION_VERSION,
+            isolation_config_sha256=_digest(b"codex-eval-v1:profile-eval+outer-bwrap+closed-features"),
+            effective_context_sha256=codex_context_hash(fixture),
+            context_adapter_version=CODEX_CONTEXT_VERSION,
+            judge_provider="codex" if judge_used else None)
+    return data
 
 
 # ---------------------------------------------------------------- транскрипт
@@ -286,11 +322,130 @@ class Run:
     text: str = ""
     completed: bool = False   # дошли до события result
     is_error: bool = False
-    cost: float = 0.0
+    cost: float | None = 0.0
+    usage: dict = field(default_factory=lambda: {"input": None, "output": None, "cache_read": None})
+    provider: str = "claude"
     turns: int = 0
     files: dict[str, str] = field(default_factory=dict)  # путь -> sha256 после прогона
     contents: dict[str, str] = field(default_factory=dict)  # путь -> текст (для проверок по содержимому)
     infra: str = ""           # непустое - прогон не состоялся (не путать с провалом проверки)
+
+
+def parse_codex_transcript(lines) -> Run:
+    """Strictly normalize one Codex JSONL turn; incomplete traces are infra."""
+    run = Run(provider="codex", cost=None)
+    thread = None
+    started = terminal = False
+    active = {}
+    seen = set()
+    completed_messages = set()
+    errors = []
+    def bad(reason):
+        errors.append(reason)
+    def obj(value):
+        return isinstance(value, dict)
+    for raw in lines:
+        if not isinstance(raw, str):
+            bad("JSONL line is not text"); continue
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            bad("malformed JSONL"); continue
+        if not obj(ev) or not isinstance(ev.get("type"), str):
+            bad("malformed event"); continue
+        kind = ev["type"]
+        if terminal:
+            bad("event after terminal"); continue
+        if kind == "thread.started":
+            tid = ev.get("thread_id")
+            if thread is not None or not isinstance(tid, str) or not tid.strip(): bad("invalid thread start")
+            else: thread = tid
+        elif kind == "turn.started":
+            if thread is None or started or run.turns: bad("invalid turn start")
+            else: started = True
+        elif kind in ("item.started", "item.updated", "item.completed"):
+            if not started or thread is None: bad("item outside turn"); continue
+            item = ev.get("item")
+            if not obj(item) or not isinstance(item.get("id"), str) or not item["id"] or not isinstance(item.get("type"), str):
+                bad("malformed item"); continue
+            iid, typ, phase = item["id"], item["type"], kind[5:]
+            if typ == "command_execution":
+                command = item.get("command")
+                if not isinstance(command, str): bad("malformed command"); continue
+                if phase == "started":
+                    if iid in seen: bad("duplicate command id"); continue
+                    seen.add(iid); active[iid] = command
+                    run.tool_calls.append(("Bash", command)); run.events.append(("tool", "Bash", command))
+                elif phase == "updated":
+                    if active.get(iid) != command: bad("command update without matching start")
+                else:
+                    if iid not in active:
+                        if iid in seen: bad("duplicate command completion")
+                        else:
+                            seen.add(iid); run.tool_calls.append(("Bash", command)); run.events.append(("tool", "Bash", command))
+                        bad("command completed without start")
+                    elif active[iid] != command: bad("command changed during execution")
+                    elif isinstance(item.get("exit_code"), bool) or not isinstance(item.get("exit_code"), int): bad("malformed command exit")
+                    else: del active[iid]
+            elif typ == "agent_message":
+                if phase == "completed":
+                    text = item.get("text")
+                    if not isinstance(text, str): bad("malformed agent message"); continue
+                    marker = (iid, text)
+                    if marker not in completed_messages:
+                        completed_messages.add(marker)
+                        run.text += ("\n" if run.text else "") + text
+                        if text.strip(): run.events.append(("text", text, ""))
+                elif phase == "started":
+                    if iid in seen: bad("duplicate message id")
+                    seen.add(iid)
+                elif iid not in seen: bad("message update without start")
+            elif typ in ("reasoning", "todo_list"):
+                if typ == "reasoning" and phase == "completed" and not isinstance(item.get("text", ""), str): bad("malformed reasoning")
+                elif typ == "todo_list" and phase == "completed" and not isinstance(item.get("items", []), list): bad("malformed plan")
+            elif typ == "file_change":
+                if phase != "completed": bad("incomplete file change")
+                changes = item.get("changes")
+                status = item.get("status")
+                if status not in ("completed", "failed") or not isinstance(changes, list) or not changes:
+                    bad("malformed file change")
+                else:
+                    for change in changes:
+                        if (not isinstance(change, dict) or not isinstance(change.get("path"), str)
+                                or not change.get("path") or not isinstance(change.get("kind"), str)):
+                            bad("malformed file change record"); break
+                        run.events.append(("file_change", change["kind"] + " " + change["path"], ""))
+            else:
+                bad("unsupported item type: " + typ)
+        elif kind == "turn.completed":
+            if not started: bad("terminal without turn start")
+            usage = ev.get("usage")
+            if usage is not None:
+                if not obj(usage): bad("malformed usage")
+                else:
+                    vals = []
+                    for field_name in ("input_tokens", "output_tokens", "cached_input_tokens"):
+                        value = usage.get(field_name)
+                        if isinstance(value, bool) or not isinstance(value, int) or value < 0: bad("malformed usage")
+                        vals.append(value)
+                    if all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in vals):
+                        if vals[2] > vals[0]: bad("cached usage exceeds input")
+                        run.usage = dict(input=vals[0], output=vals[1], cache_read=vals[2])
+            run.completed = True; run.turns += 1; terminal = True
+        elif kind == "turn.failed":
+            if not started: bad("failed turn without start")
+            run.is_error = True; bad("turn failed"); terminal = True
+        elif kind == "error":
+            run.is_error = True; bad("API error"); terminal = True
+        else:
+            bad("unknown event type: " + kind)
+    if active: bad("unfinished command")
+    if not terminal: bad("missing terminal")
+    if errors: run.infra = "; ".join(dict.fromkeys(errors))
+    return run
 
 
 def parse_transcript(lines) -> Run:
@@ -600,6 +755,131 @@ def sandbox_env(box: Path) -> dict:
     return env
 
 
+CODEX_CONTEXT_LIMIT = 24 * 1024
+CODEX_CONTEXT_VERSION = "codex-context-v1"
+CODEX_ISOLATION_VERSION = "codex-eval-v1"
+
+
+def prepare_codex_fixture(root: Path, scenario: dict) -> str:
+    """Compile only simple, bounded CLAUDE @relative imports into AGENTS.md."""
+    unsupported = (".agents", ".claude", ".codex", "hooks.json", "plugins")
+    found = [p for p in unsupported if (root / p).exists() or (root / p).is_symlink()]
+    if found:
+        raise ValueError("project runtime configuration is unsupported: " + ", ".join(found))
+    claude, agents = root / "CLAUDE.md", root / "AGENTS.md"
+    if claude.exists() and agents.exists():
+        raise ValueError("conflicting CLAUDE.md and AGENTS.md sources")
+    if agents.exists():
+        if agents.is_symlink() or not agents.is_file():
+            raise ValueError("AGENTS.md must be a regular fixture file")
+        data = agents.read_bytes()
+        if len(data) > CODEX_CONTEXT_LIMIT:
+            raise ValueError("AGENTS.md context exceeds 24 KiB")
+        effective = data.decode("utf-8")
+        return _digest(data)
+    if not claude.exists():
+        return _digest(b"")
+    if claude.is_symlink() or not claude.is_file():
+        raise ValueError("CLAUDE.md must be a regular fixture file")
+    stack = set()
+    import_re = re.compile(r"^\s*@([^\s]+)\s*$", re.M)
+    conditional = re.compile(r"(?im)^\s*(?:paths\s*:|when\s*:|if\s*:|apply_when\s*:)")
+    def expand(path):
+        resolved = path.resolve(strict=True)
+        if root.resolve() not in resolved.parents and resolved != root.resolve():
+            raise ValueError("context import escapes fixture")
+        if path.is_symlink() or resolved in stack or not resolved.is_file():
+            raise ValueError("context import is symlink, cycle, or not a file")
+        stack.add(resolved)
+        raw = resolved.read_bytes()
+        if len(raw) > CODEX_CONTEXT_LIMIT:
+            raise ValueError("context source exceeds 24 KiB")
+        try: body = raw.decode("utf-8")
+        except UnicodeDecodeError: raise ValueError("context source is not UTF-8") from None
+        if conditional.search(body):
+            raise ValueError("conditional Claude context is unsupported")
+        chunks = [f"<!-- source: {resolved.relative_to(root.resolve()).as_posix()} -->\n"]
+        for line in body.splitlines(keepends=True):
+            match = import_re.fullmatch(line.rstrip("\r\n"))
+            if match:
+                target = match.group(1)
+                if target.startswith("/") or "\\" in target:
+                    raise ValueError("context import must be simple relative path")
+                child = path.parent / target
+                if child.is_symlink(): raise ValueError("context import is symlink")
+                chunks.append(expand(child))
+            else:
+                chunks.append(line)
+        stack.remove(resolved)
+        return "".join(chunks)
+    effective = expand(claude)
+    data = effective.encode("utf-8")
+    if len(data) > CODEX_CONTEXT_LIMIT:
+        raise ValueError("effective context exceeds 24 KiB")
+    agents.write_bytes(data)
+    return _digest(data)
+
+
+def codex_context_hash(root: Path) -> str:
+    """Stable non-path identity for the effective portable context."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="codex-context-") as scratch:
+            copy = Path(scratch) / "fixture"
+            if root.exists(): shutil.copytree(root, copy, symlinks=True)
+            else: copy.mkdir()
+            return prepare_codex_fixture(copy, {})
+    except (ValueError, OSError): return "unknown"
+
+
+def codex_scenario_supported(scenario: dict) -> None:
+    if scenario.get("allowed_tools") or scenario.get("disallowed_tools"):
+        raise ValueError("Claude tool allow/deny lists have no Codex equivalence")
+    portable = {"Bash", "CodexBash"}
+    for group in ("hard", "soft"):
+        for assertion in scenario.get(group, []):
+            kind = next(iter(assertion))
+            if kind in ("tool_call", "no_tool_call"):
+                names = assertion[kind].get("name")
+                names = [names] if isinstance(names, str) else names or []
+                if any(name not in portable for name in names):
+                    raise ValueError("assertion requires unsupported tool capability")
+            if kind == "text_before_tool":
+                raise ValueError("text_before_tool needs provider-aware shell parsing")
+
+
+def codex_launcher_env() -> dict:
+    """Keep host credentials and ambient agent state out of the wrapper process."""
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+           "HOME": os.path.expanduser("~"), "LANG": os.environ.get("LANG", "C.UTF-8")}
+    if os.environ.get("CODEX_HOME"):
+        env["CODEX_HOME"] = os.environ["CODEX_HOME"]
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        if os.environ.get(name): env[name] = os.environ[name]
+    return env
+
+
+def approved_auth_path() -> Path:
+    home = Path(os.path.expanduser("~"))
+    return Path(os.environ["CODEX_HOME"]) / "auth.json" if os.environ.get("CODEX_HOME") else home / ".codex" / "auth.json"
+
+
+def codex_wrapper_failure(stderr: str) -> str:
+    """Map wrapper diagnostics to fixed safe reasons; never surface raw text."""
+    value = (stderr or "").lower()
+    for needles, reason in (
+        (("credential-bearing or invalid proxy",), "credential-bearing proxy rejected"),
+        (("bwrap not found",), "bubblewrap unavailable"),
+        (("bubblewrap namespace",), "bubblewrap namespace unavailable"),
+        (("native profile/offline canary",), "native profile preflight failed"),
+        (("unsupported codex cli version",), "unsupported Codex CLI version"),
+        (("required flag",), "required Codex CLI capability unavailable"),
+        (("approved codex auth.json",), "approved Codex auth.json unavailable"),
+        (("native codex runtime",), "native Codex runtime unavailable"),
+    ):
+        if any(needle in value for needle in needles): return reason
+    return "Codex isolated wrapper refused the run"
+
+
 def build_argv(prompt: str, model: str | None, scenario: dict) -> list[str]:
     argv = ["claude", "-p", prompt,
             "--output-format", "stream-json", "--verbose",
@@ -628,6 +908,38 @@ def run_once(sid: str, scenario: dict, prompt: str, fixture: Path | None,
             # symlinks=True: иначе ссылка в фикстуре разыменуется и внутрь
             # песочницы уедет файл машины (~/.gitconfig и что угодно еще)
             shutil.copytree(fixture, box, dirs_exist_ok=True, symlinks=True)
+        if scenario.get("_provider", "claude") == "codex":
+            try:
+                codex_scenario_supported(scenario)
+                prepare_codex_fixture(box, scenario)
+                before = snapshot(box)
+            except (ValueError, OSError) as error:
+                run = Run(provider="codex", cost=None)
+                run.infra = "unsupported Codex scenario/context: " + str(error)
+                return run, {}
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            wrapper = ROOT / "scripts" / "codex-sandbox.py"
+            argv = [sys.executable, str(wrapper), "--mode", "eval", "--root", str(box),
+                    "--model", str(model or ""), "--auth-file", str(approved_auth_path())]
+            timed_out, rc = False, 0
+            try:
+                result = subprocess.run(argv, cwd=box, capture_output=True,
+                    stdin=subprocess.PIPE, input=prompt, text=True,
+                    timeout=scenario.get("timeout", DEFAULT_TIMEOUT), env=codex_launcher_env())
+                rc = result.returncode
+                out_path.write_text(result.stdout or "", encoding="utf-8")
+                wrapper_error = codex_wrapper_failure(result.stderr)
+            except subprocess.TimeoutExpired as error:
+                timed_out = True
+                out_path.write_text(error.stdout or "", encoding="utf-8")
+            except FileNotFoundError:
+                run = Run(provider="codex", cost=None); run.infra = "Codex wrapper unavailable"
+                return run, before
+            run = parse_codex_transcript(out_path.read_text(encoding="utf-8").splitlines())
+            if timed_out: run.infra = run.infra or "Codex run timed out"
+            elif rc != 0: run.infra = run.infra or wrapper_error
+            run.files, run.contents = snapshot(box), capture(box)
+            return run, before
         before = snapshot(box)
         argv = build_argv(prompt, model, scenario)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -696,8 +1008,10 @@ def transcript_text(run: Run, limit: int = 24000) -> str:
     for kind, payload, args in run.events:
         if kind == "text":
             lines.append(f"[реплика] {' '.join(payload.split())[:2000]}")
-        else:
+        elif kind == "tool":
             lines.append(f"[вызов] {payload} {' '.join(args.split())[:200]}".rstrip())
+        else:
+            lines.append(f"[файловое изменение] {payload[:240]}")
     body = "\n".join(lines)
     return body[-limit:] if len(body) > limit else body
 
@@ -708,6 +1022,8 @@ def judge_outcome(criterion: str, run: Run, model: str | None) -> dict:
     calls = transcript_text(run) or "пусто"
     prompt = JUDGE_PROMPT.format(criterion=criterion, calls=calls,
                                  text=run.text[:8000])
+    if run.provider == "codex":
+        return codex_judge_outcome(criterion, run, model)
     argv = ["claude", "-p", prompt, "--output-format", "json",
             "--setting-sources", "project", "--strict-mcp-config",
             "--no-session-persistence", "--disallowed-tools", JUDGE_DENY]
@@ -746,6 +1062,34 @@ def judge_outcome(criterion: str, run: Run, model: str | None) -> dict:
     if verdict.get("verdict") not in ("pass", "fail"):
         return {"outcome": "judge_error", "reason": "unrecognized_verdict"}
     return {"outcome": verdict["verdict"], "reason": str(verdict.get("why", ""))[:240]}
+
+
+def codex_judge_outcome(criterion: str, run: Run, model: str | None) -> dict:
+    """Use the wrapper's isolated read-only judge mode and exact output schema."""
+    prompt = JUDGE_PROMPT.format(criterion=criterion, calls=transcript_text(run) or "пусто",
+                                 text=run.text[:8000])
+    with tempfile.TemporaryDirectory(prefix="eval-codex-judge-") as empty:
+        argv = [sys.executable, str(ROOT / "scripts" / "codex-sandbox.py"), "--mode", "eval",
+                "--judge", "--root", empty, "--model", str(model or "")]
+        try:
+            result = subprocess.run(argv, input=prompt, text=True, capture_output=True,
+                                    timeout=DEFAULT_TIMEOUT, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return {"outcome": "judge_error", "reason": "Codex judge did not complete"}
+    if result.returncode:
+        return {"outcome": "judge_error", "reason": "Codex judge failed"}
+    judged = parse_codex_transcript(result.stdout.splitlines())
+    if judged.infra or judged.tool_calls or any(e[0] == "file_change" for e in judged.events) or not judged.completed:
+        return {"outcome": "judge_error", "reason": "Codex judge trace was incomplete or used a tool"}
+    try:
+        value = json.loads(judged.text)
+    except (json.JSONDecodeError, TypeError):
+        return {"outcome": "judge_error", "reason": "Codex judge output was not exact JSON"}
+    if (not isinstance(value, dict) or set(value) != {"verdict", "why"}
+            or value.get("verdict") not in ("pass", "fail")
+            or not isinstance(value.get("why"), str)):
+        return {"outcome": "judge_error", "reason": "Codex judge output did not match schema"}
+    return {"outcome": value["verdict"], "reason": value["why"][:240]}
 
 
 def judge(criterion: str, run: Run, model: str | None) -> tuple[bool, str]:
@@ -917,6 +1261,8 @@ def main() -> int:
     ap.add_argument("--rule", help="только сценарии, помеченные этим правилом")
     ap.add_argument("--runs", type=int, default=DEFAULT_RUNS)
     ap.add_argument("--model", help="алиас или полное имя модели")
+    ap.add_argument("--provider", choices=("codex", "claude"), default="codex",
+                    help="executor provider (live Claude adapter is not isolated)")
     ap.add_argument("--judge-model", help="модель судьи (по умолчанию - та же)")
     ap.add_argument("--baseline", action="store_true",
                     help="записать результат как базу этой модели")
@@ -937,6 +1283,14 @@ def main() -> int:
             print(f"{sid:28} {spec.get('title', '')}  [{', '.join(spec.get('rules', []))}]")
         return 0
 
+    if args.provider == "claude":
+        print("provider claude is not supported for live isolated evals", file=sys.stderr)
+        return 2
+    if not args.model:
+        sys.exit("--model is required for Codex evals")
+    for _sid, scenario, _prompt, _fixture in scenarios:
+        scenario["_provider"] = "codex"
+
     # stdout в файл буферизуется: без принудительного сброса длинный прогон
     # молчит до самого конца, и не отличить работу от зависания
     stamp = time.strftime("%Y-%m-%d-%H%M")
@@ -953,10 +1307,15 @@ def main() -> int:
         hard_fail_runs, soft_fail_runs, notes, infra = 0, 0, [], []
         completed = evaluated = behavior_fail_runs = measured_hard = measured_soft = 0
         infrastructure_error_runs = judge_error_runs = 0
+        observed_provider = None
         for n in range(args.runs):
             run, before = run_once(sid, spec, prompt, fixture, args.model,
                                    run_dir / f"{sid}-{n + 1}.jsonl")
-            total_cost += run.cost
+            observed_provider = run.provider
+            if run.cost is None:
+                total_cost = None
+            elif total_cost is not None:
+                total_cost += run.cost
             if run.infra:
                 infra.append(run.infra)
                 hard_fail_runs += 1
@@ -996,7 +1355,9 @@ def main() -> int:
                     "infrastructure_error_runs": infrastructure_error_runs,
                     "judge_error_runs": judge_error_runs}
         validate_measurements(measured)
-        prov = _provenance(sid, spec, prompt, fixture, args.model,
+        provenance_spec = dict(spec)
+        if observed_provider != "codex": provenance_spec.pop("_provider", None)
+        prov = _provenance(sid, provenance_spec, prompt, fixture, args.model,
                            args.judge_model or args.model)
         results[sid] = {"status": st, "hard_fail_runs": hard_fail_runs,
                         "soft_fail_runs": soft_fail_runs,
@@ -1035,8 +1396,9 @@ def main() -> int:
     regressions = [s for s, r in results.items()
                    if r["status"] != "green"
                    and (base.get("scenarios") or {}).get(s, {}).get("status") == "green"]
+    cost_label = "неизвестна (Codex CLI не сообщил стоимость)" if total_cost is None else f"${total_cost:.2f}"
     print(f"\nитого: {len(results)} сценариев, красных {len(red)}, "
-          f"регрессий {len(regressions)}, стоимость ${total_cost:.2f}")
+          f"регрессий {len(regressions)}, стоимость {cost_label}")
     print(f"транскрипты: {run_dir}")
 
     if other:
