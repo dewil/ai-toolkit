@@ -287,8 +287,7 @@ def _codex_config(binary, *, judge=False):
     fields += ["", f"[permissions.{profile}.network]", "enabled = false", "",
         "[shell_environment_policy]", 'inherit = "none"', "experimental_use_profile = false", "",
         "[shell_environment_policy.set]", 'PATH = "/usr/bin:/bin"',
-        'HOME = "/home/eval"', 'LANG = "C.UTF-8"', "", "[tools]", "view_image = false", "",
-        "[features]"]
+        'HOME = "/home/eval"', 'LANG = "C.UTF-8"', "", "[features]"]
     for name in ("apps", "hooks", "plugins", "remote_plugin", "multi_agent", "multi_agent_v2",
         "browser_use", "browser_use_external", "browser_use_full_cdp_access", "in_app_browser",
         "computer_use", "image_generation", "view_image", "code_mode_host", "shell_snapshot",
@@ -333,7 +332,9 @@ def _check_cli(codex, env, *, judge=False):
     for flag in ("--no-daemon", "--ask-for-approval"):
         if flag not in global_text: raise PreflightError("required global Codex CLI flag is unavailable")
     help_text = help_result.stdout + help_result.stderr
-    for flag in ("--strict-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--json") + (("--output-schema",) if judge else ()):
+    exec_flags = ("--strict-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--json")
+    if judge: exec_flags += ("--output-schema",)
+    for flag in exec_flags:
         if flag not in help_text: raise PreflightError("Codex CLI required flag is unavailable")
     sandbox_text = sandbox_help.stdout + sandbox_help.stderr
     if "--permission-profile" not in sandbox_text and "-P" not in sandbox_text:
@@ -480,6 +481,33 @@ def _run_offline_canary(command, env, root, marker):
                 except OSError: pass
 
 
+def _strict_exec_startup_canary(args, codex, state, home, env):
+    """Load exact generated exec config with no network and fail before inference."""
+    exec_args = argparse.Namespace(**vars(args))
+    exec_args.preflight = False
+    exec_args.dry_run = False
+    cmd = _bwrap_eval(exec_args, codex, codex, state, home, env)
+    try: cmd.remove("--share-net")
+    except ValueError: raise PreflightError("strict exec startup command lacks outer isolation") from None
+    try:
+        index = cmd.index("--output-schema")
+        cmd[index + 1] = "/state/codex/.missing-strict-startup-schema.json"
+    except ValueError:
+        # The executor normally has no schema option; force the CLI to load
+        # strict config, then stop at this deliberately absent schema before inference.
+        try: prompt_index = cmd.index("-")
+        except ValueError: raise PreflightError("strict exec startup command is malformed") from None
+        cmd[prompt_index:prompt_index] = ["--output-schema", "/state/codex/.missing-strict-startup-schema.json"]
+    try:
+        result = subprocess.run(cmd, env=env, input="synthetic offline startup check", text=True,
+            capture_output=True, timeout=30, check=False, close_fds=True)
+    except (OSError, subprocess.TimeoutExpired):
+        raise PreflightError("strict native exec startup validation failed") from None
+    if result.returncode and "failed to read output schema file" in (result.stderr or "").lower():
+        return
+    raise PreflightError("strict native exec startup validation failed")
+
+
 def _native_exec_argv(args):
     native = ["--no-daemon", "--ask-for-approval", "never", "exec", "--strict-config",
               "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--json", "-C", "/workspace"]
@@ -576,6 +604,7 @@ def eval_main(argv):
             if marker.read_text(encoding="utf-8") != "SYNTHETIC_HOST_CANARY":
                 raise PreflightError("host canary changed during native preflight")
             marker.unlink()
+            _strict_exec_startup_canary(args, codex, state, home, env)
             return 0
         # Every live model execution first runs the same offline controls.
         preflight_args = argparse.Namespace(**vars(args)); preflight_args.preflight = True
@@ -586,6 +615,7 @@ def eval_main(argv):
         if marker.read_text(encoding="utf-8") != "SYNTHETIC_HOST_CANARY":
             raise PreflightError("host canary changed during native preflight")
         marker.unlink()
+        _strict_exec_startup_canary(args, codex, state, home, env)
         _write_metadata(args, version, config, native)
         live = _bwrap_eval(args, codex, codex, state, home, env)
         completed = _run_process_group(live, env, args.timeout)
