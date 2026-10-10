@@ -1,6 +1,6 @@
 ---
 name: csv-xlsx
-description: Собрать .xlsx из CSV/TSV - таблица в Excel, несколько файлов = несколько листов: "сделай xlsx", "переведи csv в excel", "книга с листами". Документы - `md-docx`, слайды - `md-pptx`.
+description: "Собрать .xlsx из CSV/TSV - таблица в Excel, несколько файлов = несколько листов: \"сделай xlsx\", \"переведи csv в excel\", \"книга с листами\". Документы - `md-docx`, слайды - `md-pptx`."
 ---
 
 # csv-xlsx
