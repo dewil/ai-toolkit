@@ -35,6 +35,10 @@ def catalog(root, bootstrap):
     for line in raw_manifest.splitlines():
         if line.startswith('  - '):
             name = line.strip()[2:].split(' #', 1)[0].strip()
+            try:
+                bootstrap.safe_relative(name)
+            except ValueError as error:
+                raise FrontmatterError(f'manifest.yaml: {error}') from error
             if not (name.startswith('rules/') and name.endswith('.md')
                     or name.startswith('agents/') and name.endswith('.md')
                     or name.startswith('skills/') and name.endswith('/SKILL.md')):
@@ -108,32 +112,30 @@ def parse_frontmatter(path, relative, yaml):
     source = '\n'.join(lines[1:end])
 
     class UniqueSafeLoader(yaml.SafeLoader):
-        pass
-
-    def construct_mapping(loader, node, deep=False):
-        explicit = [key_node for key_node, _ in node.value
-                    if key_node.tag != 'tag:yaml.org,2002:merge']
-        mapping = {}
-        for key_node in explicit:
-            key = loader.construct_object(key_node, deep=deep)
-            try:
-                duplicate = key in mapping
-            except TypeError as error:
-                raise yaml.constructor.ConstructorError(
-                    'while constructing a mapping', node.start_mark,
-                    'unhashable mapping key', key_node.start_mark,
-                ) from error
-            if duplicate:
-                raise yaml.constructor.ConstructorError(
-                    'while constructing a mapping', node.start_mark,
-                    f'duplicate key {key!r}', key_node.start_mark,
-                )
-            mapping[key] = None
-        loader.flatten_mapping(node)
-        return super(UniqueSafeLoader, loader).construct_mapping(node, deep=deep)
-
-    UniqueSafeLoader.add_constructor(
-        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_mapping)
+        def construct_mapping(self, node, deep=False):
+            if isinstance(node, yaml.MappingNode):
+                explicit = set()
+                merge_key = object()
+                for key_node, _ in node.value:
+                    if key_node.tag == 'tag:yaml.org,2002:merge':
+                        key = merge_key
+                    else:
+                        key = self.construct_object(key_node, deep=deep)
+                    try:
+                        duplicate = key in explicit
+                        explicit.add(key)
+                    except TypeError as error:
+                        raise yaml.constructor.ConstructorError(
+                            'while constructing a mapping', node.start_mark,
+                            'unhashable mapping key', key_node.start_mark,
+                        ) from error
+                    if duplicate:
+                        label = '<<' if key is merge_key else repr(key)
+                        raise yaml.constructor.ConstructorError(
+                            'while constructing a mapping', node.start_mark,
+                            f'duplicate key {label}', key_node.start_mark,
+                        )
+            return super().construct_mapping(node, deep=deep)
     try:
         docs = list(yaml.load_all(source, Loader=UniqueSafeLoader))
     except yaml.YAMLError as error:
