@@ -76,8 +76,10 @@ class MemoryMCPTest(unittest.TestCase):
         self.assertEqual([t['name'] for t in tools], ['memory_search'])
         schema = tools[0]['inputSchema']
         self.assertEqual(schema['type'], 'object')
-        self.assertEqual(set(schema['properties']), {'query', 'project', 'limit'})
-        self.assertEqual(set(schema['required']), {'query', 'project'})
+        # MI05 intentionally adds an XOR project/project_id selector; the blind
+        # identity suite checks the schema alternatives and protocol validation.
+        self.assertEqual(set(schema['properties']), {'query', 'project', 'project_id', 'limit'})
+        self.assertEqual(set(schema['required']), {'query'})
         self.assertIs(schema['additionalProperties'], False)
         self.assertEqual(schema['properties']['query']['type'], 'string')
         self.assertEqual(schema['properties']['query']['maxLength'], 4000)
