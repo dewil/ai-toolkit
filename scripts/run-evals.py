@@ -96,6 +96,7 @@ CODEX_HASH_FIELDS = ("isolation_config_sha256", "effective_context_sha256")
 CODEX_PROVENANCE_FIELDS = ("provider", "cli_version", "isolation_contract_version",
                           "isolation_config_sha256", "effective_context_sha256",
                           "context_adapter_version", "judge_provider")
+CODEX_UNKNOWN = "unknown"
 
 
 def validate_measurements(value: dict) -> None:
@@ -255,7 +256,7 @@ def _fixture_digest(root: Path) -> str:
     return _digest(json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode())
 
 
-def _provenance(sid, spec, prompt, fixture, model, judge_model):
+def _provenance(sid, spec, prompt, fixture, model, judge_model, runtime=None):
     criteria = json.dumps({"hard": spec.get("hard", []), "soft": spec.get("soft", [])},
                           ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     judge_used = any("judge" in a for a in spec.get("soft", []))
@@ -275,12 +276,29 @@ def _provenance(sid, spec, prompt, fixture, model, judge_model):
             "judge_version": "unknown" if judge_used else None,
             "judge_rubric_sha256": rubric}
     if provider == "codex":
-        data.update(provider="codex", cli_version="0.162.1",
+        runtime = runtime if isinstance(runtime, dict) else {}
+        normalized_config = runtime.get("config_toml")
+        native_argv = runtime.get("argv")
+        isolation_argv = runtime.get("isolation_argv")
+        cli_version = runtime.get("cli_version")
+        if (not isinstance(normalized_config, str) or not isinstance(native_argv, list)
+                or not isinstance(isolation_argv, list) or not isinstance(cli_version, str)):
+            model_config_sha, isolation_config_sha, cli_version = CODEX_UNKNOWN, CODEX_UNKNOWN, CODEX_UNKNOWN
+        else:
+            model_config_sha = _digest(json.dumps({"config": normalized_config, "argv": native_argv},
+                sort_keys=True, separators=(",", ":")).encode())
+            isolation_config_sha = _digest(json.dumps({"config": normalized_config,
+                "argv": isolation_argv, "cli_version": cli_version},
+                sort_keys=True, separators=(",", ":")).encode())
+        wrapper_hash = _digest((Path(__file__).read_bytes() + b"\0" +
+                                (ROOT / "scripts" / "codex-sandbox.py").read_bytes()))
+        data.update(provider="codex", cli_version=cli_version,
             isolation_contract_version=CODEX_ISOLATION_VERSION,
-            isolation_config_sha256=_digest(b"codex-eval-v1:profile-eval+outer-bwrap+closed-features"),
+            isolation_config_sha256=isolation_config_sha,
             effective_context_sha256=codex_context_hash(fixture),
             context_adapter_version=CODEX_CONTEXT_VERSION,
-            judge_provider="codex" if judge_used else None)
+            judge_provider="codex" if judge_used else None,
+            model_config_sha256=model_config_sha, harness_sha256=wrapper_hash)
     return data
 
 
@@ -325,6 +343,7 @@ class Run:
     cost: float | None = 0.0
     usage: dict = field(default_factory=lambda: {"input": None, "output": None, "cache_read": None})
     provider: str = "claude"
+    metadata: dict = field(default_factory=dict)
     turns: int = 0
     files: dict[str, str] = field(default_factory=dict)  # путь -> sha256 после прогона
     contents: dict[str, str] = field(default_factory=dict)  # путь -> текст (для проверок по содержимому)
@@ -762,62 +781,104 @@ CODEX_ISOLATION_VERSION = "codex-eval-v1"
 
 def prepare_codex_fixture(root: Path, scenario: dict) -> str:
     """Compile only simple, bounded CLAUDE @relative imports into AGENTS.md."""
-    unsupported = (".agents", ".claude", ".codex", "hooks.json", "plugins")
-    found = [p for p in unsupported if (root / p).exists() or (root / p).is_symlink()]
-    if found:
-        raise ValueError("project runtime configuration is unsupported: " + ", ".join(found))
-    claude, agents = root / "CLAUDE.md", root / "AGENTS.md"
-    if claude.exists() and agents.exists():
-        raise ValueError("conflicting CLAUDE.md and AGENTS.md sources")
-    if agents.exists():
-        if agents.is_symlink() or not agents.is_file():
-            raise ValueError("AGENTS.md must be a regular fixture file")
-        data = agents.read_bytes()
-        if len(data) > CODEX_CONTEXT_LIMIT:
-            raise ValueError("AGENTS.md context exceeds 24 KiB")
-        effective = data.decode("utf-8")
+    root = Path(os.path.abspath(root))
+    if root == Path("/"): raise ValueError("fixture root cannot be the filesystem root")
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    root_fd = os.open("/", dir_flags)
+    try:
+        for component in root.parts[1:]:
+            next_fd = os.open(component, dir_flags, dir_fd=root_fd)
+            os.close(root_fd)
+            root_fd = next_fd
+
+        def info(relative):
+            try: return os.stat(relative, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError: return None
+
+        def read_relative(relative):
+            parts = Path(relative).parts
+            if not parts or Path(relative).is_absolute() or any(p in ("", ".", "..") for p in parts):
+                raise ValueError("context source escapes fixture")
+            parent_fd = os.dup(root_fd)
+            try:
+                for component in parts[:-1]:
+                    child_fd = os.open(component, dir_flags, dir_fd=parent_fd)
+                    os.close(parent_fd); parent_fd = child_fd
+                file_fd = os.open(parts[-1], os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd)
+                try:
+                    if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+                        raise ValueError("context source must be a regular file")
+                    chunks = []
+                    while True:
+                        chunk = os.read(file_fd, 8192)
+                        if not chunk: break
+                        chunks.append(chunk)
+                        if sum(map(len, chunks)) > CODEX_CONTEXT_LIMIT:
+                            raise ValueError("context source exceeds 24 KiB")
+                    return b"".join(chunks)
+                finally: os.close(file_fd)
+            finally: os.close(parent_fd)
+
+        for name in (".agents", ".claude", ".codex", "hooks.json", "plugins"):
+            entry = info(name)
+            if entry is not None:
+                raise ValueError("project runtime configuration is unsupported: " + name)
+        claude_stat, agents_stat = info("CLAUDE.md"), info("AGENTS.md")
+        for name, item in (("CLAUDE.md", claude_stat), ("AGENTS.md", agents_stat)):
+            if item is not None and not stat.S_ISREG(item.st_mode):
+                raise ValueError(name + " must be a regular fixture file; symlinks are unsupported")
+        if claude_stat is not None and agents_stat is not None:
+            raise ValueError("conflicting CLAUDE.md and AGENTS.md sources")
+        if agents_stat is not None:
+            data = read_relative("AGENTS.md")
+            if len(data) > CODEX_CONTEXT_LIMIT: raise ValueError("AGENTS.md context exceeds 24 KiB")
+            data.decode("utf-8")
+            return _digest(data)
+        if claude_stat is None:
+            return _digest(b"")
+
+        stack = set()
+        import_re = re.compile(r"^\s*@([^\s]+)\s*$")
+        conditional = re.compile(r"(?im)^\s*(?:paths\s*:|when\s*:|if\s*:|apply_when\s*:)")
+        def expand(relative):
+            relative = posixpath.normpath(relative)
+            if relative.startswith("../") or relative == ".." or relative.startswith("/"):
+                raise ValueError("context import escapes fixture")
+            if relative in stack: raise ValueError("context import cycle")
+            stack.add(relative)
+            raw = read_relative(relative)
+            try: body = raw.decode("utf-8")
+            except UnicodeDecodeError: raise ValueError("context source is not UTF-8") from None
+            if conditional.search(body): raise ValueError("conditional Claude context is unsupported")
+            chunks = [f"<!-- source: {relative} -->\n"]
+            parent = posixpath.dirname(relative)
+            for line in body.splitlines(keepends=True):
+                match = import_re.fullmatch(line.rstrip("\r\n"))
+                if match:
+                    target = match.group(1)
+                    if target.startswith("/") or "\\" in target:
+                        raise ValueError("context import must be simple relative path")
+                    child = posixpath.normpath(posixpath.join(parent, target))
+                    chunks.append(expand(child))
+                else: chunks.append(line)
+            stack.remove(relative)
+            return "".join(chunks)
+
+        data = expand("CLAUDE.md").encode("utf-8")
+        if len(data) > CODEX_CONTEXT_LIMIT: raise ValueError("effective context exceeds 24 KiB")
+        out_fd = os.open("AGENTS.md", os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow |
+                         getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=root_fd)
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(out_fd, view)
+                view = view[written:]
+            os.fsync(out_fd)
+        finally: os.close(out_fd)
         return _digest(data)
-    if not claude.exists():
-        return _digest(b"")
-    if claude.is_symlink() or not claude.is_file():
-        raise ValueError("CLAUDE.md must be a regular fixture file")
-    stack = set()
-    import_re = re.compile(r"^\s*@([^\s]+)\s*$", re.M)
-    conditional = re.compile(r"(?im)^\s*(?:paths\s*:|when\s*:|if\s*:|apply_when\s*:)")
-    def expand(path):
-        resolved = path.resolve(strict=True)
-        if root.resolve() not in resolved.parents and resolved != root.resolve():
-            raise ValueError("context import escapes fixture")
-        if path.is_symlink() or resolved in stack or not resolved.is_file():
-            raise ValueError("context import is symlink, cycle, or not a file")
-        stack.add(resolved)
-        raw = resolved.read_bytes()
-        if len(raw) > CODEX_CONTEXT_LIMIT:
-            raise ValueError("context source exceeds 24 KiB")
-        try: body = raw.decode("utf-8")
-        except UnicodeDecodeError: raise ValueError("context source is not UTF-8") from None
-        if conditional.search(body):
-            raise ValueError("conditional Claude context is unsupported")
-        chunks = [f"<!-- source: {resolved.relative_to(root.resolve()).as_posix()} -->\n"]
-        for line in body.splitlines(keepends=True):
-            match = import_re.fullmatch(line.rstrip("\r\n"))
-            if match:
-                target = match.group(1)
-                if target.startswith("/") or "\\" in target:
-                    raise ValueError("context import must be simple relative path")
-                child = path.parent / target
-                if child.is_symlink(): raise ValueError("context import is symlink")
-                chunks.append(expand(child))
-            else:
-                chunks.append(line)
-        stack.remove(resolved)
-        return "".join(chunks)
-    effective = expand(claude)
-    data = effective.encode("utf-8")
-    if len(data) > CODEX_CONTEXT_LIMIT:
-        raise ValueError("effective context exceeds 24 KiB")
-    agents.write_bytes(data)
-    return _digest(data)
+    finally:
+        os.close(root_fd)
 
 
 def codex_context_hash(root: Path) -> str:
@@ -834,13 +895,15 @@ def codex_context_hash(root: Path) -> str:
 def codex_scenario_supported(scenario: dict) -> None:
     if scenario.get("allowed_tools") or scenario.get("disallowed_tools"):
         raise ValueError("Claude tool allow/deny lists have no Codex equivalence")
-    portable = {"Bash", "CodexBash"}
+    portable = {"Bash"}
     for group in ("hard", "soft"):
         for assertion in scenario.get(group, []):
             kind = next(iter(assertion))
             if kind in ("tool_call", "no_tool_call"):
                 names = assertion[kind].get("name")
                 names = [names] if isinstance(names, str) else names or []
+                if kind == "no_tool_call" and not names:
+                    raise ValueError("generic no_tool_call has no complete Codex action mapping")
                 if any(name not in portable for name in names):
                     raise ValueError("assertion requires unsupported tool capability")
             if kind == "text_before_tool":
@@ -919,23 +982,42 @@ def run_once(sid: str, scenario: dict, prompt: str, fixture: Path | None,
                 return run, {}
             out_path.parent.mkdir(parents=True, exist_ok=True)
             wrapper = ROOT / "scripts" / "codex-sandbox.py"
+            private = Path(tempfile.mkdtemp(prefix="eval-codex-private-"))
+            private.chmod(0o700)
+            private_state = private / "state"
+            metadata_path = private / "metadata.json"
+            timeout_seconds = float(scenario.get("timeout", DEFAULT_TIMEOUT))
             argv = [sys.executable, str(wrapper), "--mode", "eval", "--root", str(box),
-                    "--model", str(model or ""), "--auth-file", str(approved_auth_path())]
+                    "--model", str(model or ""), "--auth-file", str(approved_auth_path()),
+                    "--state-dir", str(private_state), "--metadata-file", str(metadata_path),
+                    "--timeout", str(timeout_seconds)]
             timed_out, rc = False, 0
             try:
-                result = subprocess.run(argv, cwd=box, capture_output=True,
-                    stdin=subprocess.PIPE, input=prompt, text=True,
-                    timeout=scenario.get("timeout", DEFAULT_TIMEOUT), env=codex_launcher_env())
-                rc = result.returncode
-                out_path.write_text(result.stdout or "", encoding="utf-8")
-                wrapper_error = codex_wrapper_failure(result.stderr)
-            except subprocess.TimeoutExpired as error:
-                timed_out = True
-                out_path.write_text(error.stdout or "", encoding="utf-8")
-            except FileNotFoundError:
-                run = Run(provider="codex", cost=None); run.infra = "Codex wrapper unavailable"
-                return run, before
+                try:
+                    result = subprocess.run(argv, cwd=box, capture_output=True,
+                        stdin=subprocess.PIPE, input=prompt, text=True,
+                        timeout=timeout_seconds + 60, env=codex_launcher_env())
+                    rc = result.returncode
+                    out_path.write_text(result.stdout or "", encoding="utf-8")
+                    wrapper_error = codex_wrapper_failure(result.stderr)
+                except subprocess.TimeoutExpired as error:
+                    timed_out = True
+                    partial = error.stdout or b""
+                    if isinstance(partial, bytes): partial = partial.decode("utf-8", errors="replace")
+                    out_path.write_text(partial, encoding="utf-8")
+                except FileNotFoundError:
+                    run = Run(provider="codex", cost=None); run.infra = "Codex wrapper unavailable"
+                    return run, before
+                runtime = {}
+                try:
+                    if metadata_path.is_file() and not metadata_path.is_symlink():
+                        runtime = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    runtime = {}
+            finally:
+                shutil.rmtree(private, ignore_errors=True)
             run = parse_codex_transcript(out_path.read_text(encoding="utf-8").splitlines())
+            run.metadata = runtime
             if timed_out: run.infra = run.infra or "Codex run timed out"
             elif rc != 0: run.infra = run.infra or wrapper_error
             run.files, run.contents = snapshot(box), capture(box)
@@ -1308,10 +1390,12 @@ def main() -> int:
         completed = evaluated = behavior_fail_runs = measured_hard = measured_soft = 0
         infrastructure_error_runs = judge_error_runs = 0
         observed_provider = None
+        runtime_records = []
         for n in range(args.runs):
             run, before = run_once(sid, spec, prompt, fixture, args.model,
                                    run_dir / f"{sid}-{n + 1}.jsonl")
             observed_provider = run.provider
+            runtime_records.append(run.metadata if isinstance(run.metadata, dict) else {})
             if run.cost is None:
                 total_cost = None
             elif total_cost is not None:
@@ -1357,8 +1441,11 @@ def main() -> int:
         validate_measurements(measured)
         provenance_spec = dict(spec)
         if observed_provider != "codex": provenance_spec.pop("_provider", None)
+        runtime = None
+        if runtime_records and runtime_records[0] and all(item == runtime_records[0] for item in runtime_records):
+            runtime = runtime_records[0]
         prov = _provenance(sid, provenance_spec, prompt, fixture, args.model,
-                           args.judge_model or args.model)
+                           args.judge_model or args.model, runtime=runtime)
         results[sid] = {"status": st, "hard_fail_runs": hard_fail_runs,
                         "soft_fail_runs": soft_fail_runs,
                         "runs": args.runs, "notes": notes[:6], "infra": infra[:2],
