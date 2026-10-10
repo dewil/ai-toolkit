@@ -447,9 +447,11 @@ def _check_cli(codex, env, *, judge=False):
                                       text=True, timeout=10, check=False)
     except (OSError, subprocess.TimeoutExpired):
         raise PreflightError("Codex CLI capability check failed") from None
-    version_text = (version.stdout + version.stderr).strip()
-    if version.returncode or not re.search(r"(?:^|\s)codex-cli\s+" + re.escape(EVAL_VERSION) + r"(?:\s|$)", version_text):
+    version_match = re.search(r"(?:^|\s)(codex-cli\s+" + re.escape(EVAL_VERSION) + r")(?:\s|$)",
+                              version.stdout or "")
+    if version.returncode or version_match is None:
         raise PreflightError("unsupported Codex CLI version")
+    version_text = version_match.group(1)
     if global_help.returncode or help_result.returncode or sandbox_help.returncode:
         raise PreflightError("Codex CLI required command is unavailable")
     global_text = global_help.stdout + global_help.stderr
