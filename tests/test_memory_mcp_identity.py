@@ -209,6 +209,32 @@ def qdrant(path, method='GET', body=None, quiet=False):
         self.assertEqual(value['matches'][0]['project'], 'Other-copy')
         self.assertEqual(value['matches'][0]['project_id'], PID)
 
+    def test_trusted_backend_rewrite_ignores_same_stat_stale_bytecode(self):
+        self.stub(version=1)
+        # Seed a real initial cache during the first protocol request, including
+        # when the adapter itself deliberately avoids writing bytecode caches.
+        original = ('import py_compile\npy_compile.compile(__file__, doraise=True)\n' +
+                    self.backend.read_text().replace("'text': 'body'", "'text': 'fresh_A'"))
+        rewritten = original.replace("'text': 'fresh_A'", "'text': 'fresh_B'")
+        self.assertNotEqual(original, rewritten)
+        self.assertEqual(len(original.encode()), len(rewritten.encode()))
+        fixed_mtime = 1_700_000_000
+        self.backend.write_text(original)
+        os.utime(self.backend, (fixed_mtime, fixed_mtime))
+        first_stat = self.backend.stat()
+        first = self.rpc({'query': 'x', 'project': 'Eng'})
+        self.assertEqual(first.get('status'), 'ok', first)
+        self.assertEqual(first['matches'][0]['text'], 'fresh_A')
+        self.assertTrue(list(self.root.glob('__pycache__/stub.*.pyc')), 'fixture must seed initial bytecode')
+        self.backend.write_text(rewritten)
+        os.utime(self.backend, ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns))
+        second_stat = self.backend.stat()
+        self.assertEqual((second_stat.st_size, second_stat.st_mtime_ns),
+                         (first_stat.st_size, first_stat.st_mtime_ns))
+        second = self.rpc({'query': 'x', 'project': 'Eng'})
+        self.assertEqual(second.get('status'), 'ok', second)
+        self.assertEqual(second['matches'][0]['text'], 'fresh_B', 'current trusted source must win over stale .pyc')
+
 
 if __name__ == '__main__':
     unittest.main()
