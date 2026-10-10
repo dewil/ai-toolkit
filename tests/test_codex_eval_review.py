@@ -16,6 +16,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("codex_eval_independent_review", ROOT / "scripts/run-evals.py")
@@ -57,6 +58,40 @@ class ContextBoundaryReview(unittest.TestCase):
             (fixture / "CLAUDE.md").write_text("@alias/policy.md\n", encoding="utf-8")
             with self.assertRaises((ValueError, OSError)):
                 engine.prepare_codex_fixture(fixture, {})
+
+
+class TraceAndTimeoutReview(unittest.TestCase):
+    def test_timeout_with_partial_bytes_returns_infrastructure_instead_of_crashing(self):
+        with tempfile.TemporaryDirectory(prefix="review-timeout-") as name:
+            base = Path(name)
+            fixture = base / "fixture"
+            fixture.mkdir()
+            timeout = subprocess.TimeoutExpired(["synthetic-wrapper"], 1,
+                output=b'{"type":"thread.started","thread_id":"synthetic"}\n')
+            with patch.object(engine.subprocess, "run", side_effect=timeout):
+                run, _ = engine.run_once("review-timeout", {"_provider": "codex"},
+                    "synthetic", fixture, "synthetic-model", base / "trace.jsonl")
+            self.assertTrue(run.infra)
+            self.assertEqual(run.provider, "codex")
+
+    def test_generic_no_tool_assertion_cannot_pass_after_observed_file_change(self):
+        assertion = {"no_tool_call": {}}
+        try:
+            engine.codex_scenario_supported({"hard": [assertion], "soft": []})
+        except ValueError:
+            return  # Explicit unsupported before API is an allowed safe outcome.
+        events = [
+            {"type": "thread.started", "thread_id": "synthetic"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"id": "f", "type": "file_change",
+                "status": "completed", "changes": [{"path": "forbidden.txt", "kind": "update"}]}},
+            {"type": "turn.completed"},
+        ]
+        run = engine.parse_codex_transcript([json.dumps(event) for event in events])
+        if run.infra:
+            return  # An unsupported tool trace must not become a behavioral PASS.
+        self.assertFalse(engine.check(assertion, run, {})[0],
+                         "observed file-changing tool vanished from generic negative assertion")
 
 
 @unittest.skipUnless(sys.platform == "linux" and shutil.which("codex") and shutil.which("bwrap"),
