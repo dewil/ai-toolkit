@@ -74,6 +74,21 @@ class TraceAndTimeoutReview(unittest.TestCase):
             self.assertTrue(run.infra)
             self.assertEqual(run.provider, "codex")
 
+    def test_nonzero_startup_has_safe_process_reason_beyond_missing_terminal(self):
+        with tempfile.TemporaryDirectory(prefix="review-startup-reason-") as name:
+            base = Path(name)
+            fixture = base / "fixture"
+            fixture.mkdir()
+            result = subprocess.CompletedProcess(["synthetic-wrapper"], 2, stdout="",
+                stderr="native strict config validation failed SYNTHETIC_SECRET_NEVER_SURFACE")
+            with patch.object(engine.subprocess, "run", return_value=result):
+                run, _ = engine.run_once("review-startup", {"_provider": "codex"},
+                    "synthetic", fixture, "synthetic-model", base / "trace.jsonl")
+            self.assertTrue(run.infra)
+            self.assertNotEqual(run.infra, engine.parse_codex_transcript([]).infra,
+                "nonzero startup discarded the wrapper/process failure reason")
+            self.assertNotIn("SYNTHETIC_SECRET_NEVER_SURFACE", run.infra)
+
     def test_judge_timeout_uses_parent_owned_private_state_and_cleanup_grace(self):
         created_states = []
         def interrupted_wrapper(argv, **kwargs):
@@ -174,6 +189,34 @@ class NativeWrapperReview(unittest.TestCase):
                         "executor disabled every native command capability")
         self.assertFalse(configurations[True]["shell_tool"])
         self.assertFalse(configurations[True]["unified_exec"])
+
+    def test_actual_strict_exec_config_reaches_missing_schema_without_network(self):
+        done = self.invoke("--dry-run")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        manifest = json.loads(done.stdout)
+        state = self.base / "strict-state"
+        state.mkdir(mode=0o700)
+        (state / "auth.json").write_bytes(self.auth.read_bytes())
+        (state / "auth.json").chmod(0o600)
+        (state / "config.toml").write_text(manifest["config"], encoding="utf-8")
+        argv = list(manifest["argv"])
+        self.assertIn("--strict-config", argv)
+        argv.remove("--share-net")  # No API network even if startup ordering changes.
+        mapped_state = False
+        for index, word in enumerate(argv[:-2]):
+            if word == "--bind" and argv[index + 2] == "/state/codex":
+                argv[index + 1] = str(state)
+                mapped_state = True
+        self.assertTrue(mapped_state, "public manifest omitted private state mount")
+        self.assertEqual(argv[-1], "-")
+        argv[-1:-1] = ["--output-schema", "/deliberately-missing-review-schema.json"]
+        check = subprocess.run(argv, input="SYNTHETIC_STDIN", capture_output=True,
+                               text=True, env=self.env, timeout=5)
+        self.assertNotEqual(check.returncode, 0, "missing-schema sentinel must stop before model")
+        self.assertIn("Failed to read output schema file", check.stderr,
+                      "strict executor rejected config before the pre-model schema sentinel")
+        self.assertNotIn("unknown configuration field", check.stderr)
+        self.assertNotIn("AUTH_REVIEW_CANARY_NEVER_PRINT", check.stdout + check.stderr)
 
     def test_actual_preflight_accepts_real_network_denial_and_cleans_fixture(self):
         before = sorted(p.relative_to(self.fixture).as_posix() for p in self.fixture.rglob("*"))
