@@ -943,6 +943,29 @@ def codex_wrapper_failure(stderr: str) -> str:
     return "Codex isolated wrapper refused the run"
 
 
+def run_codex_wrapper(argv, prompt, timeout, *, cwd=None, env=None):
+    """Run one eval or judge wrapper with owned auth state and timeout cleanup."""
+    private = Path(tempfile.mkdtemp(prefix="eval-codex-private-"))
+    private.chmod(0o700)
+    state = private / "state"
+    metadata_path = private / "metadata.json"
+    command = [*argv, "--state-dir", str(state), "--metadata-file", str(metadata_path),
+               "--timeout", str(float(timeout))]
+    try:
+        result = subprocess.run(command, cwd=cwd, capture_output=True,
+            input=prompt, text=True, timeout=float(timeout) + 60, env=env)
+        runtime = {}
+        try:
+            if metadata_path.is_file() and not metadata_path.is_symlink():
+                runtime = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            runtime = {}
+        return result, runtime
+    finally:
+        # Caller owns this path even when subprocess.run kills the wrapper.
+        shutil.rmtree(private, ignore_errors=True)
+
+
 def build_argv(prompt: str, model: str | None, scenario: dict) -> list[str]:
     argv = ["claude", "-p", prompt,
             "--output-format", "stream-json", "--verbose",
@@ -982,40 +1005,25 @@ def run_once(sid: str, scenario: dict, prompt: str, fixture: Path | None,
                 return run, {}
             out_path.parent.mkdir(parents=True, exist_ok=True)
             wrapper = ROOT / "scripts" / "codex-sandbox.py"
-            private = Path(tempfile.mkdtemp(prefix="eval-codex-private-"))
-            private.chmod(0o700)
-            private_state = private / "state"
-            metadata_path = private / "metadata.json"
             timeout_seconds = float(scenario.get("timeout", DEFAULT_TIMEOUT))
             argv = [sys.executable, str(wrapper), "--mode", "eval", "--root", str(box),
-                    "--model", str(model or ""), "--auth-file", str(approved_auth_path()),
-                    "--state-dir", str(private_state), "--metadata-file", str(metadata_path),
-                    "--timeout", str(timeout_seconds)]
+                    "--model", str(model or ""), "--auth-file", str(approved_auth_path())]
             timed_out, rc = False, 0
+            runtime = {}
             try:
-                try:
-                    result = subprocess.run(argv, cwd=box, capture_output=True,
-                        stdin=subprocess.PIPE, input=prompt, text=True,
-                        timeout=timeout_seconds + 60, env=codex_launcher_env())
-                    rc = result.returncode
-                    out_path.write_text(result.stdout or "", encoding="utf-8")
-                    wrapper_error = codex_wrapper_failure(result.stderr)
-                except subprocess.TimeoutExpired as error:
-                    timed_out = True
-                    partial = error.stdout or b""
-                    if isinstance(partial, bytes): partial = partial.decode("utf-8", errors="replace")
-                    out_path.write_text(partial, encoding="utf-8")
-                except FileNotFoundError:
-                    run = Run(provider="codex", cost=None); run.infra = "Codex wrapper unavailable"
-                    return run, before
-                runtime = {}
-                try:
-                    if metadata_path.is_file() and not metadata_path.is_symlink():
-                        runtime = json.loads(metadata_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    runtime = {}
-            finally:
-                shutil.rmtree(private, ignore_errors=True)
+                result, runtime = run_codex_wrapper(argv, prompt, timeout_seconds,
+                    cwd=box, env=codex_launcher_env())
+                rc = result.returncode
+                out_path.write_text(result.stdout or "", encoding="utf-8")
+                wrapper_error = codex_wrapper_failure(result.stderr)
+            except subprocess.TimeoutExpired as error:
+                timed_out = True
+                partial = error.stdout or b""
+                if isinstance(partial, bytes): partial = partial.decode("utf-8", errors="replace")
+                out_path.write_text(partial, encoding="utf-8")
+            except FileNotFoundError:
+                run = Run(provider="codex", cost=None); run.infra = "Codex wrapper unavailable"
+                return run, before
             run = parse_codex_transcript(out_path.read_text(encoding="utf-8").splitlines())
             run.metadata = runtime
             if timed_out: run.infra = run.infra or "Codex run timed out"
@@ -1152,10 +1160,11 @@ def codex_judge_outcome(criterion: str, run: Run, model: str | None) -> dict:
                                  text=run.text[:8000])
     with tempfile.TemporaryDirectory(prefix="eval-codex-judge-") as empty:
         argv = [sys.executable, str(ROOT / "scripts" / "codex-sandbox.py"), "--mode", "eval",
-                "--judge", "--root", empty, "--model", str(model or "")]
+                "--judge", "--root", empty, "--model", str(model or ""),
+                "--auth-file", str(approved_auth_path())]
         try:
-            result = subprocess.run(argv, input=prompt, text=True, capture_output=True,
-                                    timeout=DEFAULT_TIMEOUT, check=False)
+            result, _runtime = run_codex_wrapper(argv, prompt, DEFAULT_TIMEOUT,
+                cwd=empty, env=codex_launcher_env())
         except (OSError, subprocess.TimeoutExpired):
             return {"outcome": "judge_error", "reason": "Codex judge did not complete"}
     if result.returncode:
