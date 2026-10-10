@@ -78,6 +78,25 @@ class CanonFrontmatterCLI(unittest.TestCase):
                    "description: *text\nvendor_mapping:\n  numbers: [1, 2]\n---\n")
         self.run_cli()
 
+    def test_safe_recursive_vendor_alias_is_allowed(self):
+        self.write("rules/example.md", "---\ndescription: Valid\nvendor: &v\n"
+                   "  self: *v\n---\n")
+        self.run_cli()
+
+    def test_valid_merge_sequence_and_explicit_override_are_allowed(self):
+        for header in (
+            "defaults: &d {description: Default}\n<<: *d\ndescription: Override",
+            "first: &a {description: One}\nsecond: &b {description: Two}\n<<: [*a, *b]",
+        ):
+            with self.subTest(header=header):
+                self.write("rules/example.md", "---\n" + header + "\n---\n")
+                self.run_cli()
+
+    def test_duplicate_explicit_merge_keys_are_rejected(self):
+        self.write("rules/example.md", "---\nfirst: &a {description: One}\n"
+                   "second: &b {description: Two}\n<<: *a\n<<: *b\n---\n")
+        self.run_cli(1, "rules/example.md")
+
     def test_missing_or_unclosed_header_is_error(self):
         for content in ("# No header\n", "\n---\ndescription: Valid\n---\n",
                         "---\ndescription: Valid\n", "---\ndescription: Valid\n--- trailing\n"):
@@ -171,6 +190,17 @@ class CanonFrontmatterCLI(unittest.TestCase):
             with self.subTest(content=content):
                 self.write("manifest.yaml", content)
                 self.run_cli(2, "manifest.yaml")
+
+    def test_invalid_unrelated_manifest_path_fails_closed(self):
+        self.write("manifest.yaml", "universal:\n  - rules/example.md\n"
+                   "  - ../../invalid.py\n")
+        self.run_cli(2, "manifest.yaml")
+
+    def test_valid_registered_docs_support_remains_ignored(self):
+        self.write("manifest.yaml", "universal:\n  - rules/example.md\n"
+                   "  - docs/support.md\n")
+        self.write("docs/support.md", "PRIVATE_BODY_SENTINEL\nInvalid YAML: :\n")
+        self.run_cli()
 
     def test_empty_catalog_fails_closed(self):
         (self.root / "rules/example.md").unlink()
