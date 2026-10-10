@@ -27,11 +27,15 @@ from pathlib import Path
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import platform
 import re
+import select
+import struct
+import time
 
 
 SECRET_PATTERNS = (
@@ -241,9 +245,9 @@ def _safe_proxy(name, value):
         return False
 
 
-def _eval_env(home, state):
+def _eval_env(home, state, host_bin_dir):
     env = {}
-    env["PATH"] = "/usr/bin:/bin"
+    env["PATH"] = str(host_bin_dir) + ":/usr/bin:/bin"
     env["HOME"] = "/home/eval"
     env["CODEX_HOME"] = "/state/codex"
     env["LANG"] = os.environ.get("LANG", "C.UTF-8")
@@ -272,7 +276,7 @@ def _auth_source(args):
     return candidate
 
 
-def _codex_config(binary, *, judge=False):
+def _codex_config(binary, *, judge=False, host_sha256="unknown"):
     profile = "judge" if judge else "eval"
     extends = ":read-only" if judge else ":workspace"
     fields = [
@@ -287,15 +291,17 @@ def _codex_config(binary, *, judge=False):
     fields += ["", f"[permissions.{profile}.network]", "enabled = false", "",
         "[shell_environment_policy]", 'inherit = "none"', "experimental_use_profile = false", "",
         "[shell_environment_policy.set]", 'PATH = "/usr/bin:/bin"',
-        'HOME = "/home/eval"', 'LANG = "C.UTF-8"', "", "[features]"]
+        'HOME = "/home/eval"', 'LANG = "C.UTF-8"', "", "[features]",
+        "code_mode_host = true"]
     for name in ("apps", "hooks", "plugins", "remote_plugin", "multi_agent", "multi_agent_v2",
         "browser_use", "browser_use_external", "browser_use_full_cdp_access", "in_app_browser",
-        "computer_use", "image_generation", "view_image", "code_mode_host", "shell_snapshot",
+        "computer_use", "image_generation", "view_image", "shell_snapshot",
         "skill_search", "skill_mcp_dependency_install", "workspace_dependencies", "daemon_auto_start"):
         fields.append(f"{name} = false")
     if judge:
         fields += ["shell_tool = false", "unified_exec = false", "",
                    '[permissions.judge.filesystem.":workspace_roots"]', '"." = "read"']
+    fields += ["", f"# bundled Code Mode host SHA-256: {host_sha256}"]
     return "\n".join(fields) + "\n"
 
 
@@ -309,6 +315,124 @@ def _native_binary(codex):
     if len(candidates) != 1 or not candidates[0].is_file():
         raise PreflightError("installed native Codex runtime is unavailable or ambiguous")
     return candidates[0].resolve(strict=True)
+
+
+def _bundled_code_mode_host(native_binary):
+    """Resolve only the Code Mode host shipped beside the trusted native CLI."""
+    host = Path(native_binary).parent / "codex-code-mode-host"
+    try:
+        fd = os.open(host, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or not (st.st_mode & 0o111):
+                raise OSError("not a regular executable")
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk: break
+                digest.update(chunk)
+        finally:
+            os.close(fd)
+        return host, digest.hexdigest()
+    except OSError:
+        raise PreflightError("bundled native Code Mode host unavailable before inference") from None
+
+
+def _host_send(stream, value):
+    payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    if len(payload) > 1024 * 1024: raise ValueError("host frame too large")
+    stream.write(struct.pack("<I", len(payload)) + payload)
+    stream.flush()
+
+
+def _host_read_exact(stream, length, deadline):
+    fd = stream.fileno()
+    result = bytearray()
+    while len(result) < length:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            raise TimeoutError("host readiness timeout")
+        chunk = os.read(fd, length - len(result))
+        if not chunk: raise ValueError("host closed protocol stream")
+        result.extend(chunk)
+    return bytes(result)
+
+
+def _host_receive(stream, deadline):
+    size = struct.unpack("<I", _host_read_exact(stream, 4, deadline))[0]
+    if size > 1024 * 1024: raise ValueError("host frame too large")
+    frame = json.loads(_host_read_exact(stream, size, deadline))
+    if not isinstance(frame, dict): raise ValueError("invalid host frame")
+    return frame
+
+
+def _stop_process_group(process):
+    if process.poll() is not None: return
+    try: os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError: pass
+    try: process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        process.wait()
+
+
+def _code_mode_readiness(outer_command, host, env):
+    """Run a positive JS cell and raw-IO denial checks before model inference."""
+    process = None
+    try:
+        boundary = outer_command.index("--")
+        command = list(outer_command[:boundary + 1]) + [str(host)]
+        if "--share-net" in command: command.remove("--share-net")
+        process = subprocess.Popen(command, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+        deadline = time.monotonic() + 5
+        _host_send(process.stdin, {"type":"connection/hello", "supportedVersions":[1],
+            "requiredCapabilities":[], "optionalCapabilities":[]})
+        hello = _host_receive(process.stdout, deadline)
+        if hello.get("type") != "connection/ready": raise ValueError("invalid hello response")
+        _host_send(process.stdin, {"type":"operation/request", "id":1,
+            "request":{"method":"session/open", "sessionId":"codex-eval-readiness"}})
+        opened = _host_receive(process.stdout, deadline)
+        if opened.get("result", {}).get("status") != "ok": raise ValueError("session open failed")
+        source = ("const r={positive:2+3};for(const n of ['node:fs','node:net','file:///state/codex/auth.json'])"
+            "{try{await import(n);r[n]='UNSAFE';}catch(e){r[n]=String(e);}}"
+            "r.globals={process:typeof process,require:typeof require,fetch:typeof fetch,Deno:typeof Deno,"
+            "Bun:typeof Bun,WebSocket:typeof WebSocket,XMLHttpRequest:typeof XMLHttpRequest,"
+            "Worker:typeof Worker,Buffer:typeof Buffer};r.toolKeys=Object.keys(tools);"
+            "r.toolCount=ALL_TOOLS.length;text(JSON.stringify(r));")
+        _host_send(process.stdin, {"type":"operation/request", "id":2,
+            "request":{"method":"session/execute", "sessionId":"codex-eval-readiness",
+            "request":{"tool_call_id":"synthetic-readiness", "source":source,
+            "enabled_tools":[], "max_output_tokens":2000}}})
+        response = None
+        for _ in range(8):
+            frame = _host_receive(process.stdout, deadline)
+            if frame.get("type") == "execute/initialResponse" and frame.get("id") == 2:
+                response = frame.get("result", {}).get("value", {}).get("Result")
+                break
+        if not isinstance(response, dict) or response.get("error_text") is not None:
+            raise ValueError("readiness cell failed")
+        items = response.get("content_items")
+        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+            raise ValueError("readiness output missing")
+        result = json.loads(items[0].get("text", ""))
+        expected_globals = {name:"undefined" for name in
+            ("process","require","fetch","Deno","Bun","WebSocket","XMLHttpRequest","Worker","Buffer")}
+        if (result.get("positive") != 5 or result.get("globals") != expected_globals
+                or any(result.get(name) != "unsupported import in exec"
+                    for name in ("node:fs","node:net","file:///state/codex/auth.json"))
+                or result.get("toolKeys") != [] or result.get("toolCount") != 0):
+            raise ValueError("readiness sandbox controls failed")
+    except Exception:
+        raise PreflightError("bundled Code Mode host readiness failed") from None
+    finally:
+        if process is not None:
+            _stop_process_group(process)
+            for stream in (process.stdin, process.stdout):
+                if stream is not None:
+                    try: stream.close()
+                    except OSError: pass
 
 
 def _check_cli(codex, env, *, judge=False):
@@ -582,9 +706,10 @@ def eval_main(argv):
             shutil.copyfile(approved_auth, auth_target)
         os.chmod(auth_target, 0o600)
         native = _native_binary(codex)
-        config = _codex_config(str(native), judge=args.judge)
+        code_mode_host, host_sha256 = _bundled_code_mode_host(native)
+        config = _codex_config(str(native), judge=args.judge, host_sha256=host_sha256)
         (state / "config.toml").write_text(config, encoding="utf-8"); os.chmod(state / "config.toml", 0o600)
-        env = _eval_env(home, state)
+        env = _eval_env(home, state, code_mode_host.parent)
         if not args.model.strip(): raise PreflightError("an explicit model is required")
         check_env = dict(env, CODEX_HOME=str(state), HOME=str(home))
         version = _check_cli(codex, check_env, judge=args.judge)
@@ -604,6 +729,9 @@ def eval_main(argv):
             if marker.read_text(encoding="utf-8") != "SYNTHETIC_HOST_CANARY":
                 raise PreflightError("host canary changed during native preflight")
             marker.unlink()
+            readiness_args = argparse.Namespace(**vars(args)); readiness_args.preflight = False
+            _code_mode_readiness(_bwrap_eval(readiness_args, codex, codex, state, home, env),
+                                 code_mode_host, env)
             _strict_exec_startup_canary(args, codex, state, home, env)
             return 0
         # Every live model execution first runs the same offline controls.
@@ -615,6 +743,9 @@ def eval_main(argv):
         if marker.read_text(encoding="utf-8") != "SYNTHETIC_HOST_CANARY":
             raise PreflightError("host canary changed during native preflight")
         marker.unlink()
+        readiness_args = argparse.Namespace(**vars(args)); readiness_args.preflight = False
+        _code_mode_readiness(_bwrap_eval(readiness_args, codex, codex, state, home, env),
+                             code_mode_host, env)
         _strict_exec_startup_canary(args, codex, state, home, env)
         _write_metadata(args, version, config, native)
         live = _bwrap_eval(args, codex, codex, state, home, env)
