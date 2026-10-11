@@ -75,7 +75,7 @@ class TaskCost(unittest.TestCase):
         self.assertEqual(data['measured_tokens'], total, 'TARGET: count input/output only, never cache/reasoning twice')
         self.assertEqual(data['unknown_records'], unknown, 'TARGET: unknown usage must remain visible')
         self.assertEqual(data['coverage'], 'partial' if unknown else 'complete')
-        self.assertEqual(sum(row['total'] for row in data['rows']), total)
+        self.assertEqual(sum(row.get('measured_total', row['total']) or 0 for row in data['rows']), total)
 
     def test_multi_vendor_retry_unknown_and_local_zero(self):
         a = record()

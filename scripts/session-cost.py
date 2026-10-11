@@ -310,7 +310,7 @@ def task_report(path):
     money_unknown = 0
     for rec in unique.values():
         key = tuple(rec[k] for k in ("role", "vendor", "model", "platform", "access"))
-        row = grouped.setdefault(key, {"records": 0, "tokens": {k: 0 for k in TOKEN_KEYS}, "null": set(), "total": 0, "unknown_records": 0, "money": defaultdict(Decimal), "money_unknown_records": 0})
+        row = grouped.setdefault(key, {"records": 0, "tokens": {k: 0 for k in TOKEN_KEYS}, "null": set(), "measured_seen": set(), "measured_total": 0, "measured_records": 0, "unknown_records": 0, "money": defaultdict(Decimal), "money_unknown_records": 0})
         row["records"] += 1
         money = rec.get("money")
         if money is None:
@@ -324,20 +324,37 @@ def task_report(path):
             for k in TOKEN_KEYS: row["null"].add(k)
             continue
         t = rec["tokens"]
-        row["total"] += t["input"] + t["output"]
+        row["measured_records"] += 1
+        row["measured_total"] += t["input"] + t["output"]
         for k in TOKEN_KEYS:
-            if t[k] is None: row["null"].add(k)
-            else: row["tokens"][k] += t[k]
+            if t[k] is None:
+                row["null"].add(k)
+            else:
+                row["tokens"][k] += t[k]
+                row["measured_seen"].add(k)
     rows = []
+    missing_records = []
+    for rec in unique.values():
+        if rec["status"] == "unknown":
+            missing_records.append({key: rec.get(key, "unknown") for key in
+                                    ("id", "role", "vendor", "model", "platform", "access")} |
+                                   {"reason": rec["reason"]})
     for key, value in sorted(grouped.items()):
+        tokens = {k: (None if k in value["null"] else value["tokens"][k]) for k in TOKEN_KEYS}
+        measured_tokens = {k: (None if k not in value["measured_seen"]
+                                else value["tokens"][k]) for k in TOKEN_KEYS}
+        measured_total = value["measured_total"] if value["measured_records"] else None
         rows.append(dict(zip(("role", "vendor", "model", "platform", "access"), key)) | {
-            "records": value["records"], "tokens": {k: (None if k in value["null"] else value["tokens"][k]) for k in TOKEN_KEYS},
-            "total": value["total"], "unknown_records": value["unknown_records"],
+            "records": value["records"], "tokens": tokens,
+            "measured_tokens": measured_tokens,
+            "total": None if value["unknown_records"] else measured_total,
+            "measured_total": measured_total, "unknown_records": value["unknown_records"],
             "money": [{"currency": c, "kind": t, "amount": str(a)} for (c,t),a in sorted(value["money"].items())],
             "money_unknown_records": value["money_unknown_records"]})
     unknown = sum(r["status"] == "unknown" for r in unique.values())
     return {"schema_version": 1, "task_id": obj["task_id"], "rows": rows,
-            "measured_tokens": sum(r["total"] for r in rows), "unknown_records": unknown,
+            "measured_tokens": sum(r["measured_total"] or 0 for r in rows),
+            "missing_records": missing_records, "unknown_records": unknown,
             "coverage": "partial" if unknown else "complete",
             "money_totals": [{"currency": c, "kind": k, "amount": str(a)} for (c,k),a in sorted(money_totals.items())],
             "money_unknown_records": money_unknown}
@@ -501,15 +518,121 @@ def snapshot(provider, path, since=None):
 def render_task(data):
     def esc(x): return str(x).replace("\n", " ").replace("|", "\\|")
     print(f"Task {esc(data['task_id'])}: {data['coverage']} coverage; measured input+output tokens={data['measured_tokens']}; unknown records={data['unknown_records']}")
-    print("| role | vendor | model | platform | access | input | cache_read | cache_write | output | reasoning | total | money | quality |")
+    print("| role | vendor | model | platform | access | input | cache_read | cache_write | output | reasoning | measured total | money | coverage |")
     print("|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|")
     for r in data["rows"]:
-        t = r["tokens"]; money = ", ".join(f"{m['amount']} {m['currency']} {m['kind']}" for m in r["money"]) or "unknown"
-        vals = [r[k] for k in ("role", "vendor", "model", "platform", "access")]+[t[k] if t[k] is not None else "unknown" for k in ("input", "cache_read", "cache_write", "output", "reasoning")]+[r["total"], money, "partial" if r["unknown_records"] else "measured"]
+        if r["measured_total"] is None: continue
+        t = r["measured_tokens"]; money = ", ".join(f"{m['amount']} {m['currency']} {m['kind']}" for m in r["money"]) or "unknown"
+        vals = [r[k] for k in ("role", "vendor", "model", "platform", "access")]+[t[k] if t[k] is not None else "unknown" for k in ("input", "cache_read", "cache_write", "output", "reasoning")]+[r["measured_total"], money, "partial" if r["unknown_records"] else "measured"]
         print("| " + " | ".join(esc(v) for v in vals) + " |")
+    if data["missing_records"]:
+        print("\nНепокрытые вызовы:")
+        for rec in data["missing_records"]:
+            identity = "/".join(esc(rec[k]) for k in ("id", "role", "vendor", "model", "platform", "access"))
+            print(f"- {identity}: {esc(rec['reason'])}")
+    if data["money_totals"]:
+        known_money = ", ".join(
+            f"{item['amount']} {item['currency']} {item['kind']}"
+            for item in data["money_totals"])
+        print(f"\nИзвестные суммы (отдельно от токенов): {esc(known_money)}")
+
+
+def _codex_receipt(path, run_id, role, model, vendor, access):
+    sample = {"id": "receipt-metadata-validation", "role": role,
+              "vendor": vendor, "model": model, "platform": "codex",
+              "access": access, "status": "measured", "source": "validation",
+              "tokens": {"input": 0, "output": 0, "cache_read": None,
+                         "cache_write": None, "reasoning": None}}
+    try: validate_record(sample)
+    except InputError: _err("invalid receipt metadata")
+    if (not isinstance(run_id, str) or not run_id.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in run_id)):
+        _err("invalid receipt metadata")
+    path = Path(path)
+    try: raw = path.read_bytes()
+    except OSError: _err("cannot read Codex events file")
+    events = _strict_jsonl(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    metadata = {"role": role, "vendor": vendor, "model": model,
+                "platform": "codex", "access": access}
+    records = []
+    thread_id = None
+    turn_open = False
+    turn_ordinal = 0
+    pending_turn_errors = []
+
+    def record(kind, ordinal, status, tokens=None, reason=None):
+        source = f"codex-events:{run_id}:{thread_id or 'unknown'}:{kind}:{ordinal}:{digest}"
+        item = {"id": f"codex:{run_id}:{kind}:{ordinal}", **metadata,
+                "status": status, "source": source, "tokens": tokens}
+        if reason: item["reason"] = reason
+        records.append(item)
+
+    for event_ordinal, event in enumerate(events, 1):
+        kind = event.get("type")
+        if not isinstance(kind, str) or not kind.strip():
+            _err("Codex event type must be a nonempty string")
+        if kind == "thread.started":
+            ident = event.get("thread_id")
+            if thread_id is not None or turn_open or not isinstance(ident, str) or not ident.strip():
+                _err("invalid Codex thread order or identity")
+            thread_id = ident
+        elif kind == "turn.started":
+            if thread_id is None or turn_open:
+                _err("invalid Codex turn order")
+            turn_open = True
+            turn_ordinal += 1
+            pending_turn_errors = []
+        elif kind in ("turn.completed", "turn.failed"):
+            if thread_id is None or not turn_open:
+                _err("invalid Codex turn order")
+            if kind == "turn.failed":
+                record("turn", turn_ordinal, "unknown", reason="turn failed; usage unavailable")
+            elif "usage" not in event:
+                record("turn", turn_ordinal, "unknown", reason="completed turn omitted usage")
+            else:
+                usage = event["usage"]
+                if not isinstance(usage, dict): _err("invalid Codex usage object")
+                if "input_tokens" not in usage or "output_tokens" not in usage:
+                    _err("Codex usage lacks required counters")
+                values = _counter(usage)
+                record("turn", turn_ordinal, "measured", values)
+                for error_ordinal in pending_turn_errors:
+                    record("error", error_ordinal, "unknown",
+                           reason="Codex error event; usage unavailable")
+            turn_open = False
+            pending_turn_errors = []
+        elif kind == "error":
+            if turn_open:
+                pending_turn_errors.append(event_ordinal)
+            else:
+                record("error", event_ordinal, "unknown",
+                       reason="Codex error event; usage unavailable")
+    if turn_open:
+        reason = ("Codex error event; turn unfinished at end of file"
+                  if pending_turn_errors else "turn unfinished at end of file")
+        record("turn", turn_ordinal, "unknown", reason=reason)
+    elif not records:
+        record("turn", 1, "unknown", reason="no completed usage records in file")
+    result = {"schema_version": 1, "records": records,
+              "coverage": "partial" if any(r["status"] == "unknown" for r in records) else "complete"}
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 3 if result["coverage"] == "partial" else 0
 
 
 def new_modes(args):
+    if not args.codex_events and any((args.run_id, args.role, args.model, args.vendor, args.access)):
+        _err("receipt metadata requires --codex-events")
+    if args.codex_events:
+        if (not args.file or not args.run_id or not args.role or args.task_ledger or args.snapshot or
+                args.provider or args.since or args.session or args.project or args.all_sessions or args.json):
+            _err("--codex-events needs --file, --run-id, and --role only")
+        for value, label in ((args.run_id, "run-id"), (args.role, "role")):
+            if not value.strip(): _err(f"empty {label}")
+        return _codex_receipt(args.file, args.run_id, args.role,
+                              args.model if args.model is not None else "unknown",
+                              args.vendor if args.vendor is not None else "unknown",
+                              args.access if args.access is not None else "unknown")
     if args.task_ledger:
         if args.snapshot or args.provider or args.since or args.file or args.session or args.project or args.all_sessions: _err("incompatible task-ledger options")
         data = task_report(args.task_ledger)
@@ -526,6 +649,12 @@ def new_modes(args):
 def main() -> int:
     ap = argparse.ArgumentParser(description="Подсчет токенов Claude Code сессии из транскрипта.")
     ap.add_argument("--task-ledger", help="проверить и свести ledger задачи")
+    ap.add_argument("--codex-events", action="store_true", help="собрать receipt из явного Codex exec JSONL")
+    ap.add_argument("--run-id", help="уникальный ID запуска для --codex-events")
+    ap.add_argument("--role", help="роль вызова для --codex-events")
+    ap.add_argument("--model", help="подтвержденная модель receipt")
+    ap.add_argument("--vendor", help="подтвержденный вендор receipt")
+    ap.add_argument("--access", choices=("api", "subscription", "local", "unknown"), help="подтвержденный способ доступа")
     ap.add_argument("--snapshot", action="store_true", help="снять явный локальный прирост usage")
     ap.add_argument("--provider", choices=("codex", "claude"))
     ap.add_argument("--since", help="предыдущий checkpoint для --snapshot")
@@ -536,7 +665,8 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="машиночитаемый вывод")
     args = ap.parse_args()
 
-    if args.task_ledger or args.snapshot or args.provider or args.since:
+    if args.task_ledger or args.codex_events or args.snapshot or args.provider or args.since or any(
+            (args.run_id, args.role, args.model, args.vendor, args.access)):
         try:
             result = new_modes(args)
             return 0 if result is None else result
