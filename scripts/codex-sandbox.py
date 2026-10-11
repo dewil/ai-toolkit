@@ -534,8 +534,9 @@ def _bwrap_eval(args, codex, binary, state, home, env, *, dry=False):
         code += "for q in ('/state/codex/auth.json','/proc/1/root/state/codex/auth.json'):\n try: open(q,'rb').close(); raise SystemExit(32)\n except OSError: pass\n"
         code += "for fam,typ,addr in ((socket.AF_INET,socket.SOCK_STREAM,('127.0.0.1',0)),(socket.AF_INET,socket.SOCK_DGRAM,('127.0.0.1',0)),(socket.AF_INET6,socket.SOCK_STREAM,('::1',0,0,0)),(socket.AF_INET6,socket.SOCK_DGRAM,('::1',0,0,0))):\n s=None\n try:\n  s=socket.socket(fam,typ); s.bind(addr); raise SystemExit(33)\n except OSError as e:\n  if e.errno not in (errno.EPERM,errno.EACCES): raise\n finally:\n  if s is not None:s.close()\n"
         code += "try: os.fstat(int(sys.argv[1])); raise SystemExit(43)\nexcept OSError: pass\n"
+        # Trusted oracle must ignore workspace modules and Python user settings.
         return cmd + ["--", str(codex), "sandbox", "-P", profile, "-C", "/workspace", "--",
-                      "/usr/bin/python3", "-c", code, "64"]
+                      "/usr/bin/python3", "-I", "-c", code, "64"]
     if args.judge:
         schema = state / "output-schema.json"
         schema.write_text(json.dumps({"type":"object","required":["verdict","why"],

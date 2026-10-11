@@ -256,6 +256,31 @@ class NativeWrapperReview(unittest.TestCase):
         self.assertNotIn(str(self.auth), done.stdout, "dry-run exposed source auth path")
         return done
 
+    def test_workspace_stdlib_shadow_never_executes_in_trusted_preflight(self):
+        # Independent CLI regression: the oracle must not execute fixture modules.
+        for module in (None, "operator", "pathlib"):
+            for judge in (False, True):
+                with self.subTest(module=module, judge=judge):
+                    marker = self.fixture / "shadow-executed"
+                    source = ("open('/workspace/shadow-executed','w').write('EXECUTED')\n"
+                              "raise RuntimeError('SYNTHETIC_SHADOW_EXECUTED')\n")
+                    shadow = self.fixture / (module + ".py") if module else None
+                    if shadow:
+                        shadow.write_text(source, encoding="utf-8")
+                    try:
+                        done = self.invoke("--preflight", judge=judge)
+                        self.assertFalse(marker.exists(), "trusted probe executed workspace module")
+                        self.assertEqual(done.returncode, 0, done.stderr)
+                        if shadow:
+                            self.assertEqual(shadow.read_text(encoding="utf-8"), source)
+                        self.assertEqual(sorted(p.name for p in self.fixture.iterdir()),
+                                         [module + ".py"] if module else [])
+                    finally:
+                        if shadow:
+                            shadow.unlink()
+                        if marker.exists():
+                            marker.unlink()
+
     def test_actual_dryrun_supports_global_and_exec_flags(self):
         done = self.invoke("--dry-run")
         self.assertEqual(done.returncode, 0, done.stderr)
