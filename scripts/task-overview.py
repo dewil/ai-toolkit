@@ -411,15 +411,20 @@ def read_snapshot(roots, *, now=None):
     now = now.astimezone(timezone.utc)
     tasks, diagnostics = [], []
     budget, physical, projects = [0], set(), {}
+    current_source = None
 
-    def diagnostic(code, project_id=None, task_id=None, path=None):
+    def diagnostic(code, project_id=None, task_id=None, path=None, source_index=None):
         item = {'code': code, 'message': code.replace('_', ' ')}
+        source_index = current_source if source_index is None else source_index
+        if source_index is not None:
+            item['source_index'] = source_index
         for key, value in (('project_id', project_id), ('task_id', task_id), ('path', path)):
             if value is not None:
                 item[key] = value
         diagnostics.append(item)
 
     for index, path in enumerate(roots):
+        current_source = index
         if index >= MAX_ROOTS:
             diagnostic('root_count_limit')
             break
@@ -434,9 +439,7 @@ def read_snapshot(roots, *, now=None):
             if root.identity in physical:
                 continue
             physical.add(root.identity)
-            if project_id in projects:
-                diagnostic('project_identity_conflict', project_id)
-            projects[project_id] = projects.get(project_id, 0) + 1
+            projects.setdefault(project_id, []).append(index)
             file_count = 0
             for folder in ('backlog', 'done'):
                 directory = 'docs/' + folder
@@ -493,7 +496,7 @@ def read_snapshot(roots, *, now=None):
                                             relation_source='declared_binding' if binding else 'none',
                                             confirmed_model=None, model_source=None)
                             runs.append(declared)
-                        task = dict(project_id=project_id, task_id=task_id,
+                        task = dict(project_id=project_id, task_id=task_id, source_index=index,
                                     title=_title(body, task_id), owner_ref=relative,
                                     inconsistencies=issues,
                                     age_seconds=max(0, (now - stamp).total_seconds()) if stamp else None,
@@ -515,6 +518,13 @@ def read_snapshot(roots, *, now=None):
         finally:
             if root is not None:
                 root.close()
+    # Ordinals identify local input provenance, never authority. A project ID
+    # claimed by different physical roots cannot select a winner for the caller.
+    conflicts = {project_id for project_id, indices in projects.items() if len(indices) > 1}
+    for project_id in sorted(conflicts):
+        for index in projects[project_id]:
+            diagnostic('project_identity_conflict', project_id, source_index=index)
+    tasks = [task for task in tasks if task['project_id'] not in conflicts]
     keys = {}
     for task in tasks:
         key = task['project_id'], task['task_id']
@@ -522,10 +532,10 @@ def read_snapshot(roots, *, now=None):
     for (project_id, task_id), group in keys.items():
         code = 'duplicate_task_key' if len(group) > 1 else None
         for task in group:
-            for problem in (code, 'project_identity_conflict' if projects[project_id] > 1 else None):
+            for problem in (code,):
                 if problem and problem not in task['inconsistencies']:
                     task['inconsistencies'].append(problem)
-                    diagnostic(problem, project_id, task_id, task['owner_ref'])
+                    diagnostic(problem, project_id, task_id, task['owner_ref'], task['source_index'])
     tasks.sort(key=lambda t: (t['project_id'], t['task_id'], t['owner_ref']))
     return dict(schema_version=1, as_of=_utc(now),
                 coverage='partial' if diagnostics else 'complete',
@@ -544,7 +554,7 @@ def main(argv=None):
         def display(value):
             text = 'unknown' if value is None else str(value)
             return ''.join(c if c.isprintable() else ' ' for c in text)
-        print('PROJECT\tTASK\tTITLE\tPHASE\tSTATUS\tOWNER\tUPDATED / BY\tAGE (s)\tASSIGNMENTS\tBLOCKER\tNEXT STEP\tHANDOFF\tEVIDENCE\tEXCLUSIONS\tFILE')
+        print('SOURCE INDEX\tPROJECT\tTASK\tTITLE\tPHASE\tSTATUS\tOWNER\tUPDATED / BY\tAGE (s)\tASSIGNMENTS\tBLOCKER\tNEXT STEP\tHANDOFF\tEVIDENCE\tEXCLUSIONS\tFILE')
         for task in snapshot['tasks']:
             step = task['next_step']
             next_step = (str(step.get('actor')) + ': ' + str(step.get('action'))
@@ -553,7 +563,7 @@ def main(argv=None):
                 **{k: display(v) for k, v in run.items()}) for run in task['assignments'])
             checks = '; '.join(item['type'] + ': ' + item['result'] + ', hash ' + item['hash_status'] +
                                ', ' + item['ref'] for item in task['evidence'])
-            cells = (task['project_id'], task['task_id'], task['title'], task['phase'],
+            cells = (task['source_index'], task['project_id'], task['task_id'], task['title'], task['phase'],
                      task['status'], task['owner'], task['updated_at'] + ' / ' + task['updated_by'],
                      task['age_seconds'], runs, task['blocker'], next_step, task['handoff'],
                      checks, task['excluded_phases'], task['owner_ref'])
