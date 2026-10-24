@@ -60,7 +60,7 @@ universal:
   - agents/summarizer.md                # сжатие длинного источника в структурированную заметку
   - skills/review/codex.md  # общая механика Codex для review и implement
   - rules/model-routing.md  # дефолты и актуальные назначения MODELS
-  - skills/review/SKILL.md         # аудит кода/текста вторым мнением через codex exec
+  - skills/review/SKILL.md  # независимая проверка: шесть режимов, выбранный исполнитель
   - scripts/codex-sandbox.py           # запуск codex exec в песочнице bwrap: видит только объект работы (для review и implement)
   - skills/web-research/SKILL.md        # веб-исследование с проверкой источников
   - skills/md-pdf/SKILL.md              # рендер markdown в PDF (для чтения и рассылки)

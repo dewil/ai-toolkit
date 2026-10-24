@@ -278,7 +278,7 @@ def proposal(args, root):
             actions.append({'path': path, 'before': None, 'after': {'kind': 'dir'}})
         elif before != {'kind': 'dir'}:
             raise Invalid('Unsafe action parent')
-    for path in sorted(file_changes, key=lambda p: (p == ab.STATE, p)):
+    for path in sorted(file_changes, key=lambda p: (p == ab.STATE, p not in archive_guards, p)):
         if path == ab.STATE:
             # All backups are written before any deletion; state commits last.
             for canonical, receipt in sorted(retired.items()):
@@ -438,7 +438,7 @@ def validate_future(root, journal):
     # parents of these validated destinations (checked below).
     ab.validate_paths(allowed)
     expected_order = sorted((p for p in pending if pending[p]['after'] and pending[p]['after']['kind'] == 'dir'), key=lambda p: (p.count('/'), p))
-    expected_order += sorted(p for p in pending if pending[p]['after'] and pending[p]['after']['kind'] == 'file' and p != ab.STATE)
+    expected_order += sorted((p for p in pending if pending[p]['after'] and pending[p]['after']['kind'] == 'file' and p != ab.STATE), key=lambda p: (p not in archives, p))
     expected_order += sorted(retired_destinations)
     expected_order.append(ab.STATE)
     if list(pending) != expected_order:

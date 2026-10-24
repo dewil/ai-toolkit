@@ -98,6 +98,27 @@ class SddProfileTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(MARKER, result.stdout)
 
+    def test_forbidden_effort_and_compliance_floor_refuse(self):
+        for effort in ('minimal', 'unknown', 'low'):
+            self.environment['AI_SELECTED_EFFORT'] = effort
+            result = self.run_profile('compliance', 'different')
+            self.assertNotEqual(result.returncode, 0, effort)
+            self.assertNotIn(MARKER, result.stdout)
+
+    def test_audit_transport_compliance_checks_effective_author(self):
+        self.environment['AI_REVIEW_MODE'] = 'compliance'
+        result = self.run_profile('audit', 'absent', selected_pair='model-author')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(MARKER, result.stdout)
+
+    def test_irreversible_effect_requires_high(self):
+        self.environment['AI_EFFECT_IRREVERSIBLE'] = '1'
+        result = self.run_profile('audit', 'absent')
+        self.assertNotEqual(result.returncode, 0)
+        self.environment['AI_SELECTED_EFFORT'] = 'high'
+        result = self.run_profile('audit', 'absent')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_audit_does_not_require_an_independent_pair_profile(self):
         for pair in ('absent', 'empty', 'match', 'different'):
             with self.subTest(pair=pair):

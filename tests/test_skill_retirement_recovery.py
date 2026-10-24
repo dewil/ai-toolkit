@@ -14,6 +14,7 @@ RETIRE_WRAPPER = WRAPPER.replace("'--expect-plan', digest]", "'--expect-plan', d
 class SkillRetirementRecovery(SyncFixture):
     def prepare(self):
         self.original = self.destination(SOURCE).read_bytes()
+        self.original_start = (self.root / '.AI/START.md').read_bytes()
         self.archive = '.ai-bootstrap/retired/' + hashlib.sha256(self.original).hexdigest() + '/' + SOURCE
         self.remove_upstream(SOURCE)
         self.plan_ = json.loads(self.cli('plan', ['--retire-source', SOURCE]).stdout)
@@ -40,6 +41,7 @@ class SkillRetirementRecovery(SyncFixture):
     def test_recover_after_backup_before_deletion(self):
         self.prepare(); self.interrupt_at(self.archive)
         self.assertTrue(self.destination(SOURCE).exists())
+        self.assertEqual((self.root / ".AI/START.md").read_bytes(), self.original_start)
         self.recovered()
 
     def test_recover_after_deletion_before_state(self):
@@ -50,6 +52,34 @@ class SkillRetirementRecovery(SyncFixture):
     def test_recover_after_state_before_journal_removal(self):
         self.prepare(); self.interrupt_at('.AI/canon/canon.state.json')
         self.recovered()
+
+    def test_recover_after_start_and_output(self):
+        # Each case gets a new fixture to exercise distinct replay points.
+        for point in ('.AI/START.md', 'AGENTS.md'):
+            with self.subTest(point=point):
+                case = SkillRetirementRecovery()
+                case.setUp()
+                try:
+                    case.prepare(); case.interrupt_at(point); case.recovered()
+                finally:
+                    case.doCleanups()
+
+    def test_existing_wrong_backup_and_already_retired_drift_refuse(self):
+        self.prepare()
+        backup = self.root / self.archive
+        backup.parent.mkdir(parents=True)
+        backup.write_bytes(b'wrong')
+        before = tree(self.root)
+        self.cli('plan', ['--retire-source', SOURCE], reject=True)
+        self.assertEqual(tree(self.root), before)
+        backup.write_bytes(self.original)
+        backup.chmod(0o644)  # Exact archived descriptor, independent of host umask.
+        plan = json.loads(self.cli('plan', ['--retire-source', SOURCE]).stdout)
+        self.cli('apply', ['--retire-source', SOURCE, '--expect-plan', plan['plan_sha256']])
+        backup.write_bytes(b'post-retirement drift')
+        before = tree(self.root)
+        self.cli('plan', ['--retire-source', SOURCE], reject=True)
+        self.assertEqual(tree(self.root), before)
 
     def test_backup_drift_blocks_without_writes(self):
         self.prepare(); self.interrupt_at('.AI/' + SOURCE)

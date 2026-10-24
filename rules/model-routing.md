@@ -28,7 +28,7 @@ Jev дает advisory-оценку сложности и не переопред
 | implement / проверенный Codex writer | gpt-6-astra | medium |
 | review / Codex audit, second-opinion, advocate, adversarial, compliance | gpt-6.1-sol | medium |
 | review / необратимый эффект или escalation | gpt-6.1-sol | high |
-| review / отдельно разрешенный Claude reviewer | claude-sonnet-5-5 | medium; high при необратимом эффекте |
+| review / отдельно разрешенный Claude reviewer | claude-opus-5-5 | medium; high при необратимом эффекте |
 | test-writer, code-reviewer, copy-editor | claude-sonnet-5-5 | medium |
 | note-taker, note-writer, summarizer / proofread | claude-sonnet-5-5 | medium |
 | debugger, tracker | claude-sonnet-5-5 | low |
