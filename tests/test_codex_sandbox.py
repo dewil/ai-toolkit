@@ -353,7 +353,7 @@ class SkillTemplates(unittest.TestCase):
         for skill, mode, flag in (("review", "audit", "--root"),
                                   ("implement", "implement", "--worktree")):
             with self.subTest(skill=skill):
-                text = (REPO / "skills" / skill / "SKILL.md").read_text()
+                text = (REPO / "skills" / skill / ("codex.md" if skill == "review" else "SKILL.md")).read_text()
                 blocks = re.findall(r"^[ \t]*```[^\n]*\n(.*?)^[ \t]*```", text, re.M | re.S)
                 code = "\n".join(blocks).replace("\\\n", " ")
                 direct = re.findall(r"[^\n]*\bcodex\s+exec\b[^\n]*", code)
