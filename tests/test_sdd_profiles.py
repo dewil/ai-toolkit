@@ -111,6 +111,13 @@ class SddProfileTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(MARKER, result.stdout)
 
+    def test_compliance_profile_cannot_lower_floor_by_mode_label(self):
+        self.environment['AI_REVIEW_MODE'] = 'audit'
+        self.environment['AI_SELECTED_EFFORT'] = 'low'
+        result = self.run_profile('compliance', 'different')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(MARKER, result.stdout)
+
     def test_irreversible_effect_requires_high(self):
         self.environment['AI_EFFECT_IRREVERSIBLE'] = '1'
         result = self.run_profile('audit', 'absent')

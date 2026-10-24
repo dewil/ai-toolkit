@@ -73,7 +73,7 @@ case "$AI_SELECTED_EFFORT" in
   *) echo "ROUTING: unsupported effort (minimal запрещен)"; exit 1 ;;
 esac
 AI_REVIEW_MODE=${AI_REVIEW_MODE:-$PROFILE}
-if [ "$AI_REVIEW_MODE" = compliance ] && [ "$AI_SELECTED_EFFORT" = low ]; then
+if [ "$AI_SELECTED_EFFORT" = low ] && { [ "$AI_REVIEW_MODE" = compliance ] || [ "$PROFILE" = compliance ]; }; then
   echo "ROUTING: compliance requires at least medium"; exit 1
 fi
 if [ "${AI_EFFECT_IRREVERSIBLE:-0}" = 1 ]; then
@@ -112,7 +112,7 @@ python3 "<toolkit>/scripts/codex-sandbox.py" audit --root "<project-root>" -- \
 
 **План подается через stdin, а не аргументом.** У агента stdin не терминал, и в этом режиме `codex exec` ждет промт именно оттуда: при вызове с планом-аргументом он печатает `Reading additional input from stdin...` и висит, пока stdin не закроется. Прогон уходит в таймаут целиком - наблюдалось 10 минут впустую при `timeout: 600000`. Форма с аргументом рабочая только в интерактивном терминале, поэтому в скилле ее нет. Если аргумент по какой-то причине нужен, добавляй `< /dev/null`, иначе повиснет то же самое.
 
-Легенда: `"${MODEL_FLAG[@]}"` - `-p audit -c model=<выбранный slug MODELS/default>` (сверка реализации codex - `-p compliance`, у `implement` - `-p implement`, модель передается явно поверх профиля); `"${GIT_FLAG[@]}"` - `--skip-git-repo-check` в не-git проекте (или ничего в git-проекте); `AI_SELECTED_EFFORT` - по свежему MODELS с учетом обязательного минимума из таблицы "Режимы": `medium` (audit, adversarial, advocate, second-opinion, compliance) или `high` (escalation и adversarial на необратимом); назначение берется из MODELS/default с сохранением обязательных минимумов; `<plan-file>` / `<report-file>` - имена из таблицы "Режимы"; `<project-root>` - абсолютный путь корня текущего проекта, в котором сейчас идет работа.
+Легенда: `"${MODEL_FLAG[@]}"` - `-p audit -c model=<выбранный slug MODELS/default>` (сверка реализации codex - `-p compliance`, у `implement` - `-p implement`, модель передается явно поверх профиля); `"${GIT_FLAG[@]}"` - `--skip-git-repo-check` в не-git проекте (или ничего в git-проекте); `AI_SELECTED_EFFORT` - по свежему MODELS либо дефолту таблицы режимов. Обязательный минимум medium действует для compliance, high - при необратимом эффекте; для остальных режимов low допустим по назначению на механическом объекте, minimal запрещен; `<plan-file>` / `<report-file>` - имена из таблицы "Режимы"; `<project-root>` - абсолютный путь корня текущего проекта, в котором сейчас идет работа.
 
 **Резолв (включая `export CODEX_HOME`) и `codex exec` - в одном Bash-вызове.** Shell-состояние между Bash-вызовами агента не переживает: резолв из предыдущей команды в следующей уже не виден. Без экспорта дочерний codex берет дефолт `~/.codex`, где на машине с нестандартным путем нет авторизации, - и падает в `401`, хотя все проверки скилла (pre-check, резолв модели) отработали штатно в том же bash.
 
@@ -407,8 +407,6 @@ with open(sys.argv[1]) as f:
                 last = p
         except Exception:
             pass
-if not last:
-    print("no rate_limits event found"); sys.exit(0)
 models = set()
 with open(sys.argv[1]) as f:
     for line in f:
@@ -424,6 +422,8 @@ with open(sys.argv[1]) as f:
             if isinstance(model, str) and model.strip():
                 models.add(model)
 print("model: " + (next(iter(models)) if len(models) == 1 else "unknown"))
+if not last:
+    print("no rate_limits event found"); sys.exit(0)
 rl = last['rate_limits']
 now = datetime.datetime.now(datetime.timezone.utc).timestamp()
 for key in ('primary', 'secondary'):
