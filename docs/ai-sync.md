@@ -55,3 +55,7 @@ Sync recovery валидирует весь сохраненный журнал 
 | PINNED_URL | HTTPS raw base с полным SHA | `https://raw.githubusercontent.com/OWNER/REPO/COMMIT_SHA` |
 | PLAN_SHA256 | Digest конкретного plan | 64 hex-символа из plan |
 | DIR | Явно предоставленный снимок | `/tmp/approved-bundle` |
+
+## Явное снятие замененных навыков
+
+Обычный sync сохраняет removed-upstream. Однократный переход на `review`, `implement`, `proofread` выполняется отдельным согласованным планом с повторяемым `--retire-source CANONICAL_PATH` в plan/apply. Только чистые tracked skill-файлы, отсутствующие в upstream; local edits/overrides/skip_sync/local_only не удаляются. Архив сохраняется до снятия, список включен в digest, state обновляется последним. Журнал retire имеет schema 2 и требует той же pinned пары для offline recover; старые schema 1 поддержаны. Подробная процедура и ограничения отката: [skill-transition.md](skill-transition.md). Не заменять эту операцию rm или ручной правкой state.

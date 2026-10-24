@@ -2,7 +2,7 @@
 
 Contract: plan prints JSON {status, applicable, plan_sha256, changes, conflicts}; apply needs
 --expect-plan <plan_sha256>. Synthetic fixtures, no implementation imports. Authored by Sonnet 5.5;
-authoring is not execution: these tests have NOT been run. Positive retire controls precede every
+authoring is not execution: independent RED and execution receipts are recorded by the task owner. Positive retire controls precede every
 refusal check, so an unimplemented flag fails them (RED) instead of passing as a fake refusal.
 Negative cases run the CLI via subprocess and reject argparse unknown-flag errors as a reason.
 '''
@@ -179,8 +179,11 @@ class RetireSourceContract(SyncFixture):
         self.retire(SAMPLE)
         state = self.read_json(self.state_path)
         self.assertIn('sync', state)
-        others = {k: v for k, v in state.items() if k != 'sync'}
-        self.assertFalse(any(SAMPLE in s for s in strings(others)), 'source_files/generated membership')
+        self.assertFalse(any(SAMPLE in s for s in strings(state['source_files'])), 'active source_files')
+        active = {k: v for k, v in state.items() if k not in ('sync', 'bootstrap_files')}
+        self.assertFalse(any(SAMPLE in s for s in strings(active)), 'active generated membership')
+        self.assertEqual(self.initial_state['bootstrap_files'], state['bootstrap_files'],
+                         'historical bootstrap receipt must stay unchanged')
         self.assertTrue(any(SAMPLE in s for s in strings(state['sync']['retired_sources'])))
         starts = [p for p in self.root.rglob('START*')
                   if p.is_file() and '.ai-bootstrap' not in p.relative_to(self.root).parts]

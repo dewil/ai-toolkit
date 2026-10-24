@@ -350,8 +350,8 @@ class LiveSandbox(SandboxFixture):
 
 class SkillTemplates(unittest.TestCase):
     def test_all_launch_templates_use_sandbox(self):
-        for skill, mode, flag in (("codex-audit", "audit", "--root"),
-                                  ("codex-implement", "implement", "--worktree")):
+        for skill, mode, flag in (("review", "audit", "--root"),
+                                  ("implement", "implement", "--worktree")):
             with self.subTest(skill=skill):
                 text = (REPO / "skills" / skill / "SKILL.md").read_text()
                 blocks = re.findall(r"^[ \t]*```[^\n]*\n(.*?)^[ \t]*```", text, re.M | re.S)

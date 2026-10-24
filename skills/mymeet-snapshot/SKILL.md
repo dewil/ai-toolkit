@@ -199,3 +199,7 @@ python3 scripts/mymeet-snapshot.py --status <meeting_id>
 - `.mymeet-snapshot.json` в корне проекта - проектные указатели `{meetings_root, rules, review_file}`. Не секрет.
 - `<meetings_root>/_mymeet-index.json` - реестр уже скачанных встреч (что не качать повторно).
 - `<meetings_root>/_mymeet-review.txt` - очередь непроектных/нераспознанных встреч на ручное решение.
+
+## Модель и текущие назначения
+
+Перед новым заданием и запуском применяй [маршрутизацию моделей](../../rules/model-routing.md): свежий MODELS выше канонического дефолта. Границы данных и полномочий этого навыка сохраняются.

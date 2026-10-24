@@ -139,3 +139,7 @@ python3 scripts/redmine-deltas.py
 - `scripts/redmine-deltas.py` в корне проекта - расчет дельт между текущим и предыдущим snapshot для блока в дейликах.
 - `~/.config/redmine-snapshot/auth.json` - локальные credentials на устройство (redmine_url, api_key, use_curl). Не в проекте.
 - `.redmine-snapshot.json` в корне проекта - проектные указатели `{tasks_root, project_id, users}`. Не секрет.
+
+## Модель и текущие назначения
+
+Перед новым заданием и запуском применяй [маршрутизацию моделей](../../rules/model-routing.md): свежий MODELS выше канонического дефолта. Границы данных и полномочий этого навыка сохраняются.

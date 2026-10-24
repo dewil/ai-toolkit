@@ -174,3 +174,7 @@ python3 scripts/telegram-send-one.py <chat_id> <expected_username> \
 - `.telegram-snapshot.json` в корне проекта - справочник адресатов `{label: chat_id}` (общий со snapshot/deltas).
 - `~/.config/telegram-snapshot/auth.json` + `.session` - общая авторизация на устройство.
 - Скилл `telegram-snapshot` - первичная настройка авторизации и подключение чатов в конфиг.
+
+## Модель и текущие назначения
+
+Перед новым заданием и запуском применяй [маршрутизацию моделей](../../rules/model-routing.md): свежий MODELS выше канонического дефолта. Границы данных и полномочий этого навыка сохраняются.

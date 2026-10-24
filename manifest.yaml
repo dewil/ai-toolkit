@@ -58,8 +58,10 @@ universal:
   - agents/searcher.md                  # поиск файлов/символов/паттернов (grep/glob)
   - agents/planner.md                   # декомпозиция задачи в проверяемые шаги с критериями
   - agents/summarizer.md                # сжатие длинного источника в структурированную заметку
-  - skills/codex-audit/SKILL.md         # аудит кода/текста вторым мнением через codex exec
-  - scripts/codex-sandbox.py           # запуск codex exec в песочнице bwrap: видит только объект работы (для codex-audit и codex-implement)
+  - skills/review/codex.md  # общая механика Codex для review и implement
+  - rules/model-routing.md  # дефолты и актуальные назначения MODELS
+  - skills/review/SKILL.md         # аудит кода/текста вторым мнением через codex exec
+  - scripts/codex-sandbox.py           # запуск codex exec в песочнице bwrap: видит только объект работы (для review и implement)
   - skills/web-research/SKILL.md        # веб-исследование с проверкой источников
   - skills/md-pdf/SKILL.md              # рендер markdown в PDF (для чтения и рассылки)
   - skills/md-docx/SKILL.md             # сборка .docx из markdown (когда документ пойдет на правки)
@@ -68,7 +70,7 @@ universal:
   - skills/memory-compact/SKILL.md      # свертка разросшейся автопамяти: слить записи об одном сюжете, снять отработавшее, пересобрать индекс
   - skills/session-cost/SKILL.md        # внутренний учет токенов задачи и подсчет локальной Claude Code сессии
   - skills/session-cost/task-accounting.md # schema ledger, явные snapshots и операционная процедура учета задачи
-  - skills/technical-document-editing/SKILL.md # обязательная вычитка значимых готовых документов, задач и сообщений; сохранение смысла
+  - skills/proofread/SKILL.md # обязательная вычитка значимых готовых документов, задач и сообщений; сохранение смысла
   - commands/canon.md                   # /canon = синхронизация проекта с каноном
   - commands/feedback-inbox.md          # разбор очереди поправок пользователя: кандидат -> память проекта или канон-инбокс
   - scripts/md-pdf.py                   # движок рендера markdown в PDF (для скилла md-pdf)
@@ -105,7 +107,7 @@ coding:
   - agents/debugger.md                  # воспроизведение и локализация багов
   - agents/test-writer.md               # тесты с чистого листа по спеке, без чтения реализации (SDD)
   - agents/implementer.md               # реализация по готовому плану
-  - skills/codex-implement/SKILL.md     # реализация небольшой/средней фичи по спеке и красным тестам внешней моделью с правом записи, только в отдельном worktree
+  - skills/implement/SKILL.md     # реализация небольшой/средней фичи по спеке и красным тестам внешней моделью с правом записи, только в отдельном worktree
   - agents/code-reviewer.md             # ревью изменений
   - skills/minimal-code/SKILL.md        # минимальный код: лестница ступеней сложности
   - skills/requirements/SKILL.md        # сбор размытых бизнес-требований в ТЗ + user stories до кода

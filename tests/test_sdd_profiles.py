@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 
-SKILL = Path(__file__).resolve().parents[1] / 'skills/codex-audit/SKILL.md'
+SKILL = Path(__file__).resolve().parents[1] / 'skills/review/codex.md'
 MARKER = 'SIMULATED_MODEL_LAUNCH_AFTER_PROFILE_GUARD'
 
 
@@ -26,9 +26,9 @@ class SddProfileTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1, 'Expected one executable role-profile guard')
         self.snippet = candidates[0]
         self.environment = {k: v for k, v in os.environ.items() if k not in ('BASH_ENV', 'ENV')}
-        self.environment.update(HOME=str(self.root), CODEX_HOME=str(self.profiles))
+        self.environment.update(HOME=str(self.root), CODEX_HOME=str(self.profiles), AI_SELECTED_MODEL="model-author", AI_SELECTED_EFFORT="medium")
 
-    def run_profile(self, role, pair, primary=None):
+    def run_profile(self, role, pair, primary=None, selected_pair=None):
         for path in self.profiles.glob('*.config.toml'):
             path.unlink()
         (self.profiles / (role + '.config.toml')).write_text(
@@ -43,6 +43,8 @@ class SddProfileTests(unittest.TestCase):
                        'whitespace': 'model = "   "\n',
                        'control': 'model = "different\\tmodel"\n'}[pair]
             (self.profiles / (other + '.config.toml')).write_text(content)
+        # FR-SKR04: compare effective routed pair, not obsolete model values in profiles.
+        self.environment['AI_PAIR_MODEL'] = selected_pair if selected_pair is not None else ('model-author' if pair == 'match' else 'model-independent')
         program, count = re.subn(r'^PROFILE=audit\b', 'PROFILE=' + role, self.snippet, count=1, flags=re.M)
         self.assertEqual(count, 1)
         # No set -e: the profile guard itself must stop launch, not its incidental last status.
@@ -80,6 +82,21 @@ class SddProfileTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn(MARKER, result.stdout + result.stderr)
                 self.assertTrue((result.stdout + result.stderr).strip())
+
+    def test_effective_routing_not_profile_identity_controls_pair(self):
+        # FR-SKR04 explicitly replaces the old profile-only independence decision.
+        for role in ('implement', 'compliance'):
+            matched_profile = self.run_profile(role, 'match', selected_pair='routed-reviewer')
+            self.assertEqual(matched_profile.returncode, 0, matched_profile.stdout + matched_profile.stderr)
+            distinct_profile = self.run_profile(role, 'different', selected_pair='model-author')
+            self.assertNotEqual(distinct_profile.returncode, 0)
+            self.assertNotIn(MARKER, distinct_profile.stdout)
+
+    def test_missing_routing_does_not_silently_use_profile_model(self):
+        self.environment.pop('AI_SELECTED_MODEL')
+        result = self.run_profile('audit', 'absent')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(MARKER, result.stdout)
 
     def test_audit_does_not_require_an_independent_pair_profile(self):
         for pair in ('absent', 'empty', 'match', 'different'):

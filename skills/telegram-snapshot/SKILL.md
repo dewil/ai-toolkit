@@ -321,3 +321,7 @@ sqlite3.OperationalError: database is locked
 - `~/.cache/telegram-snapshot/media/<chat_id>/` - локальный несинкаемый кэш вложений (TTL 24ч, см. "Медиа-кэш вложений").
 - `~/.config/telegram-snapshot/auth.json` - локальные credentials на устройство (не в проекте).
 - `.telegram-snapshot.json` в корне проекта - проектная карта `{label: chat_id}` (или `{label: {id, topic_id}}` для фильтрации форум-чата по теме).
+
+## Модель и текущие назначения
+
+Перед новым заданием и запуском применяй [маршрутизацию моделей](../../rules/model-routing.md): свежий MODELS выше канонического дефолта. Границы данных и полномочий этого навыка сохраняются.

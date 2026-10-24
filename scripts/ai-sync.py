@@ -26,6 +26,13 @@ START = '.AI/START.md'
 CORE = ('schema_version', 'layout_version', 'project_id', 'project_type', 'adapters')
 
 
+def retirement_archive(path, receipt):
+    if not path.startswith('skills/'):
+        raise Invalid('Retirement is limited to skill sources')
+    ab.destination(path)
+    return '.ai-bootstrap/retired/' + receipt['sha256'] + '/' + path
+
+
 def digest(value):
     return ab.sha(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode())
 
@@ -157,8 +164,48 @@ def proposal(args, root):
     ab.validate_paths([ab.destination(p) for p in all_paths])
     state = copy.deepcopy(old)
     effective, changes, conflicts, file_changes = {}, [], [], {}
+    requested = getattr(args, 'retire_source', []) or []
+    if len(requested) != len(set(requested)):
+        raise Invalid('Duplicate retire source')
+    retired, archive_guards = {}, set()
+    prior_retired = old.get('sync', {}).get('retired_sources', {})
+    if not isinstance(prior_retired, dict):
+        raise Invalid('Invalid retirement history')
+    for path in sorted(requested):
+        ab.destination(path)
+        if not path.startswith('skills/'):
+            raise Invalid('Retirement is limited to skills, not policy rules')
+        if path in upstream:
+            raise Invalid(f'Retire source still shipped: {path}')
+        if path in set(intent['local_only'] + intent['skip_sync'] + intent['overrides']):
+            raise Invalid(f'Retire source has local ownership/exclusion: {path}')
+        if path not in old['source_files']:
+            receipt = prior_retired.get(path)
+            if not isinstance(receipt, dict):
+                raise Invalid(f'Unknown retire source: {path}')
+            archive = retirement_archive(path, receipt)
+            data = ab.read_file(root, archive)
+            if ab.sha(data) != receipt['sha256'] or ab.blob(data) != receipt['blob_sha'] or ab.descriptor(root, ab.destination(path)) is not None:
+                raise Invalid(f'Already-retired source drift: {path}')
+            changes.append({'canonical': path, 'path': ab.destination(path), 'class': 'already-retired'})
+            continue
+        receipt = old['source_files'][path]
+        expected = {'kind': 'file', 'sha256': receipt['sha256'], 'mode': int(receipt['mode'], 8) & 0o777}
+        if regular(root, ab.destination(path)) != expected:
+            raise Invalid(f'Retire source base mismatch: {path}')
+        archive = retirement_archive(path, receipt)
+        existing = regular(root, archive)
+        if existing is not None and existing != expected:
+            raise Invalid(f'Retirement backup drift: {path}')
+        retired[path] = receipt
+        file_changes[archive] = (ab.read_file(root, ab.destination(path)), expected['mode'])
+        archive_guards.add(archive)
+        del state['source_files'][path]
     for path in all_paths:
         target = ab.destination(path)
+        if path in retired:
+            changes.append({'canonical': path, 'path': target, 'class': 'retire'})
+            continue
         cur = regular(root, target)
         base = old['source_files'].get(path)
         data = ab.read_file(root, target) if cur else None
@@ -210,6 +257,8 @@ def proposal(args, root):
     origin['bundle_sha256'] = digest({'sources': canonical, 'start_template': ab.sha(template)})
     state['source'], state['context'] = origin, ctx
     state['sync'] = {**state.get('sync', {}), 'schema_version': 1, 'managed_start_sha256': ab.sha(start)}
+    if retired:
+        state['sync']['retired_sources'] = {**prior_retired, **retired}
     file_changes.update({START: (start, 0o644), **{p: (v, 0o644) for p, v in outputs.items()}})
     # Preserve absence of optional metadata on an otherwise identical generation.
     if not state['local_files'] and 'local_files' not in old:
@@ -230,17 +279,26 @@ def proposal(args, root):
         elif before != {'kind': 'dir'}:
             raise Invalid('Unsafe action parent')
     for path in sorted(file_changes, key=lambda p: (p == ab.STATE, p)):
+        if path == ab.STATE:
+            # All backups are written before any deletion; state commits last.
+            for canonical, receipt in sorted(retired.items()):
+                actions.append({'path': ab.destination(canonical),
+                                'before': {'kind': 'file', 'sha256': receipt['sha256'], 'mode': int(receipt['mode'], 8) & 0o777},
+                                'after': None})
         data, mode = file_changes[path]
         before = ab.descriptor(root, path)
         if before != {'kind': 'file', 'sha256': ab.sha(data), 'mode': mode} or (generation_changed and path in outputs):
             actions.append(ab.file_action(path, data, before, mode))
     mutated = {a['path'] for a in actions}
     inputs = {ab.PROJECT, ab.INTENT, ab.POLICY, ab.STATE, START, *old['context']['outputs'], *ab.LINKS,
-              *(ab.destination(p) for p in effective)}
+              *(ab.destination(p) for p in effective), *archive_guards}
     guards = {p: ab.descriptor(root, p) for p in sorted(inputs - mutated)}
     value = {'schema_version': 1, 'kind': 'ai-sync', 'root': str(root), 'project_id': config['project_id'],
              'actions': actions, 'inputs': guards, 'state_before': base64.b64encode(ab.read_file(root, ab.STATE)).decode(), 'changes': changes, 'conflicts': conflicts,
              'source': origin, 'source_modes': ({p: ab.descriptor(Path(args.bundle).resolve(), p) for p in selected} if args.bundle else {}), 'effective_sha256': {p: ab.sha(v) for p, v in effective.items()}}
+    if retired:
+        value['schema_version'] = 2
+        value['retire_sources'] = sorted(retired)
     value['plan_sha256'] = digest(value)
     return value
 
@@ -255,10 +313,17 @@ def valid_descriptor(desc, directory=False):
 
 
 def validate_future(root, journal):
-    if (not isinstance(journal, dict) or type(journal.get('schema_version')) is not int or journal.get('schema_version') != 1
+    if (not isinstance(journal, dict) or type(journal.get('schema_version')) is not int or journal.get('schema_version') not in (1, 2)
             or journal.get('kind') != 'ai-sync' or journal.get('root') != str(root)
             or journal.get('project_id') != ab.json_file(root, ab.PROJECT).get('project_id')):
         raise Invalid('Foreign sync journal')
+    retirement = journal.get('retire_sources', [])
+    if (not isinstance(retirement, list) or any(not isinstance(p, str) for p in retirement)
+            or retirement != sorted(set(retirement))
+            or (journal['schema_version'] == 1 and 'retire_sources' in journal)
+            or (journal['schema_version'] == 2 and not retirement)):
+        raise Invalid('Invalid retirement journal version/list')
+    retired_destinations = {ab.destination(p) for p in retirement}
     unsigned = {k: v for k, v in journal.items() if k != 'plan_sha256'}
     if digest(unsigned) != journal.get('plan_sha256') or journal.get('conflicts') != []:
         raise Invalid('Journal binding/conflicts invalid')
@@ -271,6 +336,11 @@ def validate_future(root, journal):
         if path in pending:
             raise Invalid('Duplicate action')
         pending[path] = a
+        if a['after'] is None:
+            if path not in retired_destinations or set(a) != {'path', 'before', 'after'}:
+                raise Invalid('Unapproved deletion')
+            valid_descriptor(a['before'])
+            continue
         valid_descriptor(a['after'], True)
         if a['before'] is not None:
             valid_descriptor(a['before'])
@@ -283,6 +353,8 @@ def validate_future(root, journal):
                 raise Invalid('Invalid action payload')
     def future(path):
         if path in pending:
+            if pending[path]['after'] is None:
+                raise Invalid('Retired file used as future source')
             return base64.b64decode(pending[path]['data'], validate=True)
         return ab.read_file(root, path)
     state = json.loads(future(ab.STATE))
@@ -302,9 +374,36 @@ def validate_future(root, journal):
     mutable = {'source', 'source_files', 'local_files', 'context', 'sync'}
     if {k: v for k, v in old.items() if k not in mutable} != {k: v for k, v in state.items() if k not in mutable}:
         raise Invalid('Protected state metadata changed')
-    if not set(old['source_files']) <= set(state['source_files']):
+    if set(old['source_files']) - set(state['source_files']) != set(retirement):
         raise Invalid('Tracked source was forgotten')
     intent = ab.json_file(root, ab.INTENT)
+    archives = set()
+    old_history = old.get('sync', {}).get('retired_sources', {})
+    expected_history = dict(old_history)
+    for canonical in retirement:
+        receipt = old['source_files'][canonical]
+        archive = retirement_archive(canonical, receipt)
+        archives.add(archive)
+        if canonical in set(intent['local_only'] + intent['skip_sync'] + intent['overrides']):
+            raise Invalid('Cannot retire an excluded/local source')
+        deletion = pending.get(ab.destination(canonical))
+        expected = {'kind': 'file', 'sha256': receipt['sha256'], 'mode': int(receipt['mode'], 8) & 0o777}
+        if not deletion or deletion['after'] is not None or deletion['before'] != expected:
+            raise Invalid('Retirement deletion differs from original source')
+        data = future(archive)
+        if ab.sha(data) != receipt['sha256'] or ab.blob(data) != receipt['blob_sha']:
+            raise Invalid('Retirement backup does not match original source')
+        backup = pending.get(archive)
+        if backup:
+            if backup['after'] != expected or backup['before'] not in (None, expected):
+                raise Invalid('Unsafe backup action')
+            if actions.index(backup) >= actions.index(deletion):
+                raise Invalid('Backup must precede deletion')
+        elif regular(root, archive) != expected:
+            raise Invalid('Retirement backup missing or changed')
+        expected_history[canonical] = receipt
+    if state.get('sync', {}).get('retired_sources', {}) != expected_history:
+        raise Invalid('Retirement history differs')
     if state.get('local_files', []) != sorted(intent['local_only']):
         raise Invalid('Future local ownership differs')
     for p, receipt in state['source_files'].items():
@@ -332,27 +431,32 @@ def validate_future(root, journal):
         raise Invalid('Future context differs')
     intent = ab.json_file(root, ab.INTENT)
     forbidden = set(intent['local_only']) | set(intent['skip_sync']) | set(intent['overrides'])
-    allowed = {ab.destination(p) for p in state['source_files'] if p not in forbidden} | {START, ab.STATE, *outputs}
+    allowed = {ab.destination(p) for p in state['source_files'] if p not in forbidden} | {START, ab.STATE, *outputs, *archives}
     parents = {str(parent) for p in allowed for parent in PurePosixPath(p).parents if str(parent) != '.'}
     # Parent directory actions intentionally precede their descendants. Validate
     # collisions among approved file destinations; directories must be exact
     # parents of these validated destinations (checked below).
     ab.validate_paths(allowed)
-    expected_order = sorted((p for p in pending if pending[p]['after']['kind'] == 'dir'), key=lambda p: (p.count('/'), p))
-    expected_order += sorted((p for p in pending if pending[p]['after']['kind'] == 'file'), key=lambda p: (p == ab.STATE, p))
+    expected_order = sorted((p for p in pending if pending[p]['after'] and pending[p]['after']['kind'] == 'dir'), key=lambda p: (p.count('/'), p))
+    expected_order += sorted(p for p in pending if pending[p]['after'] and pending[p]['after']['kind'] == 'file' and p != ab.STATE)
+    expected_order += sorted(retired_destinations)
+    expected_order.append(ab.STATE)
     if list(pending) != expected_order:
         raise Invalid('Invalid action order')
     for path, a in pending.items():
-        if a['after']['kind'] == 'dir':
+        if a['after'] is None:
+            if path not in retired_destinations:
+                raise Invalid('Unapproved retirement')
+        elif a['after']['kind'] == 'dir':
             if path not in parents:
                 raise Invalid('Unapproved parent')
-        elif path not in allowed or a['after']['mode'] != (0o755 if path.startswith('scripts/') else 0o644):
+        elif path not in allowed or (path not in archives and a['after']['mode'] != (0o755 if path.startswith('scripts/') else 0o644)):
             raise Invalid('Unapproved action')
     guards = journal.get('inputs')
     if not isinstance(guards, dict) or set(guards) & set(pending):
         raise Invalid('Invalid guards')
     expected_inputs = {ab.PROJECT, ab.INTENT, ab.POLICY, ab.STATE, START, *outputs, *ab.LINKS,
-                       *(ab.destination(p) for p in sources)} - set(pending)
+                       *(ab.destination(p) for p in sources), *archives} - set(pending)
     if set(guards) != expected_inputs:
         raise Invalid('Missing/unapproved input guard')
     for path, desc in guards.items():
@@ -373,7 +477,10 @@ def install_action(root, action):
     if ab.descriptor(root, path) != action['before']:
         raise Invalid(f'Concurrent edit: {path}')
     target = ab.checked(root, path)
-    if after['kind'] == 'dir':
+    if after is None:
+        target.unlink()
+        ab.sync_dir(target.parent)
+    elif after['kind'] == 'dir':
         target.mkdir()
         ab.sync_dir(target.parent)
     else:
@@ -410,9 +517,13 @@ def main(argv=None):
     source.add_argument('--bundle', type=Path)
     source.add_argument('--source-base')
     parser.add_argument('--expect-plan')
+    parser.add_argument('--retire-source', action='append', default=[], metavar='CANONICAL_PATH',
+                        help='Explicitly archive and retire an unchanged, no-longer-shipped skill source')
     args = parser.parse_args(argv)
     root = args.root.absolute()
     try:
+        if args.retire_source and args.command not in ('plan', 'apply'):
+            raise Invalid('--retire-source is only valid for plan/apply')
         if args.root.is_symlink() or not root.is_dir():
             raise Invalid('Use an existing actual client root')
         refuse_other(root)
