@@ -4,7 +4,14 @@
 
 ## Один владелец и журнал
 
-Для каждой активной задачи держи отдельный `<taskID>.usage.json` рядом с Markdown-владельцем, записывай его атомарной заменой и не объединяй параллельные задачи. Checkpoint именуй `<taskID>.<role>.<session-id>.checkpoint.json`; новый этап той же сессии продолжает ее checkpoint, новый role/session получает свой. Владелец сохраняет ID задачи, цель, ограничения, старты отдельных ролей/сессий и handoff в Markdown. До делегирования передай task ID, роль, начало/checkpoint-файл и попроси receipt даже при сбое или retry. Каждая реальная retry-попытка - отдельный вызов; незамеренный расход помечается `unknown`, не нулем. Субагент возвращает receipt, но не редактирует общий ledger. Прежний владелец прекращает запись до передачи следующему.
+Для каждой активной задачи держи отдельный `<taskID>.usage.json` в устойчивом служебном каталоге задачи вне синка по `rules/docs-maintenance.md`; точный абсолютный путь укажи в Markdown-владельце, записывай его атомарной заменой и не объединяй параллельные задачи. Checkpoint именуй `<taskID>.<role>.<session-id>.checkpoint.json`; новый этап той же сессии продолжает ее checkpoint, новый role/session получает свой. Владелец сохраняет ID задачи, цель, ограничения, старты отдельных ролей/сессий и handoff в Markdown. До делегирования передай task ID, роль, начало/checkpoint-файл и попроси receipt даже при сбое или retry. Каждая реальная retry-попытка - отдельный вызов; незамеренный расход помечается `unknown`, не нулем. Субагент возвращает receipt, но не редактирует общий ledger. Прежний владелец прекращает запись до передачи следующему.
+
+В командах ниже `TOOLKIT_ROOT` — абсолютный корень с существующим `scripts/session-cost.py`, `TASK_ARTIFACTS` — проверенный абсолютный служебный каталог задачи. Задай обе переменные в том же shell; не используй пустые значения. `session-cost.py` читает явно указанный ledger; атомарную запись выполняет владелец, скрипт не переносит файлы.
+
+```bash
+: "${TOOLKIT_ROOT:?Укажи корень с scripts/session-cost.py}"
+: "${TASK_ARTIFACTS:?Укажи внешний каталог задачи}"
+```
 
 Начни с отдельного пустого `<taskID>.usage.json` для конкретной задачи; например, файл `TASK-123.usage.json`:
 
@@ -43,13 +50,13 @@ Native receipt использует объект `source` с `session_id`, `prov
 Snapshot читает только указанный файл, не ищет сессии и не читает текст сообщений в отчет. Сохрани checkpoint до работы:
 
 ```bash
-python3 scripts/session-cost.py --snapshot --provider codex --file /explicit/path/session.jsonl > TASK-123.implementer.session-7.checkpoint.json
-python3 scripts/session-cost.py --snapshot --provider codex --file /explicit/path/session.jsonl --since TASK-123.implementer.session-7.checkpoint.json
+python3 "$TOOLKIT_ROOT/scripts/session-cost.py" --snapshot --provider codex --file /explicit/path/session.jsonl > "$TASK_ARTIFACTS/TASK-123.implementer.session-7.checkpoint.json"
+python3 "$TOOLKIT_ROOT/scripts/session-cost.py" --snapshot --provider codex --file /explicit/path/session.jsonl --since "$TASK_ARTIFACTS/TASK-123.implementer.session-7.checkpoint.json"
 ```
 
 Для Claude укажи `--provider claude`. Проверь JSON snapshot и передай его `records` владельцу ledger. Ответ с `--since` также содержит следующий `checkpoint`; сохрани именно его для новой стадии и не применяй один интервал дважды. Checkpoint хранит идентификатор, длину и хеш префикса, агрегаты по модели, но не содержимое транскрипта. Файл должен быть полным UTF-8 JSONL; усеченный хвост, неверная идентичность, rollback счетчиков или измененный префикс требуют остановки и явного unknown/разбора.
 
-Не включай файлы субагентов Claude автоматически: каждый receipt должен соответствовать одной явно выбранной сессии и этой задаче. Сессия, начавшаяся до учета без baseline, записывается как unknown, если ее нельзя безопасно отделить. Закрывая задачу, перенеси usage-ledger и ее task/role/session checkpoints вместе с Markdown-владельцем в `docs/done/`. Уже закрытые задачи автоматически не пересчитывай.
+Не включай файлы субагентов Claude автоматически: каждый receipt должен соответствовать одной явно выбранной сессии и этой задаче. Сессия, начавшаяся до учета без baseline, записывается как unknown, если ее нельзя безопасно отделить. Закрывая задачу, перенеси только Markdown-владельца в `docs/done/`; новый служебный ledger и checkpoints остаются по прежнему устойчивому адресу. Старые sidecars не перемещай автоматически. Уже закрытые задачи не пересчитывай.
 
 ## Codex CLI event receipt
 
@@ -57,7 +64,7 @@ python3 scripts/session-cost.py --snapshot --provider codex --file /explicit/pat
 
 ```bash
 codex exec --json "<prompt>" > /private/path/TASK-123.reviewer.run-7.jsonl
-python3 scripts/session-cost.py --codex-events \
+python3 "$TOOLKIT_ROOT/scripts/session-cost.py" --codex-events \
   --file /private/path/TASK-123.reviewer.run-7.jsonl \
   --run-id run-7 --role reviewer \
   > /private/path/TASK-123.reviewer.run-7.receipt.json
@@ -72,8 +79,8 @@ python3 scripts/session-cost.py --codex-events \
 ## Сводка и ограничения
 
 ```bash
-python3 scripts/session-cost.py --task-ledger TASK-123.usage.json
-python3 scripts/session-cost.py --task-ledger TASK-123.usage.json --json
+python3 "$TOOLKIT_ROOT/scripts/session-cost.py" --task-ledger "$TASK_ARTIFACTS/TASK-123.usage.json"
+python3 "$TOOLKIT_ROOT/scripts/session-cost.py" --task-ledger "$TASK_ARTIFACTS/TASK-123.usage.json" --json
 ```
 
 Код 0 означает complete, код 3 - partial с известными измеренными цифрами, код 2 - некорректные данные и без отчета в stdout. В отчете `total` равен `null`, если у группы есть unknown; `measured_total` и `measured_tokens` показывают только известную часть. Неизвестные optional поля остаются `null`, а известные subtotal сохраняются. Markdown показывает измеренные строки и список пропусков; unknown-only группы остаются в JSON и missing-call list, не в таблице с нулем. Подтвержденные суммы денег показываются отдельно от токенов, включая записи без измеренного usage. `cache_read` не прибавляй к input повторно, reasoning не прибавляй к output повторно. Не складывай разные валюты или actual/estimate. Не называй измеренную сумму полным итогом при unknown. Не заноси промпты, ответы, персональные данные, секреты или текст транскрипта.
