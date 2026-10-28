@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Связи задач (блокировки) текстом в описании задач Asana.
+"""Связи задач Asana: text и явно включаемые native dependencies.
 
-Зачем не нативные зависимости: `POST /tasks/{gid}/addDependencies` отдает
-402 Payment Required - это премиум-фича. Текстом получается не хуже и даже
-нагляднее: блок стоит первым в описании, виден и в карточке, и в предпросмотре.
+Старые конфиги используют text. Явный --mode native/auto включает API
+dependencies, отдельный внешний journal и digest-bound предпросмотр.
+HTTP402 не запускает текстовую запись: нужен новый text-план и согласование.
+Общий режим зависит от workspace/операции, не от аккаунта целиком.
 
 Смысл приема: вместо ежедневного сдвига сроков задача честно говорит, чем
 именно она держится. Тогда невыполненная задача не выглядит забытой - видно,
@@ -50,6 +51,17 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import contextvars
+import stat
+try:
+    import fcntl
+except ImportError:  # Legacy text remains usable where Linux locks are absent.
+    fcntl = None
+import hashlib
+import socket
+import tempfile
+import urllib.parse
 import json
 import os
 import html as html_lib
@@ -350,6 +362,11 @@ def load_config(path: str) -> dict:
             if seen:
                 norm_chains[key] = seen
         clean[label] = {"project": (project or "").strip(), "chains": norm_chains}
+        if "mode" in cfg:
+            if cfg["mode"] not in ("auto", "native", "text"):
+                problems.append(f"{where}: mode должен быть auto/native/text")
+            else:
+                clean[label]["mode"] = cfg["mode"]
     if problems:
         sys.exit("Конфиг цепочек неверен:\n  " + "\n  ".join(problems))
     return clean
@@ -726,6 +743,535 @@ def run_board(label: str, cfg: dict, token: str, send: bool) -> tuple[int, bool]
     return written, bool(skipped)
 
 
+# Native mode has a separate single-request transport: mutation retries and
+# legacy response-body diagnostics are unsafe for an ownership journal.
+class NativeError(Exception):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(f"Asana native: {code}" if isinstance(code, int) else
+                         "Asana native: " + (code if code in {
+                             'timeout', 'network', 'api_data', 'state_invalid',
+                             'state_io', 'drift', 'cycle', 'limit', 'scope',
+                             'lock_busy', 'path'} else 'unavailable'))
+
+
+def _native_canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'),
+                      ensure_ascii=False).encode('utf-8')
+
+
+def _native_hash(value):
+    return hashlib.sha256(_native_canonical(value)).hexdigest()
+
+
+class _NativeNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NATIVE_BUDGET = contextvars.ContextVar('asana_native_read_budget', default=None)
+
+
+def native_request(method, path, token, payload=None):
+    parts = urllib.parse.urlsplit(path)
+    if not path.startswith('/') or parts.scheme or parts.netloc or parts.fragment:
+        raise NativeError('path')
+    data = None if payload is None else json.dumps({'data': payload}).encode()
+    req = urllib.request.Request(API + path, data=data, method=method,
+                                 headers={'Authorization': 'Bearer ' + token,
+                                          'Content-Type': 'application/json'})
+    try:
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=SSL_CTX), _NativeNoRedirect())
+        with opener.open(req, timeout=30) as response:
+            if response.url != API + path:
+                raise NativeError('api_data')
+            raw = response.read(2 * 1024 * 1024 + 1)
+            if len(raw) > 2 * 1024 * 1024:
+                raise NativeError('limit')
+            result = json.loads(raw or b'{}')
+            if not isinstance(result, dict):
+                raise NativeError('api_data')
+            return result
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+        exc.close()
+        raise NativeError(code) from None
+    except (TimeoutError, socket.timeout):
+        raise NativeError('timeout') from None
+    except urllib.error.URLError:
+        raise NativeError('network') from None
+    except (ValueError, UnicodeError):
+        raise NativeError('api_data') from None
+
+
+class _NativeRead:
+    def __init__(self, token):
+        self.token, self.requests = token, 0
+
+    def request(self, path):
+        self.requests += 1
+        budget = _NATIVE_BUDGET.get()
+        if budget is not None:
+            budget[0] += 1
+        if (budget[0] if budget is not None else self.requests) > 10000:
+            raise NativeError('limit')
+        result = native_request('GET', path, self.token)
+        if not isinstance(result, dict) or 'data' not in result:
+            raise NativeError('api_data')
+        return result
+
+    def item(self, path):
+        value = self.request(path)['data']
+        if not isinstance(value, dict):
+            raise NativeError('api_data')
+        return value
+
+    def collection(self, path, cap=1000):
+        route = urllib.parse.urlsplit(path).path
+        seen, result = set(), []
+        while path:
+            if path in seen:
+                raise NativeError('api_data')
+            seen.add(path)
+            value = self.request(path)
+            if not isinstance(value['data'], list):
+                raise NativeError('api_data')
+            result.extend(value['data'])
+            if len(result) > cap or len(seen) > 100:
+                raise NativeError('limit')
+            nxt = value.get('next_page')
+            if not nxt:
+                break
+            if not isinstance(nxt, dict) or not isinstance(nxt.get('uri'), str):
+                raise NativeError('api_data')
+            url = urllib.parse.urlsplit(nxt['uri'])
+            if (url.scheme != 'https' or url.netloc != 'app.asana.com'
+                    or url.path != '/api/1.0' + route or url.fragment):
+                raise NativeError('api_data')
+            path = route + ('?' + url.query if url.query else '')
+        return result
+
+
+def _native_gid(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9]+', value):
+        raise NativeError('api_data')
+    return value
+
+
+def _native_ids(rows):
+    ids = [_native_gid(x.get('gid')) for x in rows if isinstance(x, dict)]
+    if len(ids) != len(rows) or len(ids) != len(set(ids)):
+        raise NativeError('api_data')
+    return sorted(ids)
+
+
+def _native_state(value):
+    if (not isinstance(value, dict) or set(value) != {'schema_version', 'scopes'}
+            or type(value['schema_version']) is not int or value['schema_version'] != 1
+            or not isinstance(value['scopes'], dict)):
+        raise NativeError('state_invalid')
+    for scope, row in value['scopes'].items():
+        if (not isinstance(scope, str) or not re.fullmatch(r'[0-9]+:[0-9]+:[0-9]+', scope)
+                or not isinstance(row, dict) or set(row) - {'edges', 'cleanup'}
+                or not isinstance(row.get('edges'), dict)):
+            raise NativeError('state_invalid')
+        for edge, status in row['edges'].items():
+            if (not isinstance(edge, str) or not re.fullmatch(r'[0-9]+>[0-9]+', edge)
+                    or status not in ('owned', 'pending_add', 'pending_remove', 'uncertain')):
+                raise NativeError('state_invalid')
+        if not isinstance(row.get('cleanup', {}), dict):
+            raise NativeError('state_invalid')
+        for gid, mark in row.get('cleanup', {}).items():
+            if (not isinstance(gid, str) or not re.fullmatch('[0-9]+', gid) or not isinstance(mark, dict)
+                    or set(mark) != {'state', 'before', 'after'}
+                    or mark['state'] not in ('pending', 'verified')
+                    or any(not isinstance(mark[k], str) or not re.fullmatch('[0-9a-f]{64}', mark[k])
+                           for k in ('before', 'after'))):
+                raise NativeError('state_invalid')
+    return value
+
+
+def _native_path(path):
+    p = Path(path)
+    if not p.is_absolute() or not p.parent.is_dir():
+        raise NativeError('path')
+    if any(x.is_symlink() for x in [p, *p.parents]):
+        raise NativeError('path')
+    if p.exists() and (not p.is_file() or p.stat().st_nlink != 1):
+        raise NativeError('path')
+    if (p.is_relative_to(Path.cwd().resolve()) or any(
+            (parent / '.AI/project.json').is_file() or (parent / '.stfolder').exists()
+            or (parent / '.obsidian').is_dir() for parent in p.parents)):
+        raise NativeError('path')
+    return p
+
+
+def _native_read_state(path):
+    if not path.exists():
+        return {'schema_version': 1, 'scopes': {}}
+    try:
+        if path.stat().st_size > 1024 * 1024:
+            raise NativeError('state_invalid')
+        return _native_state(json.loads(path.read_text(), object_pairs_hook=_no_dupe_keys))
+    except (OSError, ValueError):
+        raise NativeError('state_invalid') from None
+
+
+def _native_atomic(path, value):
+    path = _native_path(path)
+    temp = None
+    try:
+        fd, temp = tempfile.mkstemp(prefix='.asana-', dir=path.parent)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(_native_canonical(value)); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temp, path)
+        temp = None
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        raise NativeError('state_io') from None
+    finally:
+        if temp is not None:
+            try:
+                os.unlink(temp)
+            except FileNotFoundError:
+                pass
+
+
+def write_native_state(path, state):
+    _native_state(state)
+    _native_atomic(path, state)
+
+
+_NATIVE_SIGNING = frozenset(('X-Amz-Algorithm', 'X-Amz-Credential', 'X-Amz-Date',
+    'X-Amz-Expires', 'X-Amz-SignedHeaders', 'X-Amz-Signature', 'X-Amz-Security-Token'))
+_NATIVE_URL = re.compile(r'https?://[^\s<>"\x27]+')
+
+
+def _native_url_core(url):
+    url = html_lib.unescape(url)
+    p = urllib.parse.urlsplit(url)
+    if p.fragment or p.scheme not in ('http', 'https'):
+        return None
+    fields = p.query.split('&')
+    keys = [x.split('=', 1)[0] for x in fields]
+    if len(keys) != len(set(keys)) or not (_NATIVE_SIGNING & set(keys)):
+        return None
+    query = '&'.join(x.split('=', 1)[0] + '=SIGNING' if x.split('=', 1)[0] in _NATIVE_SIGNING else x
+                     for x in fields)
+    return urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, query, ''))
+
+
+def _native_description(task, read):
+    html = task['html_notes']
+    mappings = {}
+    for row in read.collection('/tasks/' + task['gid'] + '/attachments', cap=100):
+        gid = _native_gid(row.get('gid'))
+        data = read.item('/attachments/' + gid + '?opt_fields=gid,download_url')
+        if data.get('gid') != gid or not isinstance(data.get('download_url'), str):
+            raise NativeError('api_data')
+        core = _native_url_core(data['download_url'])
+        if core is not None:
+            if core in mappings and mappings[core] != gid:
+                raise NativeError('api_data')
+            mappings[core] = gid
+    def replace(match):
+        core = _native_url_core(match.group())
+        if core is not None and core in mappings:
+            return 'ATTACHMENT:' + mappings[core] + ':' + hashlib.sha256(core.encode()).hexdigest()
+        return match.group()
+    normalized = _NATIVE_URL.sub(replace, html)
+    bindings = sorted((gid, hashlib.sha256(core.encode()).hexdigest()) for core, gid in mappings.items())
+    return hashlib.sha256(normalized.encode()).hexdigest(), bindings
+
+
+def _native_cleanup(task, desired):
+    notes = body_of(task)
+    block, rest = split_block(notes)
+    if block is None:
+        return None
+    sections = parse_sections(block_lines(block))
+    removable = []
+    for head, items in sections:
+        if head not in OWN_HEADS:
+            continue
+        edges = []
+        for line in items:
+            ids = re.findall(r'data-asana-gid="([0-9]+)"', line)
+            if not ids:
+                return None
+            pair = (task['gid'], ids[0]) if head == WAITS_HEAD else (ids[0], task['gid'])
+            edges.append(pair)
+        if edges and all(e in desired for e in edges):
+            removable.append(head)
+    if not removable:
+        return None
+    remaining = [line for head, items in sections if head not in removable for line in [head, *items]]
+    return wrap(render(remaining, rest))
+
+
+def _native_snapshot(label, cfg, token, state, cleanup_text):
+    _native_state(state)
+    try:
+        project = _native_gid(cfg['project']); chains = cfg['chains']
+        if not isinstance(chains, dict):
+            raise NativeError('scope')
+    except (KeyError, TypeError):
+        raise NativeError('scope') from None
+    read = _NativeRead(token)
+    account = _native_gid(read.item('/users/me?opt_fields=gid').get('gid'))
+    project_data = read.item('/projects/' + project + '?opt_fields=gid,workspace.gid')
+    if project_data.get('gid') != project:
+        raise NativeError('scope')
+    workspace = _native_gid((project_data.get('workspace') or {}).get('gid'))
+    scope = {'account': account, 'workspace': workspace, 'project': project}
+    key = ':'.join((account, workspace, project))
+    board = read.collection('/projects/' + project + '/tasks?opt_fields=' + FIELDS + ',projects,workspace.gid')
+    board_ids = _native_ids(board)
+    names = {}
+    for t in board:
+        name = norm(t.get('name') or '')
+        names.setdefault(name, []).append(t['gid'])
+    desired = set()
+    for name, needs in chains.items():
+        if not isinstance(name, str) or not isinstance(needs, list) or not needs or any(not isinstance(n, str) for n in needs) or len(needs) != len(set(needs)):
+            raise NativeError('scope')
+        for dep in needs:
+            if not isinstance(dep, str) or len(names.get(norm(name), [])) != 1 or len(names.get(norm(dep), [])) != 1:
+                raise NativeError('scope')
+            a, b = names[norm(name)][0], names[norm(dep)][0]
+            if a == b:
+                raise NativeError('cycle')
+            desired.add((a, b))
+    owned = state['scopes'].get(key, {}).get('edges', {})
+    queue, tasks, deps, dependents, descriptions = list(board_ids), {}, {}, {}, {}
+    if any(g not in board_ids for edge in owned for g in edge.split('>')):
+        raise NativeError('scope')
+    while queue:
+        gid = queue.pop()
+        if gid in tasks:
+            continue
+        if len(tasks) >= 1000:
+            raise NativeError('limit')
+        t = read.item('/tasks/' + gid + '?opt_fields=gid,name,html_notes,projects,workspace.gid')
+        if (t.get('gid') != gid or not isinstance(t.get('name'), str)
+                or not isinstance(t.get('html_notes'), str)):
+            raise NativeError('api_data')
+        if gid in board_ids and (project not in {x.get('gid') for x in t.get('projects', [])}
+                or (t.get('workspace') or {}).get('gid') != workspace):
+            raise NativeError('scope')
+        tasks[gid] = t
+        deps[gid] = _native_ids(read.collection('/tasks/' + gid + '/dependencies'))
+        dependents[gid] = _native_ids(read.collection('/tasks/' + gid + '/dependents'))
+        queue.extend(g for g in deps[gid] if g not in tasks)
+        desc_hash, bindings = _native_description(t, read)
+        descriptions[gid] = {'name': t['name'], 'projects': sorted(x.get('gid', '') for x in t.get('projects', [])),
+                             'workspace': (t.get('workspace') or {}).get('gid'),
+                             'description': desc_hash, 'attachments': bindings}
+    existing = {(a, b) for a, bs in deps.items() for b in bs}
+    add = desired - existing
+    remove = {tuple(edge.split('>')) for edge, status in owned.items()
+              if status == 'owned' and tuple(edge.split('>')) in existing - desired}
+    for a, b in desired | remove:
+        if a not in board_ids or b not in board_ids:
+            raise NativeError('scope')
+    for a, b in remove:
+        if {x.get('gid') for x in tasks[a].get('projects', [])} != {project}:
+            raise NativeError('scope')
+    graph = {g: set(bs) for g, bs in deps.items()}
+    incoming = {g: set(bs) for g, bs in dependents.items()}
+    for a, b in remove:
+        graph[a].discard(b); incoming[b].discard(a)
+    for a, b in add:
+        graph[a].add(b); incoming[b].add(a)
+    if any(len(graph[g]) + len(incoming[g]) > 30 for g in graph):
+        raise NativeError('limit')
+    indegree = {g: 0 for g in graph}
+    for bs in graph.values():
+        for b in bs:
+            indegree[b] += 1
+    ready = [g for g, n in indegree.items() if n == 0]
+    count = 0
+    while ready:
+        g = ready.pop(); count += 1
+        for b in graph[g]:
+            indegree[b] -= 1
+            if indegree[b] == 0:
+                ready.append(b)
+    if count != len(graph):
+        raise NativeError('cycle')
+    cleanup = {}
+    diagnostics = []
+    if cleanup_text:
+        for gid in board_ids:
+            value = _native_cleanup(tasks[gid], desired)
+            if value is not None:
+                if {x.get('gid') for x in tasks[gid].get('projects', [])} != {project}:
+                    raise NativeError('scope')
+                cleanup[gid] = value
+            elif MARK_START in body_of(tasks[gid]):
+                diagnostics.append({'task': gid, 'code': 'text_retained'})
+    snapshot = {'tasks': descriptions, 'deps': deps, 'dependents': dependents}
+    plan = {'schema_version': 1, 'label': label, 'cfg': copy.deepcopy(cfg),
+            'scope': scope, 'desired': sorted(map(list, desired)),
+            'add': sorted(map(list, add)), 'remove': sorted(map(list, remove)),
+            'cleanup': sorted(cleanup), 'cleanup_text': cleanup_text,
+            'snapshots': snapshot, 'state_sha256': _native_hash(state), 'diagnostics': diagnostics}
+    plan['digest'] = _native_hash(plan)
+    return plan, tasks, cleanup
+
+
+def build_native_plan(label, cfg, token, state, cleanup_text=False):
+    budget = _NATIVE_BUDGET.set([0])
+    try:
+        return _native_snapshot(label, cfg, token, state, cleanup_text)[0]
+    finally:
+        _NATIVE_BUDGET.reset(budget)
+
+
+def apply_native_plan(plan, token, state_path, expected_digest):
+    if not isinstance(plan, dict):
+        raise NativeError('drift')
+    unsigned = {k: v for k, v in plan.items() if k != 'digest'}
+    if expected_digest != plan.get('digest') or expected_digest != _native_hash(unsigned):
+        raise NativeError('drift')
+    if fcntl is None or not sys.platform.startswith('linux'):
+        raise NativeError('unavailable')
+    path = _native_path(state_path)
+    try:
+        fd = os.open(str(path) + '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        raise NativeError('path') from None
+    budget = _NATIVE_BUDGET.set([0])
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
+            raise NativeError('path')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise NativeError('lock_busy') from None
+        state = _native_read_state(path)
+        fresh, tasks, cleanup = _native_snapshot(plan['label'], plan['cfg'], token, state, plan['cleanup_text'])
+        if fresh['digest'] != expected_digest:
+            raise NativeError('drift')
+        key = ':'.join(fresh['scope'][k] for k in ('account', 'workspace', 'project'))
+        expected = copy.deepcopy(fresh['snapshots'])
+        counts = dict(added=0, removed=0, cleaned=0)
+        def persist():
+            try:
+                write_native_state(str(path), state)
+            except OSError:
+                raise NativeError('state_io') from None
+        def check_snapshot():
+            new, current_tasks, current_cleanup = _native_snapshot(fresh['label'], fresh['cfg'], token, state, fresh['cleanup_text'])
+            if new['snapshots'] != expected or new['scope'] != fresh['scope']:
+                raise NativeError('drift')
+            return current_tasks, current_cleanup
+        for mode in ('remove', 'add'):
+            for a, b in fresh[mode]:
+                check_snapshot()
+                row = state['scopes'].setdefault(key, {'edges': {}})
+                edge = a + '>' + b
+                row['edges'][edge] = 'pending_' + mode
+                persist()
+                native_request('POST', '/tasks/' + a + '/' + mode + 'Dependencies', token, {'dependencies': [b]})
+                read = _NativeRead(token)
+                after_deps = _native_ids(read.collection('/tasks/' + a + '/dependencies'))
+                after_in = _native_ids(read.collection('/tasks/' + b + '/dependents'))
+                ds, ins = set(expected['deps'][a]), set(expected['dependents'][b])
+                if mode == 'add':
+                    ds.add(b); ins.add(a)
+                else:
+                    ds.discard(b); ins.discard(a)
+                if after_deps != sorted(ds) or after_in != sorted(ins):
+                    raise NativeError('drift')
+                expected['deps'][a], expected['dependents'][b] = after_deps, after_in
+                if mode == 'add':
+                    row['edges'][edge] = 'owned'; counts['added'] += 1
+                else:
+                    row['edges'].pop(edge); counts['removed'] += 1
+                persist()
+        for gid in fresh['cleanup']:
+            current, current_cleanup = check_snapshot()
+            if gid not in current_cleanup:
+                raise NativeError('drift')
+            # Reconfirm both sides before removing the textual representation.
+            read = _NativeRead(token)
+            for a, b in fresh['desired']:
+                if b not in _native_ids(read.collection('/tasks/' + a + '/dependencies')) or a not in _native_ids(read.collection('/tasks/' + b + '/dependents')):
+                    raise NativeError('drift')
+            html = current_cleanup[gid]
+            row = state['scopes'].setdefault(key, {'edges': {}})
+            before_hash = expected['tasks'][gid]['description']
+            predicted = dict(current[gid], html_notes=html)
+            after_hash, bindings = _native_description(predicted, read)
+            row.setdefault('cleanup', {})[gid] = {'state': 'pending', 'before': before_hash, 'after': after_hash}
+            persist()
+            native_request('PUT', '/tasks/' + gid, token, {'html_notes': html})
+            actual = read.item('/tasks/' + gid + '?opt_fields=gid,name,html_notes,projects,workspace.gid')
+            actual_hash, actual_bindings = _native_description(actual, read)
+            if (actual_hash != after_hash or actual_bindings != bindings
+                    or actual.get('name') != current[gid]['name']
+                    or actual.get('projects') != current[gid].get('projects')
+                    or actual.get('workspace') != current[gid].get('workspace')):
+                raise NativeError('drift')
+            expected['tasks'][gid]['description'] = actual_hash
+            row['cleanup'][gid]['state'] = 'verified'; persist(); counts['cleaned'] += 1
+        return {'status': 'applied' if any(counts.values()) else 'unchanged', **counts}
+    finally:
+        os.close(fd)
+        _NATIVE_BUDGET.reset(budget)
+
+
+def _native_cli(label, cfg, token, args):
+    if fcntl is None or not sys.platform.startswith('linux'):
+        raise NativeError('unavailable')
+    if not args.state or not args.plan:
+        raise NativeError('path')
+    state_path, plan_path = _native_path(args.state), _native_path(args.plan)
+    config_root = Path(args.config).expanduser().resolve().parent
+    if any(p.is_relative_to(config_root) for p in (state_path, plan_path)) or state_path == plan_path or plan_path == Path(str(state_path) + '.lock'):
+        raise NativeError('path')
+    if args.send:
+        if not args.expect_plan:
+            raise NativeError('drift')
+        try:
+            if plan_path.stat().st_size > 2 * 1024 * 1024:
+                raise NativeError('limit')
+            plan = json.loads(plan_path.read_text(), object_pairs_hook=_no_dupe_keys)
+        except (OSError, ValueError):
+            raise NativeError('drift') from None
+        if plan.get('label') != label or plan.get('cfg') != cfg or plan.get('cleanup_text') != args.cleanup_text:
+            raise NativeError('drift')
+        result = apply_native_plan(plan, token, state_path, args.expect_plan)
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    plan = build_native_plan(label, cfg, token, _native_read_state(state_path), args.cleanup_text)
+    if plan_path.exists():
+        try:
+            previous = json.loads(plan_path.read_text())
+            if previous.get('schema_version') != 1 or previous.get('scope') != plan['scope'] or previous.get('label') != label:
+                raise NativeError('path')
+        except (ValueError, OSError, AttributeError):
+            raise NativeError('path') from None
+    _native_atomic(plan_path, plan)
+    scope = plan['scope']
+    print('account={account}, workspace={workspace}, project={project}'.format(**scope))
+    names = {gid: row['name'] for gid, row in plan['snapshots']['tasks'].items()}
+    for mode in ('add', 'remove'):
+        for a, b in plan[mode]:
+            print(f"{mode}: {names[a]} ЖДЕТ {names[b]}")
+    for gid in plan['cleanup']:
+        print('cleanup text:', names[gid])
+    for item in plan['diagnostics']:
+        print('diagnostic:', item['task'], item['code'])
+    print('plan_sha256:', plan['digest'])
+    print('Перед --send согласуйте этот набор; нужен --expect-plan. GET→POST/PUT не CAS: параллельные ручные изменения остаются риском.')
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -735,6 +1281,11 @@ def main() -> int:
     ap.add_argument("--board", help="какую доску обрабатывать (ключ из конфига); "
                                     "без флага - все, что описаны")
     ap.add_argument("--send", action="store_true", help="записать (без флага - предпросмотр)")
+    ap.add_argument("--mode", choices=("auto", "native", "text"))
+    ap.add_argument("--state", help="абсолютный journal вне синка")
+    ap.add_argument("--plan", help="абсолютный файл плана вне синка")
+    ap.add_argument("--expect-plan", help="подтвержденный digest native плана")
+    ap.add_argument("--cleanup-text", action="store_true", help="отдельно планировать миграцию текста")
     args = ap.parse_args()
 
     boards = load_config(args.config)
@@ -747,7 +1298,24 @@ def main() -> int:
     failed: list[str] = []
     for label, cfg in boards.items():
         print(f"\n##### доска: {label}")
-        _touched, err = run_board(label, cfg, token, args.send)
+        mode = args.mode or cfg.get("mode", "text")
+        if mode == "text":
+            if args.cleanup_text or args.state or args.plan or args.expect_plan:
+                print("native параметры недопустимы для text", file=sys.stderr)
+                failed.append(label)
+                continue
+            _touched, err = run_board(label, cfg, token, args.send)
+        else:
+            try:
+                if not args.board or len(boards) != 1:
+                    raise NativeError('scope')
+                _native_cli(label, cfg, token, args)
+                err = False
+            except NativeError as exc:
+                print(str(exc), file=sys.stderr)
+                if exc.code == 402:
+                    print("Native недоступен по тарифу: нужен новый --mode text dry-run и отдельное согласование; текст не записан", file=sys.stderr)
+                err = True
         if err:
             failed.append(label)
     if failed:
