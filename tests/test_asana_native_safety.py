@@ -86,6 +86,30 @@ class NativeSafety(unittest.TestCase):
                 self.h.apply(plan)
         self.assertEqual(self.h.disk_state()['scopes']['1:10:100']['cleanup']['20']['state'], 'pending')
 
+    def test_targeted_reread_malformed_metadata_is_safe_api_error(self):
+        for field, value in (('projects', None), ('projects', [None]),
+                             ('projects', [{'gid': None}]), ('workspace', None)):
+            with self.subTest(field=field, value=value):
+                plan = self.mixed()
+                original = self.h.api.__call__
+                reads, armed = 0, False
+                def malformed(method, path, token, payload=None):
+                    nonlocal reads, armed
+                    result = original(method, path, token, payload)
+                    if method == 'GET' and path.split('?')[0] == '/tasks/21/dependents':
+                        reads += 1
+                        if reads == 3:
+                            armed = True
+                    if armed and method == 'GET' and path.startswith('/tasks/20?'):
+                        result['data'][field] = copy.deepcopy(value)
+                    return result
+                with mock.patch.object(SUBJECT, 'native_request', side_effect=malformed):
+                    with self.assertRaises(SUBJECT.NativeError) as caught:
+                        self.h.apply(plan)
+                self.assertTrue(armed)
+                self.assertEqual(caught.exception.code, 'api_data')
+                self.assertFalse(any(m == 'PUT' for m, _, _ in self.h.api.mutations))
+
     def test_cleanup_timeout_keeps_pending_without_compensation(self):
         plan = self.mixed()
         self.h.api.failure = 'timeout'
@@ -209,6 +233,27 @@ class NativeSafety(unittest.TestCase):
         self.assertEqual(plan['add'], [['20', '21']])
         self.assertEqual(plan['remove'], [])
         self.assertEqual(self.h.disk_state(), state)
+
+    def test_wrong_attachment_url_type_or_gid_is_rejected(self):
+        self.h.api.attachments['20'] = ['500']
+        self.h.api.downloads['500'] = {'wrong': 'type'}
+        with self.assertRaises(SUBJECT.NativeError):
+            self.h.plan()
+        key = ('GET', '/attachments/500?opt_fields=gid,download_url')
+        self.h.api.overrides[key] = {'data': {'gid': '501', 'download_url': None}}
+        with self.assertRaises(SUBJECT.NativeError):
+            self.h.plan()
+        self.assertEqual(self.h.api.mutations, [])
+
+    def test_owned_present_edge_outside_board_cannot_be_removed(self):
+        self.h.api.add_task('99', 'External')
+        self.h.api.set_edge('20', '99')
+        state = owned_state()
+        state['scopes']['1:10:100']['edges'] = {'20>99': 'owned'}
+        with self.assertRaises(SUBJECT.NativeError) as caught:
+            self.h.plan(cfg({}), state=state)
+        self.assertEqual(caught.exception.code, 'scope')
+        self.assertEqual(self.h.api.mutations, [])
 
     def test_attachment_pagination_cannot_change_parent_filter(self):
         key = ('GET', '/attachments?parent=20&limit=100')

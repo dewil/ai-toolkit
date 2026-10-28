@@ -980,10 +980,21 @@ def _native_url_core(url):
     return urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, query, ''))
 
 
-def _native_description(task, read):
-    if not isinstance(task, dict) or not isinstance(task.get('html_notes'), str):
+def _native_task_shape(task):
+    if (not isinstance(task, dict) or not isinstance(task.get('name'), str)
+            or not isinstance(task.get('html_notes'), str)
+            or not isinstance(task.get('projects'), list)
+            or any(not isinstance(p, dict) for p in task['projects'])
+            or not isinstance(task.get('workspace'), dict)):
         raise NativeError('api_data')
     _native_gid(task.get('gid'))
+    _native_gid(task['workspace'].get('gid'))
+    for project in task['projects']:
+        _native_gid(project.get('gid'))
+
+
+def _native_description(task, read):
+    _native_task_shape(task)
     html = task['html_notes']
     mappings, bindings = {}, []
     for row in read.collection('/attachments?parent=' + task['gid'] + '&limit=100', cap=100):
@@ -1079,11 +1090,8 @@ def _native_snapshot(label, cfg, token, state, cleanup_text):
         if len(tasks) >= 1000:
             raise NativeError('limit')
         t = read.item('/tasks/' + gid + '?opt_fields=gid,name,html_notes,projects,workspace.gid')
-        if (t.get('gid') != gid or not isinstance(t.get('name'), str)
-                or not isinstance(t.get('html_notes'), str)):
-            raise NativeError('api_data')
-        if (not isinstance(t.get('projects'), list) or any(not isinstance(x, dict) or not isinstance(x.get('gid'), str) for x in t['projects'])
-                or not isinstance(t.get('workspace'), dict)):
+        _native_task_shape(t)
+        if t['gid'] != gid:
             raise NativeError('api_data')
         if gid in board_ids and (project not in {x.get('gid') for x in t.get('projects', [])}
                 or (t.get('workspace') or {}).get('gid') != workspace):
