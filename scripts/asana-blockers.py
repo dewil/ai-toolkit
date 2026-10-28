@@ -59,6 +59,7 @@ try:
 except ImportError:  # Legacy text remains usable where Linux locks are absent.
     fcntl = None
 import hashlib
+import http.client
 import socket
 import tempfile
 import urllib.parse
@@ -752,7 +753,7 @@ class NativeError(Exception):
                          "Asana native: " + (code if code in {
                              'timeout', 'network', 'api_data', 'state_invalid',
                              'state_io', 'drift', 'cycle', 'limit', 'scope',
-                             'lock_busy', 'path'} else 'unavailable'))
+                             'lock_busy', 'path', 'unavailable'} else 'unavailable'))
 
 
 def _native_canonical(value):
@@ -785,10 +786,19 @@ def native_request(method, path, token, payload=None):
         with opener.open(req, timeout=30) as response:
             if response.url != API + path:
                 raise NativeError('api_data')
+            declared = response.headers.get('Content-Length')
+            if declared is not None:
+                declared = int(declared)
+                if declared < 0:
+                    raise NativeError('api_data')
+                if declared > 2 * 1024 * 1024:
+                    raise NativeError('limit')
             raw = response.read(2 * 1024 * 1024 + 1)
+            if declared is not None and len(raw) < declared:
+                raise NativeError('network')
             if len(raw) > 2 * 1024 * 1024:
                 raise NativeError('limit')
-            result = json.loads(raw or b'{}')
+            result = json.loads(raw or b'{}', object_pairs_hook=_no_dupe_keys)
             if not isinstance(result, dict):
                 raise NativeError('api_data')
             return result
@@ -798,7 +808,9 @@ def native_request(method, path, token, payload=None):
         raise NativeError(code) from None
     except (TimeoutError, socket.timeout):
         raise NativeError('timeout') from None
-    except urllib.error.URLError:
+    except urllib.error.URLError as exc:
+        raise NativeError('timeout' if isinstance(exc.reason, (TimeoutError, socket.timeout)) else 'network') from None
+    except (http.client.HTTPException, OSError):
         raise NativeError('network') from None
     except (ValueError, UnicodeError):
         raise NativeError('api_data') from None
@@ -827,7 +839,9 @@ class _NativeRead:
         return value
 
     def collection(self, path, cap=1000):
-        route = urllib.parse.urlsplit(path).path
+        initial = urllib.parse.urlsplit(path)
+        route = initial.path
+        filters = [(k, v) for k, v in urllib.parse.parse_qsl(initial.query, keep_blank_values=True) if k not in ('limit', 'offset')]
         seen, result = set(), []
         while path:
             if path in seen:
@@ -846,7 +860,8 @@ class _NativeRead:
                 raise NativeError('api_data')
             url = urllib.parse.urlsplit(nxt['uri'])
             if (url.scheme != 'https' or url.netloc != 'app.asana.com'
-                    or url.path != '/api/1.0' + route or url.fragment):
+                    or url.path != '/api/1.0' + route or url.fragment
+                    or [(k, v) for k, v in urllib.parse.parse_qsl(url.query, keep_blank_values=True) if k not in ('limit', 'offset')] != filters):
                 raise NativeError('api_data')
             path = route + ('?' + url.query if url.query else '')
         return result
@@ -893,7 +908,7 @@ def _native_state(value):
 
 def _native_path(path):
     p = Path(path)
-    if not p.is_absolute() or not p.parent.is_dir():
+    if not p.is_absolute() or '..' in p.parts or not p.parent.is_dir():
         raise NativeError('path')
     if any(x.is_symlink() for x in [p, *p.parents]):
         raise NativeError('path')
@@ -966,14 +981,24 @@ def _native_url_core(url):
 
 
 def _native_description(task, read):
+    if not isinstance(task, dict) or not isinstance(task.get('html_notes'), str):
+        raise NativeError('api_data')
+    _native_gid(task.get('gid'))
     html = task['html_notes']
-    mappings = {}
-    for row in read.collection('/tasks/' + task['gid'] + '/attachments', cap=100):
+    mappings, bindings = {}, []
+    for row in read.collection('/attachments?parent=' + task['gid'] + '&limit=100', cap=100):
         gid = _native_gid(row.get('gid'))
         data = read.item('/attachments/' + gid + '?opt_fields=gid,download_url')
-        if data.get('gid') != gid or not isinstance(data.get('download_url'), str):
+        if data.get('gid') != gid:
             raise NativeError('api_data')
-        core = _native_url_core(data['download_url'])
+        url = data.get('download_url')
+        if url is None:
+            bindings.append((gid, 'unavailable'))
+            continue
+        if not isinstance(url, str):
+            raise NativeError('api_data')
+        core = _native_url_core(url)
+        bindings.append((gid, hashlib.sha256((core if core is not None else url).encode()).hexdigest()))
         if core is not None:
             if core in mappings and mappings[core] != gid:
                 raise NativeError('api_data')
@@ -984,8 +1009,7 @@ def _native_description(task, read):
             return 'ATTACHMENT:' + mappings[core] + ':' + hashlib.sha256(core.encode()).hexdigest()
         return match.group()
     normalized = _NATIVE_URL.sub(replace, html)
-    bindings = sorted((gid, hashlib.sha256(core.encode()).hexdigest()) for core, gid in mappings.items())
-    return hashlib.sha256(normalized.encode()).hexdigest(), bindings
+    return hashlib.sha256(normalized.encode()).hexdigest(), sorted(bindings)
 
 
 def _native_cleanup(task, desired):
@@ -1048,8 +1072,6 @@ def _native_snapshot(label, cfg, token, state, cleanup_text):
             desired.add((a, b))
     owned = state['scopes'].get(key, {}).get('edges', {})
     queue, tasks, deps, dependents, descriptions = list(board_ids), {}, {}, {}, {}
-    if any(g not in board_ids for edge in owned for g in edge.split('>')):
-        raise NativeError('scope')
     while queue:
         gid = queue.pop()
         if gid in tasks:
@@ -1059,6 +1081,9 @@ def _native_snapshot(label, cfg, token, state, cleanup_text):
         t = read.item('/tasks/' + gid + '?opt_fields=gid,name,html_notes,projects,workspace.gid')
         if (t.get('gid') != gid or not isinstance(t.get('name'), str)
                 or not isinstance(t.get('html_notes'), str)):
+            raise NativeError('api_data')
+        if (not isinstance(t.get('projects'), list) or any(not isinstance(x, dict) or not isinstance(x.get('gid'), str) for x in t['projects'])
+                or not isinstance(t.get('workspace'), dict)):
             raise NativeError('api_data')
         if gid in board_ids and (project not in {x.get('gid') for x in t.get('projects', [])}
                 or (t.get('workspace') or {}).get('gid') != workspace):
@@ -1133,7 +1158,12 @@ def build_native_plan(label, cfg, token, state, cleanup_text=False):
 
 
 def apply_native_plan(plan, token, state_path, expected_digest):
-    if not isinstance(plan, dict):
+    required = {'schema_version', 'label', 'cfg', 'scope', 'desired', 'add', 'remove',
+                'cleanup', 'cleanup_text', 'snapshots', 'state_sha256', 'diagnostics', 'digest'}
+    if (not isinstance(plan, dict) or set(plan) != required
+            or type(plan['schema_version']) is not int or plan['schema_version'] != 1
+            or not isinstance(plan['label'], str) or not plan['label'].strip()
+            or not isinstance(plan['cfg'], dict) or type(plan['cleanup_text']) is not bool):
         raise NativeError('drift')
     unsigned = {k: v for k, v in plan.items() if k != 'digest'}
     if expected_digest != plan.get('digest') or expected_digest != _native_hash(unsigned):
@@ -1210,8 +1240,26 @@ def apply_native_plan(plan, token, state_path, expected_digest):
             after_hash, bindings = _native_description(predicted, read)
             row.setdefault('cleanup', {})[gid] = {'state': 'pending', 'before': before_hash, 'after': after_hash}
             persist()
+            # Minimize the non-CAS window: confirmations and durable intent are
+            # finished before this targeted reread of the description to write.
+            latest = read.item('/tasks/' + gid + '?opt_fields=gid,name,html_notes,projects,workspace.gid')
+            if latest.get('gid') != gid:
+                raise NativeError('drift')
+            latest_hash, latest_bindings = _native_description(latest, read)
+            target = expected['tasks'][gid]
+            if (latest_hash != target['description'] or latest_bindings != target['attachments']
+                    or latest.get('name') != target['name']
+                    or sorted(x.get('gid', '') for x in latest.get('projects', [])) != target['projects']
+                    or (latest.get('workspace') or {}).get('gid') != target['workspace']):
+                raise NativeError('drift')
+            html = _native_cleanup(latest, set(map(tuple, fresh['desired'])))
+            if html is None:
+                raise NativeError('drift')
+            current[gid] = latest
             native_request('PUT', '/tasks/' + gid, token, {'html_notes': html})
             actual = read.item('/tasks/' + gid + '?opt_fields=gid,name,html_notes,projects,workspace.gid')
+            if actual.get('gid') != gid:
+                raise NativeError('drift')
             actual_hash, actual_bindings = _native_description(actual, read)
             if (actual_hash != after_hash or actual_bindings != bindings
                     or actual.get('name') != current[gid]['name']
@@ -1244,7 +1292,7 @@ def _native_cli(label, cfg, token, args):
             plan = json.loads(plan_path.read_text(), object_pairs_hook=_no_dupe_keys)
         except (OSError, ValueError):
             raise NativeError('drift') from None
-        if plan.get('label') != label or plan.get('cfg') != cfg or plan.get('cleanup_text') != args.cleanup_text:
+        if not isinstance(plan, dict) or plan.get('label') != label or plan.get('cfg') != cfg or plan.get('cleanup_text') != args.cleanup_text:
             raise NativeError('drift')
         result = apply_native_plan(plan, token, state_path, args.expect_plan)
         print(json.dumps(result, ensure_ascii=False))
@@ -1252,8 +1300,12 @@ def _native_cli(label, cfg, token, args):
     plan = build_native_plan(label, cfg, token, _native_read_state(state_path), args.cleanup_text)
     if plan_path.exists():
         try:
-            previous = json.loads(plan_path.read_text())
-            if previous.get('schema_version') != 1 or previous.get('scope') != plan['scope'] or previous.get('label') != label:
+            if plan_path.stat().st_size > 2 * 1024 * 1024:
+                raise NativeError('path')
+            previous = json.loads(plan_path.read_text(), object_pairs_hook=_no_dupe_keys)
+            if (not isinstance(previous, dict) or set(previous) != set(plan)
+                    or previous.get('digest') != _native_hash({k: v for k, v in previous.items() if k != 'digest'})
+                    or previous.get('schema_version') != 1 or previous.get('scope') != plan['scope'] or previous.get('label') != label):
                 raise NativeError('path')
         except (ValueError, OSError, AttributeError):
             raise NativeError('path') from None
@@ -1293,6 +1345,8 @@ def main() -> int:
         if args.board not in boards:
             sys.exit(f"нет доски '{args.board}' в конфиге. Есть: {', '.join(boards)}")
         boards = {args.board: boards[args.board]}
+    if any((args.mode or cfg.get('mode', 'text')) != 'text' for cfg in boards.values()) and (not args.board or len(boards) != 1):
+        ap.error('native/auto требуют ровно одну явно выбранную --board')
     token = load_token(args.auth)
 
     failed: list[str] = []

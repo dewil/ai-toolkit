@@ -195,8 +195,15 @@ class NativeAPI:
             if route == "/projects/100/tasks":
                 return self.envelope([self.tasks[g] for g in self.board])
 
+            if route == "/attachments":
+                parent = parse_qs(parsed.query).get("parent", [])
+                if len(parent) != 1 or parent[0] not in self.tasks:
+                    raise AssertionError("Invalid attachment parent")
+                return self.envelope(
+                    [{"gid": g} for g in self.attachments.get(parent[0], [])]
+                )
             match = re.fullmatch(
-                r"/tasks/([^/]+)(?:/(dependencies|dependents|attachments))?",
+                r"/tasks/([^/]+)(?:/(dependencies|dependents))?",
                 route,
             )
             if match:
@@ -207,10 +214,6 @@ class NativeAPI:
                     return self.envelope(self.dependency_rows(gid))
                 if collection == "dependents":
                     return self.envelope(self.dependent_rows(gid))
-                if collection == "attachments":
-                    return self.envelope(
-                        [{"gid": g} for g in self.attachments.get(gid, [])]
-                    )
                 return self.envelope(self.tasks[gid])
 
             match = re.fullmatch(r"/attachments/([^/]+)", route)
