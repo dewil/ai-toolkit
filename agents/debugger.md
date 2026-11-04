@@ -3,7 +3,7 @@ name: debugger
 description: Analyzes errors, test failures, and unexpected behavior. Use proactively when any error, exception, or failing test is encountered.
 tools: Read, Edit, Bash, Grep, Glob
 model: sonnet
-effort: low
+effort: medium
 color: red
 ---
 

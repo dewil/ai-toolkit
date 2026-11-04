@@ -26,13 +26,25 @@ Jev дает advisory-оценку сложности и не переопред
 | architect, planner / requirements | claude-opus-5-5 | medium |
 | implementer / этап SDD | claude-sonnet-5-5 | high |
 | implement / проверенный Codex writer | gpt-6-astra | medium |
-| review / Codex audit, second-opinion, advocate, adversarial, compliance | gpt-6.1-sol | medium |
-| review / необратимый эффект или escalation | gpt-6.1-sol | high |
+| review / обычное; фактический автор gpt-6.1-sol | claude-sonnet-5-5 | medium |
+| review / обычное; фактический автор claude-sonnet-5-5 | gpt-6.1-sol | medium |
+| review / необратимый эффект, escalation или debugger/review; фактический автор gpt-6.1-sol | claude-sonnet-5-5 | high |
+| review / необратимый эффект, escalation или debugger/review; фактический автор claude-sonnet-5-5 | gpt-6.1-sol | high |
+| review / Codex audit, second-opinion, advocate, adversarial, compliance; другой установленный автор, при подтвержденной независимости | gpt-6.1-sol | medium; high при необратимом эффекте, escalation или debugger/review |
 | review / отдельно разрешенный Claude reviewer | claude-opus-5-5 | medium; high при необратимом эффекте |
 | test-writer, code-reviewer, copy-editor | claude-sonnet-5-5 | medium |
 | note-taker, note-writer, summarizer / proofread | claude-sonnet-5-5 | medium |
-| debugger, tracker | claude-sonnet-5-5 | low |
+| debugger | claude-sonnet-5-5 | medium |
+| tracker | claude-sonnet-5-5 | low |
 | explorer, searcher, librarian | claude-haiku-5-5 | low |
+
+Для review, включая Codex audit, second-opinion, advocate, adversarial и compliance, сначала установи фактическую модель автора. Каноническая независимая пара - gpt-6.1-sol и claude-sonnet-5-5: проверяет противоположная модель, обычный effort - medium. Для необратимого эффекта, escalation и процедуры debugger/review effort - high. Сам факт авторства debugger в обычном исправлении не переводит review в high. При установленном авторе из канонической пары дополнительный hold из-за выбора пары не нужен; остальные ограничения сохраняются. Дефолт для другого установленного автора применим только после проверки независимости.
+
+При неизвестном или смешанном авторстве останови запуск независимого review до явного определения подходящего маршрута и записи обоснования. Установи автора либо запроси решение owner; при смешанном авторстве обеспечь независимость от каждого значимого автора или раздели проверку по авторству. Автоматического независимого маршрута и угадывающего fallback нет.
+
+Применимое назначение свежего MODELS имеет приоритет над канонической парой и effort. Само отличие от канона не является конфликтом. Если назначение нарушает требуемую независимость или другое обязательное ограничение, явно сообщи конфликт и останови зависимый запуск до его разрешения; не подменяй назначение скрытно ни каноном, ни другим маршрутом. Отдельно разрешенный Claude reviewer сохраняет собственное назначение и также проходит проверку независимости.
+
+Маршрутизация не дает дополнительного разрешения на review, расход квоты/бюджета, доступ или расширение scope и не снимает действующие holds. Локальные пользовательские overrides остаются локальными. Изменение публичных дефолтов не разрешает автосинк клиентских канонов или push непроверенного diff.
 
 SDD использует роль соответствующего этапа. Для остальных навыков выбирай роль фактической работы: поиск/инвентаризация - searcher/explorer/librarian; требования и планирование - planner; подготовка текста - note-writer/summarizer; проверка - code-reviewer/copy-editor; изменение кода - implementer; диагностика - debugger. Скрипты конвертации, синхронизации и подсчета не требуют нового вызова модели только из-за наличия навыка. Специализированные llm-ru и jev-decide сохраняют ограничения провайдера, данных и разрешенных моделей; несовместимое назначение дает конфликт, не передачу данных другому провайдеру.
 
