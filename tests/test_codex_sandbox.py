@@ -86,7 +86,7 @@ class SandboxFixture(unittest.TestCase):
 
     def executable(self, name, body):
         path = self.bin / name
-        path.write_text(f"#!{sys.executable}\n" + body)
+        path.write_text("#!/usr/bin/python3\n" + body)
         path.chmod(0o755)
 
     def invoke(self, mode="audit", target=None, args=(), dry=False, stdin="", python_args=()):
