@@ -59,6 +59,7 @@ universal:
   - agents/planner.md                   # декомпозиция задачи в проверяемые шаги с критериями
   - agents/summarizer.md                # сжатие длинного источника в структурированную заметку
   - skills/review/codex.md  # общая механика Codex для review и implement
+  - skills/review/claude.md # ограниченный пакет Claude: без tools/MCP, с native receipts
   - rules/model-routing.md  # дефолты и актуальные назначения MODELS
   - skills/review/SKILL.md  # независимая проверка: шесть режимов, выбранный исполнитель
   - scripts/codex-sandbox.py           # запуск codex exec в песочнице bwrap: видит только объект работы (для review и implement)
