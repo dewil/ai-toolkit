@@ -61,6 +61,7 @@ universal:
   - skills/review/codex.md  # общая механика Codex для review и implement
   - skills/review/claude.md # ограниченный пакет Claude: без tools/MCP, с native receipts
   - rules/model-routing.md  # дефолты и актуальные назначения MODELS
+  - skills/delivery-goals/SKILL.md       # цели РП и тимлида, ответственность за выпуск и приемку
   - skills/review/SKILL.md  # независимая проверка: шесть режимов, выбранный исполнитель
   - scripts/codex-sandbox.py           # запуск codex exec в песочнице bwrap: видит только объект работы (для review и implement)
   - skills/web-research/SKILL.md        # веб-исследование с проверкой источников
