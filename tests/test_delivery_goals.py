@@ -116,7 +116,16 @@ class DeliveryGoalsBootstrap(unittest.TestCase):
         self.assertEqual(installed.read_bytes(), body)
         self.assertIn(SKILL_PATH, state['source_files'])
         self.assertEqual(state['source_files'][SKILL_PATH]['sha256'], hashlib.sha256(body).hexdigest())
-        # An exact repeat update must be a no-op: up-to-date, no conflicts, no writer classes.
+        # The first sync adopts bootstrap metadata; no-op applies to a subsequent update.
+        first_plan = subprocess.run([sys.executable, str(sync.SCRIPT), 'plan', '--root', str(self.root),
+                                     '--bundle', str(SOURCE)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(first_plan.returncode, 0, first_plan.stdout + first_plan.stderr)
+        first = json.loads(first_plan.stdout)
+        self.assertTrue(first['applicable'], first)
+        adopted = subprocess.run([sys.executable, str(sync.SCRIPT), 'apply', '--root', str(self.root),
+                                  '--bundle', str(SOURCE), '--expect-plan', first['plan_sha256']],
+                                 capture_output=True, text=True, timeout=60)
+        self.assertEqual(adopted.returncode, 0, adopted.stdout + adopted.stderr)
         before = sync.tree(self.root)
         result = subprocess.run([sys.executable, str(sync.SCRIPT), 'plan', '--root', str(self.root),
                                  '--bundle', str(SOURCE)], capture_output=True, text=True, timeout=60)
@@ -151,6 +160,11 @@ class DeliveryGoalsBootstrap(unittest.TestCase):
 
 
 class DeliveryGoalsSync(sync.SyncFixture):
+    def setUp(self):
+        super().setUp()
+        # Adopt bootstrap metadata before testing an already-synchronised client.
+        self.apply()
+
     def test_existing_client_receives_skill_via_sync_and_keeps_local_state(self):
         project = self.root / '.AI/project.md'
         memory = self.root / '.AI/memory/MEMORY.md'
