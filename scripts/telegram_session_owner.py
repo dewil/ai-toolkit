@@ -21,6 +21,8 @@ import shutil
 import stat
 import uuid
 
+from telegram_mirror import Mirror
+
 
 class FloodWait(Exception):
     """The failed RPC had no effect."""
@@ -275,6 +277,9 @@ class Owner:
         self._stepping = False
         self._queue_cursor = ""
         self._sweep_cursor = {"tmp": "", "status": ""}
+        self._destinations = []
+        self._mirrors = []
+        self._pending_events = []
 
     def _optional_inspect(self, path):
         try:
@@ -355,6 +360,43 @@ class Owner:
         destinations = config.get("destinations")
         if not isinstance(destinations, list) or any(not isinstance(d, dict) for d in destinations):
             raise _StartError("INVALID_CONFIG")
+        self._destinations = []
+        ids, paths, inodes = set(), set(), set()
+        for entry in destinations:
+            did = entry.get("destination_id")
+            peer = entry.get("peer")
+            if (not isinstance(did, str) or not did or did in ids
+                    or not (type(peer) is int and peer > 0 or isinstance(peer, str) and peer)
+                    or not isinstance(entry.get("project_config"), dict)):
+                raise _StartError("INVALID_CONFIG")
+            project = _absolute(entry.get("project_root"))
+            dest = entry.get("dest")
+            if not isinstance(dest, str) or not dest:
+                raise _StartError("INVALID_CONFIG")
+            dest = Path(dest)
+            path = dest if dest.is_absolute() else project / dest
+            if ".." in path.parts:
+                raise _StartError("INVALID_CONFIG")
+            path = self._realpath(path)
+            if not dest.is_absolute() and not path.is_relative_to(self._realpath(project)):
+                raise _StartError("INVALID_CONFIG")
+            if path in paths:
+                raise _StartError("INVALID_CONFIG")
+            existing = self._optional_inspect(path)
+            inode = (existing["dev"], existing["ino"]) if existing else None
+            if inode is not None and inode in inodes:
+                raise _StartError("INVALID_CONFIG")
+            # Mirrors may be readable by the project, but never writable by
+            # another UID/group or reached through a substituted symlink.
+            for ancestor in (project, *path.parents, path):
+                info = self._optional_inspect(ancestor)
+                if info is not None and info["kind"] != "dir":
+                    raise _StartError("UNSAFE_PATH")
+            ids.add(did)
+            paths.add(path)
+            if inode is not None:
+                inodes.add(inode)
+            self._destinations.append({**entry, "path": path})
 
     def _acquire(self, path):
         before = self._safe(path, "file", missing=True)
@@ -370,17 +412,98 @@ class Owner:
             raise _StartError("UNSAFE_PATH")
 
     async def _catch_up(self):
-        """Run the startup history boundary; mirror merging is a separate slice."""
-        self._history = []
-        seen = set()
-        for destination in self.config["destinations"]:
-            peer = await self._telegram.resolve(self.account, destination["peer"])
-            key = (peer["kind"], peer["id"])
-            if key in seen:
+        """Drain history before merging queued events, once per canonical peer."""
+        if not self._mirrors:
+            resolved = {}
+            for destination in self._destinations:
+                target = destination["peer"]
+                if target not in resolved:
+                    peer = await self._telegram.resolve(self.account, target)
+                    if (peer.get("account") != self.account or peer.get("kind") not in ("User", "Chat", "Channel")
+                            or type(peer.get("id")) is not int or peer["id"] <= 0):
+                        raise _StartError("INVALID_CONFIG")
+                    resolved[target] = peer
+                self._mirrors.append(Mirror(destination, resolved[target], self.store))
+        await self._sync_mirrors(self._mirrors)
+        if self._pending_events:
+            self._apply_events()
+            # An orphan still absent from a completed history/recent check
+            # cannot be synthesized. All other buffered events were merged.
+            self._pending_events.clear()
+
+    async def _sync_mirrors(self, mirrors):
+        groups = {}
+        for mirror in mirrors:
+            key = (mirror.peer["kind"], mirror.peer["id"])
+            groups.setdefault(key, []).append(mirror)
+        for group in groups.values():
+            cursors = []
+            for mirror in group:
+                with mirror.locked():
+                    data, _ = mirror.load()
+                    cursors.append(mirror.cursor(data))
+            history = await self._telegram.history(group[0].peer, after_id=min(cursors), limit=None)
+            recent = await self._telegram.recent(group[0].peer, limit=50)
+            for mirror, cursor in zip(group, cursors):
+                with mirror.locked():
+                    data, state = mirror.load()
+                    bootstrap = self._optional_inspect(mirror.result) is None
+                    if mirror.merge_history(data, state, history, recent, cursor):
+                        raise ValueError("MIRROR_TOPIC_ROOT_MISSING")
+                    if bootstrap:
+                        state["boundary"] = deepcopy(data)
+                    mirror.commit(data, state)
+
+    def _apply_events(self):
+        needs_catchup = any(e["kind"] == "overflow" for e in self._pending_events)
+        orphans = []
+        for mirror in self._mirrors:
+            batch = [e for e in self._pending_events if e.get("peer") is not None
+                     and all(e["peer"].get(k) == mirror.peer[k] for k in ("account", "kind", "id"))
+                     and e["kind"] in ("new", "edit", "delete", "topic")]
+            if not batch:
                 continue
-            seen.add(key)
-            history = await self._telegram.history(peer, after_id=0, limit=None)
-            self._history.append((peer, history))
+            with mirror.locked():
+                data, state = mirror.load()
+                before = deepcopy((data, state))
+                for event in batch:
+                    if mirror.merge(data, state, event):
+                        needs_catchup = True
+                        if event not in orphans:
+                            orphans.append(event)
+                if (data, state) != before:
+                    mirror.commit(data, state)
+        self._pending_events = orphans
+        return needs_catchup
+
+    async def _refresh(self, request, st):
+        import telegram_owner_client as client
+
+        if "destination_id" in request:
+            matches = [m for m in self._mirrors if m.destination["destination_id"] == request["destination_id"]]
+        else:
+            selector = request["selector"]
+            path = self._realpath(Path(selector["dest"]))
+            matches = [m for m in self._mirrors if m.peer["id"] == selector["peer"]
+                       and m.directory == path]
+        if len(matches) > 1:
+            raise client._Error("INVALID_CONFIG")
+        if not matches:
+            raise client._Error("DESTINATION_NOT_REGISTERED")
+        mirror = matches[0]
+        with mirror.locked():
+            _, state = mirror.load()
+            saved = state.get("refreshes", {}).get(request["request_id"])
+        if saved is not None:
+            self._write_status(request, st, "refreshed", "REFRESHED", result=saved)
+            return
+        await self._sync_mirrors(matches)
+        with mirror.locked():
+            data, state = mirror.load()
+            result = mirror.checkpoint(data, state, request["request_id"], self.clock.utc())
+            # Confirm the complete durable pair before publishing its Reply.
+            mirror.load()
+        self._write_status(request, st, "refreshed", "REFRESHED", result=result)
 
     def _heartbeat(self, state):
         now = self.clock.monotonic()
@@ -398,6 +521,8 @@ class Owner:
             self._validate()
             self._acquire(self.root / "owner.lock")
             self._acquire(self.session_path)
+            if self._optional_inspect(self.root / "heartbeat.json") is not None:
+                self._heartbeat("degraded")
             self._load_pace()
             self._telegram = self.telegram_factory()
             await self._telegram.connect()
@@ -434,10 +559,9 @@ class Owner:
                     progress = True
                 events = await self._telegram.events()
                 if events:
-                    # Keep the batch until the mirror slice supplies its merge.
-                    self._history.append((None, events))
+                    self._pending_events.extend(deepcopy(events))
                     progress = True
-                if any(event["kind"] == "overflow" for event in events):
+                if self._apply_events():
                     self._heartbeat("degraded")
                 else:
                     progress = await self._step_send() or progress
@@ -504,6 +628,8 @@ class Owner:
             st["retain_until"] = st["result"]["at"] + client.WEEK
         if state == "unknown":
             st["next_step"] = "Проверьте результат вручную; автоматический повтор запрещен"
+        if code == "DESTINATION_NOT_REGISTERED":
+            st["next_step"] = "Зарегистрируйте account/chat_id/путь в destinations owner"
         if retry_after_utc is not None:
             st["retry_after_utc"] = retry_after_utc
         for key in ("pace_reservation",):
@@ -731,16 +857,17 @@ class Owner:
                         raise client._Error("REQUEST_EXPIRED")
                     return False
                 _, files = client._validate(request, self.clock)
-                # Refresh/checkpoint processing belongs to the mirror slice.
-                if request["operation"] != "send":
-                    return False
-                at = client._schedule(request, self.clock)
-                if request["schedule"]["remind"]:
-                    at = st["result"].get("at")
-                    if at is None:
-                        at = self.clock.utc() + 180 + self.rng.randint(1, 59)
-                st["result"]["at"] = at
-                copies = self._accept(package, request, files, registry)
+                if request["operation"] == "send":
+                    at = client._schedule(request, self.clock)
+                    if request["schedule"]["remind"]:
+                        at = st["result"].get("at")
+                        if at is None:
+                            at = self.clock.utc() + 180 + self.rng.randint(1, 59)
+                    st["result"]["at"] = at
+                    copies = self._accept(package, request, files, registry)
+            if request["operation"] == "refresh":
+                await self._refresh(request, st)
+                return True
             if request["schedule"]["remind"]:
                 # This must be durable before upload, including on retry.
                 st = self._write_status(request, st, "queued", "QUEUED")
@@ -793,8 +920,11 @@ class Owner:
                 if isinstance(error, Disconnected) or seconds is not None:
                     self._network_failure(error)
                 self._uncertain(request, st)
-            elif seconds is not None or isinstance(error, Disconnected):
+            elif (seconds is not None or isinstance(error, Disconnected)
+                  or request.get("operation") == "refresh" and not isinstance(error, client._Error)):
                 self._network_failure(error)
+                if request.get("operation") == "refresh":
+                    self._degraded()
                 if pace_before is not None:
                     self._pace = pace_before
                     self._save_pace()
@@ -862,6 +992,7 @@ class Owner:
         finally:
             self._telegram = None
             self._started = False
+            self._mirrors = []
             unlock_error = None
             while self._locks:
                 try:
