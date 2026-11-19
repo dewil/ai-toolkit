@@ -135,6 +135,10 @@ class Store:
         return sorted(result)
 
     def read(self, path: Path) -> bytes:
+        return self.read_bounded(path, max_bytes=None)
+
+    def read_bounded(self, path: Path, *, max_bytes: int | None) -> bytes:
+        """Optional bounded read for clients validating JSON or local files."""
         path = Path(path)
         with _directory(path.parent) as parent:
             fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
@@ -142,7 +146,14 @@ class Store:
         with os.fdopen(fd, "rb") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise OSError(errno.EINVAL, "Unsafe file")
-            return stream.read()
+            if max_bytes is None:
+                return stream.read()
+            if os.fstat(stream.fileno()).st_size > max_bytes:
+                raise OSError(errno.EFBIG, "Read limit exceeded")
+            data = stream.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise OSError(errno.EFBIG, "Read limit exceeded")
+            return data
 
     def atomic_write(self, path: Path, data: bytes) -> None:
         path = Path(path)
