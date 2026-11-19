@@ -109,18 +109,18 @@ class Basics(OwnerCase):
         o = self.make()
         good = self.base / "ok.txt"
         good.write_bytes(b"data")
-        bad_specs = {
-            "missing": dict(fspec(good), source=str(self.base / "nope.txt"), name="nope.txt"),
-            "dotdot": dict(fspec(good), source=str(self.base / "x" / ".." / "ok.txt")),
-            "relative": dict(fspec(good), source="ok.txt"),
-            "bad_sha": dict(fspec(good), sha256="0" * 64),
-            "bad_size": dict(fspec(good), size=99),
-            "name_not_basename": dict(fspec(good), name="d/ok.txt"),
+        bad_specs = {  # имя: (спек, код по таблице отказов вложений)
+            "missing": (dict(fspec(good), source=str(self.base / "nope.txt"), name="nope.txt"), "ATTACHMENT_DENIED"),
+            "dotdot": (dict(fspec(good), source=str(self.base / "x" / ".." / "ok.txt")), "INVALID_REQUEST"),
+            "relative": (dict(fspec(good), source="ok.txt"), "INVALID_REQUEST"),
+            "bad_sha": (dict(fspec(good), sha256="0" * 64), "ATTACHMENT_DENIED"),
+            "bad_size": (dict(fspec(good), size=99), "ATTACHMENT_DENIED"),
+            "name_not_basename": (dict(fspec(good), name="d/ok.txt"), "INVALID_REQUEST"),
         }
-        for name, spec in bad_specs.items():
+        for name, (spec, code) in bad_specs.items():
             with self.subTest(name):
                 st = self.deliver(o, send_request("a", files=[spec]))
-                self.assertEqual(st["exit_code"], 2)
+                self.assertEqual((st["state"], st["code"], st["exit_code"]), ("rejected", code, 2))
                 self.assertEqual(o.fake.tg.sends(), [])
                 self.assertEqual(o.fake.tg.uploads(), [])
 
@@ -150,6 +150,71 @@ class Basics(OwnerCase):
         inner.write_bytes(b"x")
         st = self.deliver(o, send_request("a", files=[fspec(inner)]))
         self.assertEqual((st["code"], st["exit_code"]), ("ATTACHMENT_DENIED", 2))
+
+
+class AttachmentCodes(OwnerCase):
+    """Таблица кодов и порядок проверок вложений (спека "Протокол", уточнения 4-5)."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.base / "home"
+        (self.home / ".config" / "telegram-snapshot").mkdir(parents=True)
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.home)
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old else os.environ.pop("HOME", None))
+
+    def code(self, o, files, **over):
+        st = self.deliver(o, send_request("a", files=files, **over))
+        self.assertEqual(o.fake.tg.uploads(), [])
+        self.assertEqual(o.fake.tg.sends(), [])
+        o.fake.clock.advance(1000)
+        return st["state"], st["code"], st["exit_code"]
+
+    def test_foreign_uid_or_unsafe_acl_source_is_unsafe_path(self):  # таблица: UID/mode/ACL
+        for ov in ({"uid": os.getuid() + 1}, {"acl_safe": False}):
+            with self.subTest(ov=ov):
+                store = FakeStore()
+                o = self.make(store=store)
+                f = self.base / f"u{len(ov)}{list(ov)[0]}.txt"
+                f.write_bytes(b"x")
+                store.inspect_override[f] = ov
+                self.assertEqual(self.code(o, [fspec(f)]), ("rejected", "UNSAFE_PATH", 2))
+                run(o.close())
+
+    def test_first_failing_stage_wins(self):  # порядок: схема -> число/размеры -> denylist -> UID -> inspect -> квота
+        o = self.make()
+        secret = Path(self.env.accounts["a"]["auth_path"])
+        good = self.base / "g.txt"
+        good.write_bytes(b"d")
+        # схема раньше denylist
+        rel = dict(fspec(secret), source="auth.json")
+        self.assertEqual(self.code(o, [rel])[1], "INVALID_REQUEST")
+        # число раньше denylist/хеша: 11 файлов, один из них секрет, у остальных неверный sha
+        many = [dict(fspec(good), sha256="0" * 64) for _ in range(10)] + [fspec(secret)]
+        self.assertEqual(self.code(o, many)[1], "LIMIT_EXCEEDED")
+        # заявленный размер выше лимита раньше denylist
+        big = dict(fspec(secret), size=64 * 1024 * 1024 + 1)
+        self.assertEqual(self.code(o, [big])[1], "LIMIT_EXCEEDED")
+        # denylist раньше UID/хеша
+        store = FakeStore()
+        o2 = self.make("b", store=store)
+        store.inspect_override[Path(self.env.accounts["b"]["auth_path"])] = {"uid": os.getuid() + 1}
+        st = self.deliver(o2, send_request("b", files=[dict(fspec(Path(self.env.accounts["b"]["auth_path"])),
+                                                              sha256="0" * 64)]), acc="b")
+        self.assertEqual(st["code"], "ATTACHMENT_DENIED")
+
+    def test_growth_past_limit_during_bounded_copy_is_limit_exceeded(self):  # спека: рост файла
+        store = FakeStore()
+        o = self.make(store=store)
+        f = self.base / "grow.bin"
+        f.write_bytes(b"0123456789")
+        import errno
+
+        def too_big(source, dest, *, max_bytes):
+            raise OSError(errno.EFBIG, "grew")
+
+        store.snapshot = too_big
+        self.assertEqual(self.code(o, [fspec(f)]), ("rejected", "LIMIT_EXCEEDED", 2))
 
 
 class AccountIsolation(OwnerCase):
@@ -376,6 +441,46 @@ class Schedule(OwnerCase):
         st = self.deliver(o, send_request("a", peer="me", schedule=self.sched(at)))
         self.assertEqual((st["state"], st["exit_code"]), ("scheduled", 0))
         self.assertEqual(st["result"]["verification"], "unavailable_saved_near")
+
+
+class NearMe(OwnerCase):
+    """Решение dwl 19.11 (8): без доступной сверки Saved Messages успех при 0 < at - now <= 180 с
+    на момент сверки (после API ack); явный mismatch всегда unknown."""
+
+    def attempt(self, *, lead_at_verification, peer="me", scheduled=None, base_lead=300):
+        o = self.make()
+        at = NOW + base_lead
+        o.fake.tg.scheduled_data = [] if scheduled is None else scheduled
+        o.fake.tg.send_results = [{"message_ids": [], "scheduled_ids": [901], "at": at}]
+        # к моменту сверки часы уходят так, что до срока остается lead_at_verification
+        shift = base_lead - lead_at_verification
+        o.fake.tg.hooks["send"] = lambda: o.fake.clock.advance(shift)
+        sch = {"at": iso(at), "timezone": None, "exact_minute": False, "remind": False}
+        st = self.deliver(o, send_request("a", peer=peer, schedule=sch))
+        run(o.close())
+        return st
+
+    def test_boundaries_180_inclusive_181_and_zero_not(self):  # F19
+        cases = ((125, True), (1, True), (180, True), (181, False), (0, False), (-5, False))
+        for lead, ok in cases:
+            with self.subTest(lead=lead):
+                st = self.attempt(lead_at_verification=lead)
+                if ok:
+                    self.assertEqual((st["state"], st["code"], st["exit_code"]), ("scheduled", "SCHEDULED", 0))
+                    self.assertEqual(st["result"]["verification"], "unavailable_saved_near")
+                else:
+                    self.assertEqual((st["state"], st["code"], st["exit_code"]), ("unknown", "SEND_UNCERTAIN", 4))
+
+    def test_explicit_mismatch_is_unknown_even_when_near(self):  # F19
+        for bad in ({"id": 901, "at": NOW + 600.0, "text": "Проверка"},
+                    {"id": 901, "at": NOW + 300.0, "text": "Другой"}):
+            with self.subTest(bad=bad):
+                st = self.attempt(lead_at_verification=125, scheduled=[bad])
+                self.assertEqual((st["state"], st["code"], st["exit_code"]), ("unknown", "SEND_UNCERTAIN", 4))
+
+    def test_near_not_saved_messages_is_unknown(self):  # F19: fallback только для me
+        st = self.attempt(lead_at_verification=125, peer=77)
+        self.assertEqual((st["state"], st["code"], st["exit_code"]), ("unknown", "SEND_UNCERTAIN", 4))
 
 
 class Remind(OwnerCase):
@@ -627,6 +732,179 @@ class Retention(OwnerCase):
         self.assertIsNotNone(read_status(self.env.root("a"), unk_req["request_id"]))
 
 
+class TmpWriterLock(OwnerCase):
+    """Старый tmp удаляется только при возрасте >3600 с и захваченном writer-lock под quota.lock
+    (уточнение 15, спека "Доставка и безопасность")."""
+
+    def old_tmp(self, age):
+        d = write_package(self.env.root("a"), send_request("a"), where="tmp")
+        lock = d / ".writer.lock"
+        lock.write_bytes(b"")
+        os.chmod(lock, 0o600)
+        for p in (lock, d / "request.json", d):
+            os.utime(p, (NOW - age, NOW - age))
+        return d
+
+    def test_age_boundary_strictly_over_3600(self):
+        o = self.make()
+        exact, over = self.old_tmp(3600), self.old_tmp(3601)
+        run(o.step())
+        self.assertTrue(exact.exists())
+        self.assertFalse(over.exists())
+
+    def test_active_writer_lock_protects_old_tmp_then_released(self):
+        o = self.make()
+        d = self.old_tmp(7200)
+        writer = FakeStore().lock(d / ".writer.lock")  # активный писатель (другой дескриптор)
+        for _ in range(3):
+            run(o.step())
+        self.assertTrue(d.exists(), "tmp с активным writer-lock удален по одному возрасту")
+        self.assertEqual(o.fake.clock.async_sleeps, [])
+        writer.__exit__(None, None, None)
+        run(o.step())
+        self.assertFalse(d.exists())
+
+    def test_cleanup_takes_quota_lock_before_writer_lock_and_removal(self):
+        store = FakeStore()
+        o = self.make(store=store)
+        d = self.old_tmp(7200)
+        store.log.clear()
+        run(o.step())
+        self.assertFalse(d.exists())
+        order = [(e[0], str(e[1])) for e in store.log if e[0] in ("lock", "remove")]
+        idx = lambda kind, sub: next(i for i, (k, p) in enumerate(order) if k == kind and sub in p)  # noqa: E731
+        self.assertLess(idx("lock", "quota.lock"), idx("lock", ".writer.lock"))
+        self.assertLess(idx("lock", ".writer.lock"), idx("remove", str(d.name)))
+
+
+class QuotaLockOwner(OwnerCase):
+    def test_accept_goes_under_quota_lock(self):  # F22: общий резерв квоты
+        store = FakeStore()
+        o = self.make(store=store)
+        self.deliver_ok(o)
+        self.assertTrue(any(e[0] == "lock" and e[1].name == "quota.lock" for e in store.log))
+
+    def test_busy_quota_lock_defers_accept_without_spin_or_overquota(self):  # F22: Busy != свободная квота
+        o = self.make()
+        req = send_request("a")
+        write_package(self.env.root("a"), req)
+        holder = FakeStore().lock(self.env.root("a") / "quota.lock")
+        for _ in range(3):
+            run(o.step())
+        self.assertEqual(o.fake.tg.sends(), [])
+        self.assertNotEqual((read_status(self.env.root("a"), req["request_id"]) or {}).get("state"), "sent")
+        self.assertEqual(o.fake.clock.async_sleeps, [])
+        holder.__exit__(None, None, None)
+        for _ in range(4):
+            run(o.step())
+        self.assertEqual(read_status(self.env.root("a"), req["request_id"])["state"], "sent")
+
+
+class TtlSweep(OwnerCase):
+    """Спека "Доставка и безопасность": step чистит просроченное: outbox целиком, затем status (уточнение 10)."""
+
+    def sweep(self, o, n=5):
+        for _ in range(n):
+            run(o.step())
+
+    def exists(self, kind, rid):
+        root = self.env.root("a")
+        return (root / ("outbox" if kind == "outbox" else "status") /
+                (rid if kind == "outbox" else f"{rid}.json")).exists()
+
+    def test_sent_retain_until_is_completion_plus_7_days_and_boundary(self):  # F22/Q4
+        o = self.make()
+        req, st = self.deliver_ok(o)
+        self.assertAlmostEqual(st["retain_until"], o.fake.clock.utc() + 7 * 86400, delta=5)
+        rid, until = req["request_id"], st["retain_until"]
+        o.fake.clock.advance(until - o.fake.clock.utc() - 1)
+        self.sweep(o)
+        self.assertTrue(self.exists("outbox", rid) and self.exists("status", rid))
+        o.fake.clock.advance(1)  # utc >= retain_until
+        self.sweep(o)
+        self.assertFalse(self.exists("outbox", rid))
+        self.assertFalse(self.exists("status", rid))
+
+    def test_outbox_removed_before_status(self):  # F22: status последним
+        store = FakeStore()
+        o = self.make(store=store)
+        req, st = self.deliver_ok(o)
+        o.fake.clock.advance(7 * 86400 + 5)
+        self.sweep(o)
+        rid = req["request_id"]
+        removed = [str(e[1]) for e in store.log if e[0] == "remove"]
+        ob = [i for i, p in enumerate(removed) if f"outbox/{rid}" in p]
+        stt = [i for i, p in enumerate(removed) if f"status/{rid}.json" in p]
+        self.assertTrue(ob and stt, removed)
+        self.assertLess(max(ob), min(stt))
+
+    def test_rejected_gets_ttl_too(self):  # F22
+        o = self.make()
+        bad = send_request("a")
+        del bad["target"]
+        st = self.deliver(o, bad)
+        self.assertEqual(st["state"], "rejected")
+        self.assertAlmostEqual(st["retain_until"], o.fake.clock.utc() + 7 * 86400, delta=5)
+        o.fake.clock.advance(7 * 86400 + 5)
+        self.sweep(o)
+        self.assertFalse(self.exists("status", bad["request_id"]))
+
+    def test_scheduled_kept_until_at_plus_7_days(self):  # Q4
+        o = self.make()
+        at = NOW + 3607
+        o.fake.tg.scheduled_data = [{"id": 900, "at": float(at), "text": "Проверка"}]
+        o.fake.tg.send_results = [{"message_ids": [], "scheduled_ids": [900], "at": float(at)}]
+        sch = {"at": iso(at), "timezone": None, "exact_minute": False, "remind": False}
+        req = send_request("a", peer=77, schedule=sch)
+        st = self.deliver(o, req)
+        self.assertEqual(st["state"], "scheduled")
+        self.assertEqual(st["retain_until"], at + 7 * 86400)
+        rid = req["request_id"]
+        o.fake.clock.advance(7 * 86400 + 100)  # позже завершения+7д, но раньше at+7д
+        self.sweep(o)
+        self.assertTrue(self.exists("status", rid))
+        o.fake.clock.advance(at + 7 * 86400 - o.fake.clock.utc())
+        self.sweep(o)
+        self.assertFalse(self.exists("status", rid))
+        self.assertFalse(self.exists("outbox", rid))
+
+    def test_unknown_retain_until_null_and_kept_long_after(self):  # Q3/Q4
+        tg = FakeTelegram("a")
+        tg.send_results = [import_owner().SendUncertain(message_ids=[])]
+        o = self.make(tg=tg)
+        req, st = self.deliver_ok(o)
+        self.assertEqual(st["state"], "unknown")
+        self.assertIsNone(st["retain_until"])
+        o.fake.clock.advance(60 * 86400)
+        self.sweep(o)
+        self.assertTrue(self.exists("status", req["request_id"]) and self.exists("outbox", req["request_id"]))
+
+    def test_missing_outbox_does_not_block_status_removal(self):  # F22
+        o = self.make()
+        req, st = self.deliver_ok(o)
+        import shutil
+        shutil.rmtree(self.env.root("a") / "outbox" / req["request_id"])
+        o.fake.clock.advance(7 * 86400 + 5)
+        self.sweep(o)
+        self.assertFalse(self.exists("status", req["request_id"]))
+
+    def test_outbox_removal_failure_keeps_status_until_next_attempt(self):  # F22
+        store = FakeStore()
+        o = self.make(store=store)
+        req, st = self.deliver_ok(o)
+        rid = req["request_id"]
+        o.fake.clock.advance(7 * 86400 + 5)
+        store.fail_on[("remove", f"outbox/{rid}")] = ("before", OSError("busy"))
+        try:
+            self.sweep(o, 1)
+        except OSError:
+            pass
+        self.assertTrue(self.exists("status", rid))
+        self.sweep(o)
+        self.assertFalse(self.exists("outbox", rid))
+        self.assertFalse(self.exists("status", rid))
+
+
 class Crash(OwnerCase):
     def test_status_sending_found_after_restart_becomes_unknown_no_resend(self):  # F13
         o = self.make()
@@ -740,6 +1018,105 @@ class Backoff(OwnerCase):
         run(o.step())
         self.assertEqual(read_status(self.env.root("a"), req["request_id"])["state"], "sent")
         self.assertEqual(len(tg.sends()), n + 1)
+
+    def test_flood_wait_keeps_queued_and_retries_with_same_schedule_after_deadline(self):  # F21, решение dwl 14
+        tg = FakeTelegram("a")
+        at = NOW + 3607
+        tg.send_results = [FloodWait(30), {"message_ids": [], "scheduled_ids": [900], "at": float(at)}]
+        tg.scheduled_data = [{"id": 900, "at": float(at), "text": "Проверка"}]
+        o = self.make(tg=tg)
+        sch = {"at": iso(at), "timezone": None, "exact_minute": False, "remind": False}
+        req = send_request("a", peer=77, schedule=sch)
+        write_package(self.env.root("a"), req)
+        run(o.step())
+        st = read_status(self.env.root("a"), req["request_id"])
+        self.assertEqual((st["state"], st["code"], st["exit_code"]), ("queued", "QUEUED", 0))
+        o.fake.clock.advance(31)
+        for _ in range(3):
+            run(o.step())
+        st = read_status(self.env.root("a"), req["request_id"])
+        self.assertEqual((st["state"], st["code"]), ("scheduled", "SCHEDULED"))
+        first, second = tg.sends()
+        self.assertEqual(first[1]["schedule"]["at"], second[1]["schedule"]["at"])  # срок не сдвинут
+        self.assertEqual(to_unix(second[1]["schedule"]["at"]), float(at))
+        self.assertEqual(o.fake.clock.async_sleeps, [])
+
+    def test_flood_wait_remind_keeps_effective_time_and_rng_once(self):  # F18/F21
+        rng = FakeRNG(randint=1)
+        tg = FakeTelegram("a")
+        tg.send_results = [FloodWait(30), {"message_ids": [], "scheduled_ids": [5], "at": NOW + 181.0}]
+        tg.scheduled_data = [{"id": 5, "at": NOW + 181.0, "text": "Напомнить"}]
+        o = self.make(tg=tg, rng=rng)
+        req = send_request("a", peer="me", text="Напомнить",
+                           schedule={"at": None, "timezone": None, "exact_minute": False, "remind": True})
+        write_package(self.env.root("a"), req)
+        run(o.step())
+        at1 = (read_status(self.env.root("a"), req["request_id"]) or {}).get("result", {}).get("at")
+        o.fake.clock.advance(31)
+        for _ in range(3):
+            run(o.step())
+        first, second = tg.sends()
+        self.assertEqual(to_unix(first[1]["schedule"]["at"]), NOW + 181)
+        self.assertEqual(first[1]["schedule"]["at"], second[1]["schedule"]["at"])
+        self.assertEqual(rng.randint_calls, [(1, 59)])
+        if at1 is not None:
+            self.assertEqual(to_unix(at1), NOW + 181)
+
+    def test_flood_wait_expired_request_rejected_without_retry(self):  # F21, решение dwl 14
+        tg = FakeTelegram("a")
+        tg.send_results = [FloodWait(30)]
+        o = self.make(tg=tg)
+        req = send_request("a", expires_at=int(NOW) + 20)
+        write_package(self.env.root("a"), req)
+        run(o.step())
+        o.fake.clock.advance(31)  # expires_at истек, срок FloodWait прошел
+        for _ in range(3):
+            run(o.step())
+        st = read_status(self.env.root("a"), req["request_id"])
+        self.assertEqual((st["state"], st["code"], st["exit_code"]), ("rejected", "REQUEST_EXPIRED", 2))
+        self.assertEqual(len(tg.sends()), 1)
+
+    def test_flood_wait_blocks_new_rpc_of_same_account_until_deadline(self):  # F21/F26
+        tg = FakeTelegram("a")
+        tg.send_results = [FloodWait(60)]
+        o = self.make(tg=tg)
+        write_package(self.env.root("a"), send_request("a"))
+        run(o.step())
+        other = send_request("a", text="другой", peer=42)
+        write_package(self.env.root("a"), other)
+        for _ in range(3):
+            run(o.step())
+        self.assertEqual(len(tg.sends()), 1)  # новых RPC аккаунта нет до срока
+        o.fake.clock.advance(61)
+        for _ in range(4):
+            run(o.step())
+        self.assertEqual(read_status(self.env.root("a"), other["request_id"])["state"], "sent")
+
+    def test_disconnected_from_send_is_unknown_and_never_resent(self):  # F13/F21
+        tg = FakeTelegram("a")
+        tg.send_results = [import_owner().Disconnected()]
+        o = self.make(tg=tg)
+        req = send_request("a")
+        st = self.deliver(o, req)
+        self.assertEqual((st["state"], st["code"], st["exit_code"]), ("unknown", "SEND_UNCERTAIN", 4))
+        o.fake.clock.advance(120)
+        for _ in range(4):
+            run(o.step())
+        self.assertEqual(len(tg.sends()), 1)
+        self.assertEqual(read_status(self.env.root("a"), req["request_id"])["state"], "unknown")
+
+    def test_disconnected_before_send_backoff_15s_monotonic(self):  # F21
+        o = self.make()
+        o.fake.tg.raises["events"] = import_owner().Disconnected()
+        run(o.step())
+        n = len(o.fake.tg.calls)
+        o.fake.clock.advance(14.9)
+        run(o.step())
+        self.assertEqual(len(o.fake.tg.calls), n, "сеть вызвана до срока backoff")
+        o.fake.clock.advance(0.1)
+        run(o.step())
+        self.assertGreater(len(o.fake.tg.calls), n)
+        self.assertEqual(o.fake.clock.async_sleeps, [])
 
     def test_disconnected_in_events_does_not_raise_or_spin(self):  # F21
         o = self.make()

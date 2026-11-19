@@ -95,6 +95,11 @@ class FloodWait(Exception):
         self.seconds = seconds
 
 
+def _eid(m: dict) -> int:
+    """id элемента history: у service-элемента темы он внутри record."""
+    return m["id"] if "id" in m else m.get("record", {}).get("id", 0)
+
+
 class FakeTelegram:
     """Telegram-порт: записывает вызовы, отдает заданные ответы."""
 
@@ -144,7 +149,7 @@ class FakeTelegram:
 
     async def history(self, peer, *, after_id, limit):
         self._log("history", peer, after_id, limit)
-        return [m for m in self.history_data if m["id"] > after_id]
+        return [m for m in self.history_data if _eid(m) > after_id]
 
     async def recent(self, peer, *, limit):
         self._log("recent", peer, limit)

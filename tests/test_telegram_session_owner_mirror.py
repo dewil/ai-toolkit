@@ -274,6 +274,92 @@ class Revisions(MirrorCase):
         self.assertEqual(ids_of(self.mirror), [100])
 
 
+def topic_rec(i, title="Тема", **extra):
+    r = {"id": i, "title": title, "date": "2026-11-19T10:00:00", "date_unixtime": "1797674400",
+         "icon_color": None}
+    r.update(extra)
+    return r
+
+
+def topics_of(path: Path):
+    return load(path)["topics"]
+
+
+class Topics(MirrorCase):
+    """Уточнение 16: topic.record, переименование (patch {id,title}), merge по revision, сортировка по id."""
+
+    def run_events(self, *batches, mirror_extra=None, history=None):
+        write_mirror(self.mirror, [100], **(mirror_extra or {}))
+        tg = FakeTelegram("a")
+        tg.event_batches = list(batches)
+        tg.history_data = history or []
+        o = self.started(tg=tg)
+        self.step_all(o, n=10)
+        return o, tg
+
+    def test_create_event_adds_topic_not_message(self):  # F7
+        self.run_events([ev("topic", topic_rec(77), rev=(NOW, 1))])
+        self.assertEqual(topics_of(self.mirror), [topic_rec(77)])
+        self.assertEqual(ids_of(self.mirror), [100])  # обычное сообщение не добавлено
+
+    def test_rename_patch_keeps_other_fields(self):  # F7/F8
+        full = topic_rec(77, "Старое", icon_color=7322096)
+        self.run_events([ev("topic", full, rev=(NOW, 1))],
+                        [ev("topic", {"id": 77, "title": "Новое"}, rev=(NOW, 2))])
+        (t,) = topics_of(self.mirror)
+        self.assertEqual(t, dict(full, title="Новое"))
+
+    def test_stale_and_equal_revision_do_not_change_topic(self):  # F8
+        self.run_events([ev("topic", topic_rec(77, "B"), rev=(NOW, 2))],
+                        [ev("topic", {"id": 77, "title": "A"}, rev=(NOW, 1))],   # устарела
+                        [ev("topic", {"id": 77, "title": "C"}, rev=(NOW, 2))])   # равная = дубль
+        self.assertEqual(topics_of(self.mirror)[0]["title"], "B")
+
+    def test_newer_unix_time_wins_over_sequence(self):  # F8
+        self.run_events([ev("topic", topic_rec(77, "old"), rev=(NOW, 9))],
+                        [ev("topic", {"id": 77, "title": "new"}, rev=(NOW + 1, 1))])
+        self.assertEqual(topics_of(self.mirror)[0]["title"], "new")
+
+    def test_topics_sorted_by_id(self):  # F8
+        self.run_events([ev("topic", topic_rec(90), rev=(NOW, 1)), ev("topic", topic_rec(77), rev=(NOW, 2))])
+        self.assertEqual([t["id"] for t in topics_of(self.mirror)], [77, 90])
+
+    def test_rename_without_root_does_not_invent_topic_and_triggers_catchup(self):  # F8/F9
+        o, tg = self.run_events([ev("topic", {"id": 99, "title": "Призрак"}, rev=(NOW, 1))])
+        self.assertEqual(topics_of(self.mirror), [])
+        hist_after_start = len([c for c in tg.calls if c[0] == "history"])
+        hb = json.loads((self.env.root("a") / "heartbeat.json").read_text())["state"]
+        self.assertTrue(hist_after_start >= 2 or hb == "degraded")  # сверка либо degraded
+
+    def test_message_in_topic_keeps_topic_id_and_reply_field(self):  # F7
+        self.run_events([ev("topic", topic_rec(77), rev=(NOW, 1))],
+                        [ev("new", rec(101, topic_id=77, reply_to_message_id=77), rev=(NOW, 2))])
+        msg = [m for m in load(self.mirror)["messages"] if m["id"] == 101][0]
+        self.assertEqual((msg["topic_id"], msg["reply_to_message_id"]), (77, 77))
+
+    def test_service_topic_elements_in_history_merge_into_topics(self):  # F7: history/recent
+        hist = [{"kind": "topic", "record": topic_rec(120, "Из истории"), "revision": [NOW, 1]}, rec(121)]
+        self.run_events(history=hist)
+        self.assertEqual([t["id"] for t in topics_of(self.mirror)], [120])
+        self.assertEqual(ids_of(self.mirror), [100, 121])
+
+    def test_cursor_counts_topic_ids(self):  # F5: курсор - максимум id из messages и topics
+        write_mirror(self.mirror, [100], topics=[topic_rec(150)])
+        tg = FakeTelegram("a")
+        tg.history_data = [rec(120), rec(151)]
+        self.started(tg=tg)
+        self.assertEqual([c for c in tg.calls if c[0] == "history"][0][2], 150)
+        self.assertEqual(ids_of(self.mirror), [100, 151])
+
+    def test_topic_filter_does_not_limit_subscription(self):  # F5: topic_id - фильтр отчета, не подписки
+        d = self.env.destination("d1", 1001, "chat1")
+        d["project_config"] = {"topic_id": 77}
+        tg = FakeTelegram("a")
+        tg.history_data = [rec(1, topic_id=77), rec(2, topic_id=88), rec(3)]
+        self.started(dests=[d], tg=tg)
+        self.assertEqual(ids_of(self.mirror), [1, 2, 3])
+
+
 class CatchUp(MirrorCase):
     def test_long_downtime_beyond_edit_window_pulls_all_by_id(self):  # F9
         write_mirror(self.mirror, [100])
@@ -493,6 +579,56 @@ class Crash(MirrorCase):
                     self.assertEqual(r["code"], "READY", r)
                     run(o2.close())
                     self.assertEqual(ids_of(mirror), [100, 101, 102, 103])
+
+    def test_real_store_failure_injection_keeps_whole_json_and_no_loss(self):  # F6, уточнение 13
+        mod = import_owner()
+
+        class Flaky:
+            """Обертка над реальным Store(): сбой на n-й записи зеркала до/после настоящей записи."""
+
+            def __init__(self, n, when):
+                self._real, self._n, self._when, self._cnt = mod.Store(), n, when, 0
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def atomic_write(self, path, data):
+                if "result" not in Path(path).name or Path(path).name.endswith(".prev.json"):
+                    return self._real.atomic_write(path, data)
+                self._cnt += 1
+                if self._cnt == self._n and self._when == "before":
+                    raise OSError("crash before")
+                self._real.atomic_write(path, data)
+                if self._cnt == self._n and self._when == "after":
+                    raise OSError("crash after")
+
+        for n in (1, 2, 3):
+            for when in ("before", "after"):
+                with self.subTest(n=n, when=when):
+                    mirror = self.env.projects / f"r{n}{when}" / "result.json"
+                    write_mirror(mirror, [100])
+                    dest = self.env.destination("d1", 1001, str(mirror.parent))
+                    tg = FakeTelegram("a")
+                    tg.history_data = [rec(101), rec(102)]
+                    tg.event_batches = [[ev("new", rec(103))]]
+                    o = self.env.make_owner("a", destinations=[dest], store=Flaky(n, when), tg=tg)
+                    try:
+                        run(o.start())
+                        self.step_all(o)
+                    except OSError:
+                        pass
+                    try:
+                        run(o.close())
+                    except OSError:
+                        pass
+                    json.loads(mirror.read_text(encoding="utf-8"))
+                    tg2 = FakeTelegram("a")
+                    tg2.history_data = [rec(101), rec(102), rec(103)]
+                    o2 = self.env.make_owner("a", destinations=[dest], tg=tg2, store=mod.Store())
+                    self.assertEqual(run(o2.start())["code"], "READY")
+                    run(o2.close())
+                    self.assertEqual(ids_of(mirror), [100, 101, 102, 103])
+                    self.assertEqual([p.name for p in mirror.parent.iterdir() if p.name.endswith(".tmp")], [])
 
     def test_second_destination_failure_keeps_first_updated(self):  # F6
         d1 = self.env.destination("d1", 1001, "c1")

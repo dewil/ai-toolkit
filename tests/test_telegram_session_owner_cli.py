@@ -329,6 +329,58 @@ class OwnerRouting(CliCase):
         self.assertNotIn("files", req)
 
 
+def tree(root: Path):
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+
+class DryRun(CliCase):
+    """Решение dwl 19.11 (6): dry-run в owner-режиме - локально, без сети и записей в спул:
+    проверяет заявку/лимиты, печатает "адресат не проверен"; 0 при пригодной заявке, 2 при отказе."""
+
+    ARGV = {"send": ["--to", "chat", "--text", "hi"], "send-one": ["1001", "--text", "hi"]}
+
+    def setup_owner(self, **project):
+        root = self.ctx.roots["default"]
+        heartbeat_now(root)
+        owner = FakeOwnerThread(root)
+        owner.start()
+        self.addCleanup(owner.stop)
+        self.ctx.project(owner_root=str(root), **project)
+        return root, owner
+
+    def test_dry_run_ok_prints_unverified_addressee_no_side_effects(self):  # F2/F20
+        root, owner = self.setup_owner()
+        before = tree(root)
+        for name, argv in self.ARGV.items():
+            with self.subTest(name):
+                code, out, err, reached = run_cli(name, self.ctx, argv=argv)
+                self.assertEqual(code, 0, err[-300:])
+                self.assertFalse(reached)
+                self.assertIn("адресат не проверен", (out + err).lower())
+                self.assertNotIn("AuthTouched", err)
+        self.assertEqual(tree(root), before)  # ни tmp/outbox/status/quota.lock, ни темпа
+        self.assertEqual(owner.seen, [])  # пакет не публиковался
+
+    def test_dry_run_local_check_failure_is_2_without_side_effects(self):  # F20/F22
+        root, owner = self.setup_owner()
+        before = tree(root)
+        for name, argv in (("send", ["--to", "chat", "--text", "я" * 5000]),
+                           ("send-one", ["1001", "--text", "я" * 5000])):
+            with self.subTest(name):
+                code, out, err, reached = run_cli(name, self.ctx, argv=argv)
+                self.assertEqual(code, 2, err[-300:])
+                self.assertFalse(reached)
+        self.assertEqual(tree(root), before)
+        self.assertEqual(owner.seen, [])
+
+    def test_dry_run_does_not_check_addressee_over_network(self):  # F20: без resolve/SSH/auth
+        root, owner = self.setup_owner()
+        code, out, err, reached = run_cli("send-one", self.ctx, argv=["1001", "--text", "hi"])
+        self.assertEqual(code, 0, err[-300:])
+        self.assertFalse(reached)  # TelegramClient не создан
+        self.assertNotIn("AuthTouched", err)
+
+
 class AccountRouting(CliCase):
     def two_owners(self):
         threads = {}

@@ -283,5 +283,75 @@ class Limits(Base):
         self.assertEqual(r["code"], "QUEUE_FULL")
 
 
+class QuotaRace(Base):
+    """Спека: quota.lock общий, резерв атомарен - параллельные приемы не тратят один остаток (уточнение 15)."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = import_client()
+        self.root = self.env.root("a")
+        self.clock = FakeClock()
+        write_heartbeat(self.root, now=self.clock.utc())
+
+    def race(self, requests):
+        import threading
+        barrier = threading.Barrier(len(requests))
+        results = [None] * len(requests)
+
+        def work(i, req):
+            barrier.wait()
+            results[i] = self.c.submit(self.root, req, clock=FakeClock(), timeout=0)
+
+        threads = [threading.Thread(target=work, args=(i, r)) for i, r in enumerate(requests)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        return results
+
+    def spool_count(self):
+        n = 0
+        for d in ("outbox", "tmp"):
+            if (self.root / d).exists():
+                n += len(list((self.root / d).iterdir()))
+        return n
+
+    def test_race_for_last_package_slots_never_exceeds_quota(self):  # F22
+        for _ in range(98):
+            write_package(self.root, send_request("a"))
+        results = self.race([send_request("a") for _ in range(8)])
+        accepted = [r for r in results if r["code"] != "QUEUE_FULL"]
+        self.assertEqual(len(accepted), 2, [r["code"] for r in results])
+        self.assertEqual(sum(1 for r in results if r["code"] == "QUEUE_FULL"), 6)
+        self.assertEqual(self.spool_count(), 100)
+
+    def test_race_for_last_bytes_only_one_fits(self):  # F22: 512 MiB спула
+        big = self.root / "outbox" / str(uuid.uuid4())
+        big.mkdir(parents=True, mode=0o700)
+        with open(big / "payload.bin", "wb") as fh:
+            fh.truncate(512 * 1024 * 1024 - 1536 * 1024)  # остается 1.5 MiB
+        import hashlib
+        reqs = []
+        for i in range(2):
+            f = self.base / f"att{i}.bin"
+            f.write_bytes(b"a" * (1024 * 1024))
+            spec = {"source": str(f), "name": f.name, "size": 1024 * 1024,
+                    "sha256": hashlib.sha256(b"a" * (1024 * 1024)).hexdigest()}
+            reqs.append(send_request("a", files=[spec]))
+        results = self.race(reqs)
+        codes = sorted(r["code"] for r in results)
+        self.assertEqual(codes.count("QUEUE_FULL"), 1, codes)
+
+    def test_rejection_releases_reservation(self):  # F22: отказ снимает резерв
+        pkgs = [write_package(self.root, send_request("a")) for _ in range(100)]
+        for _ in range(3):
+            self.assertEqual(self.c.submit(self.root, send_request("a"), clock=self.clock,
+                                           timeout=0)["code"], "QUEUE_FULL")
+        import shutil
+        shutil.rmtree(pkgs[0])
+        r = self.c.submit(self.root, send_request("a"), clock=self.clock, timeout=0)
+        self.assertNotEqual(r["code"], "QUEUE_FULL")  # освободилось ровно одно место
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

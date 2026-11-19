@@ -176,6 +176,12 @@ class Registry(Base):
 
 
 class Locks(Base):
+    """F1 с реальными процессами/ФС. Базовый класс гоняет FakeStore (реальные flock),
+    LocksRealStore - публичный адаптер telegram_session_owner.Store() (уточнение 13)."""
+
+    def _store(self):
+        return FakeStore()
+
     def _hold(self, path) -> subprocess.Popen:
         p = subprocess.Popen([sys.executable, "-c", HOLDER, str(path)],
                              stdout=subprocess.PIPE, text=True)
@@ -188,13 +194,13 @@ class Locks(Base):
         link = self.base / "alias.session"
         os.link(sess, link)
         holder = self._hold(link)  # держит lock inode через другой путь
-        o = self.env.make_owner("a")
+        o = self.env.make_owner("a", store=self._store())
         r = start(o)
         self.assertEqual((r["code"], r["exit_code"]), ("OWNER_ALREADY_RUNNING", 2))
         self.assertEqual(o.fake.factory_calls, [])
         holder.send_signal(signal.SIGKILL)
         holder.wait()
-        o2 = self.env.make_owner("a")
+        o2 = self.env.make_owner("a", store=self._store())
         self.assertEqual(start(o2)["code"], "READY")
 
     def test_session_without_extension_locks_dot_session_file(self):  # F1
@@ -205,7 +211,7 @@ class Locks(Base):
         fd = os.open(real, os.O_CREAT | os.O_WRONLY, 0o600)
         os.close(fd)
         self._hold(real)
-        o = self.env.make_owner("a")
+        o = self.env.make_owner("a", store=self._store())
         r = start(o)
         self.assertEqual((r["code"], r["exit_code"]), ("OWNER_ALREADY_RUNNING", 2))
         self.assertEqual(o.fake.factory_calls, [])
@@ -215,7 +221,7 @@ class Locks(Base):
         link = self.base / "sym.session"
         link.symlink_to(sess)
         self._hold(sess)
-        o = self.env.make_owner("a")
+        o = self.env.make_owner("a", store=self._store())
         self.assertEqual(start(o)["code"], "OWNER_ALREADY_RUNNING")
 
     def test_bindmount_same_devino_different_realpath_two_accounts(self):  # F1 Fake Store
@@ -237,7 +243,7 @@ class Locks(Base):
 
     def test_owner_lock_held_by_other_process_on_root(self):  # F1 общий root
         holder = self._hold(self.env.root("a") / "owner.lock")
-        o = self.env.make_owner("a")
+        o = self.env.make_owner("a", store=self._store())
         r = start(o)
         self.assertEqual((r["code"], r["exit_code"]), ("OWNER_ALREADY_RUNNING", 2))
         holder.kill()
@@ -261,6 +267,128 @@ class Locks(Base):
         r = start(o)
         self.assertEqual((r["code"], r["exit_code"]), ("UNSAFE_PATH", 2))
         self.assertEqual(o.fake.factory_calls, [])
+
+
+class LocksRealStore(Locks):
+    """Те же процессные проверки через публичный реальный Store() (уточнение 13)."""
+
+    def _store(self):
+        return import_owner().Store()
+
+    # проверки с подменой inspect относятся к Fake Store, повторять их тут не нужно
+    test_bindmount_same_devino_different_realpath_two_accounts = None
+    test_swap_detected_unsafe_path = None
+
+    def test_real_store_second_owner_in_process_refused_then_free_after_close(self):  # F1
+        o1 = self.env.make_owner("a", store=self._store())
+        self.assertEqual(start(o1)["code"], "READY")
+        o2 = self.env.make_owner("a", store=self._store())
+        r = start(o2)
+        self.assertEqual((r["code"], r["exit_code"]), ("OWNER_ALREADY_RUNNING", 2))
+        self.assertEqual(o2.fake.factory_calls, [])
+        run(o1.close())
+        self.assertEqual(start(self.env.make_owner("a", store=self._store()))["code"], "READY")
+
+    def test_real_store_sigkilled_process_holding_store_lock_releases(self):  # F1
+        code = ("import sys, time, pathlib; sys.path.insert(0, sys.argv[1])\n"
+                "import telegram_session_owner as m\n"
+                "s = m.Store(); lk = s.lock(pathlib.Path(sys.argv[2]))\n"
+                "print('locked', flush=True); time.sleep(60)\n")
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        sess = self.env.accounts["a"]["session_path"]
+        p = subprocess.Popen([sys.executable, "-c", code, str(scripts), sess],
+                             stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        self.assertEqual(p.stdout.readline().strip(), "locked")
+        r = start(self.env.make_owner("a", store=self._store()))
+        self.assertEqual((r["code"], r["exit_code"]), ("OWNER_ALREADY_RUNNING", 2))
+        p.send_signal(signal.SIGKILL)
+        p.wait()
+        self.assertEqual(start(self.env.make_owner("a", store=self._store()))["code"], "READY")
+
+
+class StoreAdapter(Base):
+    """Публичный Store(): конструктор без аргументов, методы порта на реальной ФС (F1/F6, уточнение 13)."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = import_owner().Store()
+
+    def test_constructor_no_args_and_port_methods(self):
+        for n in ("lock", "inspect", "list", "read", "atomic_write", "publish", "snapshot", "remove"):
+            self.assertTrue(callable(getattr(self.store, n)), n)
+
+    def test_atomic_write_0700_parents_0600_file_replaces(self):
+        p = self.base / "new" / "sub" / "f.json"
+        self.store.atomic_write(p, b"one")
+        self.store.atomic_write(p, b"two")
+        self.assertEqual(p.read_bytes(), b"two")
+        self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(p.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual([x.name for x in p.parent.iterdir()], ["f.json"])  # без остатков tmp
+
+    def test_publish_renames_without_overwrite(self):
+        src, dst = self.base / "src", self.base / "dst"
+        src.mkdir()
+        (src / "x").write_text("1")
+        dst.mkdir()
+        (dst / "y").write_text("keep")
+        with self.assertRaises(OSError):
+            self.store.publish(src, dst)
+        self.assertEqual((dst / "y").read_text(), "keep")
+        self.assertTrue(src.exists())
+        free = self.base / "free"
+        self.store.publish(src, free)
+        self.assertEqual((free / "x").read_text(), "1")
+        self.assertFalse(src.exists())
+
+    def test_inspect_fields_missing_and_kinds(self):
+        f = self.base / "f"
+        f.write_text("abc")
+        os.chmod(f, 0o600)
+        info = self.store.inspect(f)
+        self.assertEqual((info["kind"], info["size"], info["mode"], info["uid"]),
+                         ("file", 3, 0o600, os.getuid()))
+        for k in ("realpath", "acl_safe", "dev", "ino", "mtime"):
+            self.assertIn(k, info)
+        link = self.base / "l"
+        link.symlink_to(f)
+        self.assertEqual(self.store.inspect(link)["kind"], "symlink")
+        self.assertEqual(self.store.inspect(self.base)["kind"], "dir")
+        with self.assertRaises(FileNotFoundError):
+            self.store.inspect(self.base / "nope")
+
+    def test_lock_busy_is_blockingioerror_shared_ok_no_truncate(self):
+        p = self.base / "x.lock"
+        p.write_bytes(b"data")
+        a = self.store.lock(p)
+        with self.assertRaises(BlockingIOError):
+            import_owner().Store().lock(p)
+        self.assertEqual(p.read_bytes(), b"data")
+        a.__exit__(None, None, None)
+        s1 = import_owner().Store().lock(p, shared=True)
+        s2 = import_owner().Store().lock(p, shared=True)
+        s1.__exit__(None, None, None)
+        s2.__exit__(None, None, None)
+
+    def test_snapshot_bounded_and_reports_devino_sha(self):
+        import hashlib
+        src = self.base / "src.bin"
+        src.write_bytes(b"x" * 10)
+        info = self.store.snapshot(src, self.base / "copy.bin", max_bytes=10)
+        st = os.stat(src)
+        self.assertEqual((info["size"], info["dev"], info["ino"]), (10, st.st_dev, st.st_ino))
+        self.assertEqual(info["sha256"], hashlib.sha256(b"x" * 10).hexdigest())
+        with self.assertRaises(OSError):
+            self.store.snapshot(src, self.base / "copy2.bin", max_bytes=9)
+
+    def test_remove_and_list_recursive(self):
+        d = self.base / "d"
+        (d / "e").mkdir(parents=True)
+        (d / "e" / "f").write_text("1")
+        self.assertEqual({p.name for p in self.store.list(d)}, {"e", "f"})
+        self.store.remove(d)
+        self.assertFalse(d.exists())
 
 
 class Safety(Base):
@@ -288,6 +416,110 @@ class Safety(Base):
                 r = start(o)
                 self.assertEqual(r["exit_code"], 2)
                 self.assertEqual(o.fake.factory_calls, [])
+
+
+def hb_state(root: Path):
+    return json.loads((root / "heartbeat.json").read_text(encoding="utf-8"))["state"]
+
+
+def hb_writes(store) -> int:
+    return len([e for e in store.log if e[0] == "atomic_write" and "heartbeat" in str(e[1])])
+
+
+class Heartbeat(Base):
+    """Спека "Готовность": первый ready в конце start; step каждые 5 с по monotonic и при смене
+    состояния; degraded при сбое; close пишет stopping до disconnect (уточнение 7)."""
+
+    def started(self, **kw):
+        store = FakeStore()
+        o = self.env.make_owner("a", store=store, **kw)
+        self.assertEqual(start(o)["code"], "READY")
+        self.addCleanup(lambda: run(o.close()))
+        return o, store
+
+    def test_first_ready_after_connect_and_catchup_before_ready_reply(self):  # F3
+        seen = {}
+        tg = FakeTelegram("a")
+        tg.history_data = [{"id": 1, "type": "message", "date": "2026-11-19T10:00:01",
+                            "date_unixtime": "1797674401", "text": "m"}]
+        hb = self.env.root("a") / "heartbeat.json"
+        tg.hooks["history"] = lambda: seen.setdefault("hb_at_catchup", hb.exists())
+        o = self.env.make_owner("a", tg=tg, destinations=[self.env.destination("d1", 1001, "chat1")])
+        self.assertEqual(start(o)["code"], "READY")
+        self.addCleanup(lambda: run(o.close()))
+        self.assertIs(seen["hb_at_catchup"], False)  # ready еще не объявлен
+        self.assertEqual(hb_state(self.env.root("a")), "ready")
+
+    def test_step_rewrites_heartbeat_every_5s_monotonic(self):  # F3
+        o, store = self.started()
+        n0 = hb_writes(store)
+        clock = o.fake.clock
+        clock.advance(4.9)
+        run(o.step())
+        self.assertEqual(hb_writes(store), n0)
+        clock.advance(0.1)
+        run(o.step())
+        self.assertEqual(hb_writes(store), n0 + 1)
+        clock.advance(5)
+        run(o.step())
+        self.assertEqual(hb_writes(store), n0 + 2)
+        self.assertEqual(clock.async_sleeps, [])  # step не спит
+        hb = self.env.root("a") / "heartbeat.json"
+        self.assertEqual(oct(hb.stat().st_mode & 0o777), oct(0o600))
+
+    def test_state_change_updates_immediately_and_recovers(self):  # F3/F21
+        o, store = self.started()
+        o.fake.tg.raises["events"] = import_owner().Disconnected()
+        run(o.step())  # без ожидания 5 с
+        self.assertEqual(hb_state(self.env.root("a")), "degraded")
+        o.fake.clock.advance(15)  # срок backoff
+        for _ in range(3):
+            run(o.step())
+        self.assertEqual(hb_state(self.env.root("a")), "ready")
+
+    def test_overflow_degraded_then_ready_after_reconcile(self):  # F3/F21
+        o, store = self.started()
+        o.fake.tg.event_batches = [[{"kind": "overflow", "peer": None, "record": None, "ids": [],
+                                      "revision": [NOW, 1]}]]
+        run(o.step())
+        self.assertIn(hb_state(self.env.root("a")), ("degraded", "ready"))
+        for _ in range(3):
+            run(o.step())
+        self.assertEqual(hb_state(self.env.root("a")), "ready")
+
+    def test_close_writes_stopping_before_disconnect_under_own_lock(self):  # F3
+        o, store = self.started()
+        seen = {}
+        o.fake.tg.hooks["disconnect"] = lambda: seen.setdefault("state", hb_state(self.env.root("a")))
+        run(o.close())
+        self.assertEqual(seen["state"], "stopping")
+        self.assertEqual(hb_state(self.env.root("a")), "stopping")
+        self.assertEqual(start(self.env.make_owner("a", store=FakeStore()))["code"], "READY")  # lock снят
+
+    def test_close_heartbeat_write_failure_still_releases_locks(self):  # F3
+        o, store = self.started()
+        store.fail_on[("atomic_write", "heartbeat")] = ("before", OSError("disk"))
+        try:
+            run(o.close())
+        except OSError:
+            pass
+        self.assertIn("disconnect", o.fake.tg.names())
+        self.assertEqual(start(self.env.make_owner("a", store=FakeStore()))["code"], "READY")
+
+    def test_refused_second_owner_does_not_touch_heartbeat_of_first(self):  # F1/F3
+        first, _ = self.started()
+        hb = self.env.root("a") / "heartbeat.json"
+        before = (hb.read_bytes(), hb.stat().st_mtime_ns)
+        second = self.env.make_owner("a", store=FakeStore())
+        self.assertEqual(start(second)["code"], "OWNER_ALREADY_RUNNING")
+        run(second.close())
+        self.assertEqual((hb.read_bytes(), hb.stat().st_mtime_ns), before)
+
+    def test_failed_start_writes_no_heartbeat(self):  # F3
+        o = self.env.make_owner("a", instance="b")
+        self.assertEqual(start(o)["exit_code"], 2)
+        run(o.close())
+        self.assertFalse((self.env.root("a") / "heartbeat.json").exists())
 
 
 class Independence(Base):
