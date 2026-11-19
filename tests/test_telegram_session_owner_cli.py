@@ -24,6 +24,7 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_telegram_session_owner_fakes import mkdirs, write_file  # noqa: E402
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 
@@ -82,7 +83,7 @@ class Ctx:
         self.roots = {}
         for acc in ("a", "b", "default"):
             r = tmp / "owners" / acc
-            r.mkdir(parents=True, mode=0o700)
+            mkdirs(r)
             os.chmod(r, 0o700)
             self.roots[acc] = r
         self.cfg_path = tmp / ".telegram-snapshot.json"
@@ -90,13 +91,13 @@ class Ctx:
     def project(self, chats=None, **fields):
         data = {"chats": chats or {"chat": {"id": 1001, "account": "default", "dest": str(self.dest)}}}
         data.update(fields)
-        self.cfg_path.write_text(json.dumps(data))
+        write_file(self.cfg_path, json.dumps(data))
         return self.cfg_path
 
     def owner_config(self, mapping=None, name="owners.json"):
         mapping = mapping if mapping is not None else {k: str(v) for k, v in self.roots.items()}
         p = self.tmp / name
-        p.write_text(json.dumps({"managed_accounts": mapping}))
+        write_file(p, json.dumps({"managed_accounts": mapping}))
         return p
 
 
@@ -168,7 +169,7 @@ class FakeOwnerThread(threading.Thread):
                     req = json.loads(rf.read_text())
                     self.seen.append(req)
                     done.add(d.name)
-                    status.mkdir(exist_ok=True, mode=0o700)
+                    mkdirs(status)
                     refresh = req["operation"] == "refresh"
                     reply = {"schema_version": 1, "request_id": req["request_id"],
                              "operation": req["operation"],
@@ -182,7 +183,7 @@ class FakeOwnerThread(threading.Thread):
                              "request_hash": "0" * 64, "accepted_at": time.time(),
                              "updated_at": time.time(), "retain_until": time.time() + 86400}
                     tmp = status / f".{d.name}.tmp"
-                    tmp.write_text(json.dumps(reply))
+                    write_file(tmp, json.dumps(reply))
                     os.replace(tmp, status / f"{req['request_id']}.json")
             time.sleep(0.02)
 
@@ -193,8 +194,8 @@ class FakeOwnerThread(threading.Thread):
 
 def heartbeat_now(root: Path, state="ready"):
     p = root / "heartbeat.json"
-    p.write_text(json.dumps({"schema_version": 1, "instance": str(uuid.uuid4()), "pid": os.getpid(),
-                             "state": state}))
+    write_file(p, json.dumps({"schema_version": 1, "instance": str(uuid.uuid4()), "pid": os.getpid(),
+                              "state": state}))
     os.chmod(p, 0o600)
 
 
@@ -274,7 +275,7 @@ class OwnerRouting(CliCase):
                 self.assertEqual(code, 2, err[-300:])
                 self.assert_no_direct(reached, err)
         broken = self.ctx.tmp / "broken.json"
-        broken.write_text("{nope")
+        write_file(broken, "{nope")
         self.ctx.project(owner_config=str(broken))
         code, _, err, reached = run_cli("send-one", self.ctx)
         self.assertEqual(code, 2)

@@ -293,8 +293,9 @@ class FakeStore:
         size = os.stat(source).st_size
         if size > max_bytes:
             raise OSError(errno.EFBIG, "too big")
-        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        mkdirs(Path(dest).parent)
         shutil.copyfile(source, dest)
+        os.chmod(dest, 0o600)
         st = os.stat(source)
         return {"size": size, "sha256": hashlib.sha256(Path(dest).read_bytes()).hexdigest(),
                 "dev": st.st_dev, "ino": st.st_ino}
@@ -341,6 +342,29 @@ def refresh_request(account="a", destination_id="d1", rid=None, now=NOW):
     }
 
 
+def mkdirs(path, mode=0o700):
+    """mkdir -p с явными правами всем создаваемым звеньям (не зависит от umask)."""
+    path = Path(path)
+    missing = []
+    p = path
+    while not p.exists():
+        missing.append(p)
+        p = p.parent
+    for d in reversed(missing):
+        d.mkdir(mode=mode)
+        os.chmod(d, mode)
+
+
+def write_file(path, data, mode=0o600):
+    """Запись файла с явными правами (не зависит от umask)."""
+    path = Path(path)
+    if isinstance(data, str):
+        data = data.encode()
+    path.write_bytes(data)
+    os.chmod(path, mode)
+    return path
+
+
 class Env:
     """Каталог установки: account -> owner_root/session/auth, реестр, конфиг экземпляра."""
 
@@ -349,14 +373,10 @@ class Env:
         self.accounts = {}
         for acc in accounts:
             root = self.base / "owners" / acc
-            root.mkdir(parents=True, mode=0o700)
-            os.chmod(root, 0o700)
             sdir = self.base / "sessions" / acc
-            sdir.mkdir(parents=True, mode=0o700)
-            os.chmod(sdir, 0o700)
             adir = self.base / "auth" / acc
-            adir.mkdir(parents=True, mode=0o700)
-            os.chmod(adir, 0o700)
+            for d in (root, sdir, adir):
+                mkdirs(d)  # предки тоже 0700, независимо от umask
             self.accounts[acc] = {
                 "owner_root": str(root),
                 "auth_path": str(adir / "auth.json"),
@@ -369,9 +389,9 @@ class Env:
         self.registry_path = self.base / "installation.json"
         self.write_registry()
         self.projects = self.base / "project"
-        self.projects.mkdir()
+        mkdirs(self.projects)
         self.mirrors = self.base / "mirrors"
-        self.mirrors.mkdir()
+        mkdirs(self.mirrors)
 
     def write_registry(self, extra=None):
         reg = {"accounts": {k: dict(v) for k, v in self.accounts.items()}}
@@ -426,7 +446,7 @@ def write_package(root: Path, request: dict, *, where="outbox", nonce=None):
     """Кладет пакет в спул: outbox/<id>/request.json либо tmp/<id>.<nonce>/..."""
     rid = request["request_id"]
     d = root / where / (rid if where == "outbox" else f"{rid}.{nonce or uuid.uuid4()}")
-    d.mkdir(parents=True, exist_ok=True)
+    mkdirs(d)
     (d / "request.json").write_text(json.dumps(request, ensure_ascii=False))
     for p in (root / where, d, d / "request.json"):
         os.chmod(p, 0o700 if p.is_dir() else 0o600)

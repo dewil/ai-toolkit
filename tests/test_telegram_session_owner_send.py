@@ -16,8 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_telegram_session_owner_fakes import (  # noqa: E402
-    Base, FakeClock, FakeRNG, FakeStore, FakeTelegram, FloodWait, NOW, import_owner, read_status,
-    run, send_request, write_package,
+    Base, FakeClock, FakeRNG, FakeStore, FakeTelegram, FloodWait, NOW, import_owner, mkdirs, read_status,
+    run, send_request, write_file, write_package,
 )
 
 
@@ -79,7 +79,7 @@ class Basics(OwnerCase):
         d = write_package(self.env.root("a"), req, where="tmp", nonce=str(uuid.uuid4()))
         self.assertFalse(run(o.step()))
         self.assertEqual(o.fake.tg.sends(), [])
-        (self.env.root("a") / "outbox").mkdir(exist_ok=True, mode=0o700)
+        mkdirs((self.env.root("a") / "outbox"))
         os.rename(d, self.env.root("a") / "outbox" / req["request_id"])
         self.assertTrue(run(o.step()))
         self.assertEqual(len(o.fake.tg.sends()), 1)
@@ -96,9 +96,9 @@ class Basics(OwnerCase):
         o = self.make()
         req = send_request("a")
         outside = self.base / "outside.json"
-        outside.write_text(json.dumps(req))
+        write_file(outside, json.dumps(req))
         d = self.env.root("a") / "outbox" / req["request_id"]
-        d.mkdir(parents=True, mode=0o700)
+        mkdirs(d)
         (d / "request.json").symlink_to(outside)
         run(o.step())
         st = read_status(self.env.root("a"), req["request_id"])
@@ -108,7 +108,7 @@ class Basics(OwnerCase):
     def test_file_sources_dotdot_missing_and_hash_mismatch_rejected(self):  # F11/F20
         o = self.make()
         good = self.base / "ok.txt"
-        good.write_bytes(b"data")
+        write_file(good, b"data")
         bad_specs = {  # имя: (спек, код по таблице отказов вложений)
             "missing": (dict(fspec(good), source=str(self.base / "nope.txt"), name="nope.txt"), "ATTACHMENT_DENIED"),
             "dotdot": (dict(fspec(good), source=str(self.base / "x" / ".." / "ok.txt")), "INVALID_REQUEST"),
@@ -127,7 +127,7 @@ class Basics(OwnerCase):
     def test_symlink_source_rejected(self):  # F11/F22
         o = self.make()
         real = self.base / "real.txt"
-        real.write_bytes(b"x")
+        write_file(real, b"x")
         link = self.base / "link.txt"
         link.symlink_to(real)
         st = self.deliver(o, send_request("a", files=[fspec(link)]))
@@ -137,7 +137,7 @@ class Basics(OwnerCase):
     def test_upload_reads_copy_inside_package_not_source(self):  # спека Files
         o = self.make()
         f = self.base / "doc.txt"
-        f.write_bytes(b"payload")
+        write_file(f, b"payload")
         st = self.deliver(o, send_request("a", files=[fspec(f)]))
         self.assertEqual(st["code"], "SENT")
         path = o.fake.tg.uploads()[0][1]
@@ -147,7 +147,7 @@ class Basics(OwnerCase):
     def test_internal_copy_denied_as_source(self):  # F22
         o = self.make()
         inner = self.env.root("a") / "spool.txt"
-        inner.write_bytes(b"x")
+        write_file(inner, b"x")
         st = self.deliver(o, send_request("a", files=[fspec(inner)]))
         self.assertEqual((st["code"], st["exit_code"]), ("ATTACHMENT_DENIED", 2))
 
@@ -158,7 +158,7 @@ class AttachmentCodes(OwnerCase):
     def setUp(self):
         super().setUp()
         self.home = self.base / "home"
-        (self.home / ".config" / "telegram-snapshot").mkdir(parents=True)
+        mkdirs((self.home / ".config" / "telegram-snapshot"))
         old = os.environ.get("HOME")
         os.environ["HOME"] = str(self.home)
         self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old else os.environ.pop("HOME", None))
@@ -176,7 +176,7 @@ class AttachmentCodes(OwnerCase):
                 store = FakeStore()
                 o = self.make(store=store)
                 f = self.base / f"u{len(ov)}{list(ov)[0]}.txt"
-                f.write_bytes(b"x")
+                write_file(f, b"x")
                 store.inspect_override[f] = ov
                 self.assertEqual(self.code(o, [fspec(f)]), ("rejected", "UNSAFE_PATH", 2))
                 run(o.close())
@@ -185,7 +185,7 @@ class AttachmentCodes(OwnerCase):
         o = self.make()
         secret = Path(self.env.accounts["a"]["auth_path"])
         good = self.base / "g.txt"
-        good.write_bytes(b"d")
+        write_file(good, b"d")
         # схема раньше denylist
         rel = dict(fspec(secret), source="auth.json")
         self.assertEqual(self.code(o, [rel])[1], "INVALID_REQUEST")
@@ -207,7 +207,7 @@ class AttachmentCodes(OwnerCase):
         store = FakeStore()
         o = self.make(store=store)
         f = self.base / "grow.bin"
-        f.write_bytes(b"0123456789")
+        write_file(f, b"0123456789")
         import errno
 
         def too_big(source, dest, *, max_bytes):
@@ -393,7 +393,7 @@ class Schedule(OwnerCase):
     def test_lead_lost_after_upload_rejected_no_send(self):  # F17
         o = self.make()
         f = self.base / "a.txt"
-        f.write_bytes(b"x")
+        write_file(f, b"x")
         at = iso(NOW + 125)
         o.fake.tg.hooks["upload"] = lambda: o.fake.clock.advance(10)  # запас потерян
         req = send_request("a", files=[fspec(f)], schedule=self.sched(at))
@@ -546,7 +546,7 @@ class AlbumAndLimits(OwnerCase):
         out = []
         for i in range(n):
             f = self.base / f"f{i}.txt"
-            f.write_bytes(f"d{i}".encode())
+            write_file(f, f"d{i}".encode())
             out.append(fspec(f))
         return out
 
@@ -617,7 +617,7 @@ class Denylist(OwnerCase):
     def setUp(self):
         super().setUp()
         self.home = self.base / "home"
-        (self.home / ".config" / "telegram-snapshot").mkdir(parents=True)
+        mkdirs((self.home / ".config" / "telegram-snapshot"))
         old = os.environ.get("HOME")
         os.environ["HOME"] = str(self.home)
         self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old else os.environ.pop("HOME", None))
@@ -632,7 +632,7 @@ class Denylist(OwnerCase):
     def test_control_ordinary_file_allowed(self):  # F22 (не вакуум)
         o = self.make()
         f = self.base / "ok.txt"
-        f.write_bytes(b"fine")
+        write_file(f, b"fine")
         self.assertEqual(self.deliver(o, send_request("a", files=[fspec(f)]))["code"], "SENT")
 
     def test_own_and_neighbour_secrets_denied(self):  # F22
@@ -641,17 +641,17 @@ class Denylist(OwnerCase):
             self.denied(o, Path(self.env.accounts[acc]["auth_path"]))
             self.denied(o, Path(self.env.accounts[acc]["session_path"]))
         self.denied(o, self.env.registry_path)
-        (self.env.root("b") / "note.txt").write_text("x")
+        write_file((self.env.root("b") / "note.txt"), "x")
         self.denied(o, self.env.root("b") / "note.txt")
         self.denied(o, self.env.root("a") / "heartbeat.json")
         cfgdir = self.home / ".config" / "telegram-snapshot"
-        (cfgdir / "auth.json").write_text("{}")
+        write_file((cfgdir / "auth.json"), "{}")
         self.denied(o, cfgdir / "auth.json")
         stray = self.base / "x.session"
-        stray.write_bytes(b"s")
+        write_file(stray, b"s")
         self.denied(o, stray)
         stray2 = self.base / "x.session-journal"
-        stray2.write_bytes(b"s")
+        write_file(stray2, b"s")
         self.denied(o, stray2)
 
     def test_session_without_extension_and_sidecars(self):  # F22
@@ -659,7 +659,7 @@ class Denylist(OwnerCase):
         self.env.accounts["b"]["session_path"] = str(sdir / "b")
         self.env.write_registry()
         for n in ("b.session", "b.session-journal", "b.session-wal"):
-            (sdir / n).write_bytes(b"s")
+            write_file((sdir / n), b"s")
         o = self.make()
         for n in ("b.session", "b.session-journal", "b.session-wal"):
             self.denied(o, sdir / n)
@@ -674,7 +674,7 @@ class Denylist(OwnerCase):
         store = FakeStore()
         o = self.make(store=store)
         decoy = self.base / "decoy.txt"
-        decoy.write_bytes(b"payload")
+        write_file(decoy, b"payload")
         st = os.stat(self.env.accounts["b"]["auth_path"])
         store.inspect_override[decoy] = {"dev": st.st_dev, "ino": st.st_ino,
                                          "realpath": str(self.base / "mnt" / "x.txt")}
@@ -683,9 +683,9 @@ class Denylist(OwnerCase):
     def test_registry_update_and_new_file_seen_before_acceptance(self):  # F22
         o = self.make()
         newdir = self.base / "c"
-        newdir.mkdir(mode=0o700)
+        mkdirs(newdir)
         csec = newdir / "auth.json"
-        csec.write_text("{}")
+        write_file(csec, "{}")
         ok = self.deliver(o, send_request("a", files=[fspec(csec)]))
         self.assertEqual(ok["code"], "SENT")  # c еще не в реестре
         o.fake.clock.advance(1000)
@@ -693,14 +693,14 @@ class Denylist(OwnerCase):
                                                "owner_root": str(newdir / "root")}})
         self.denied(o, csec)
         late = self.env.root("b") / "created-later.bin"
-        late.write_bytes(b"z")
+        write_file(late, b"z")
         self.denied(o, late)
 
     def test_unreadable_registry_rejects_without_send(self):  # F22
         o = self.make()
         f = self.base / "ok.txt"
-        f.write_bytes(b"x")
-        self.env.registry_path.write_text("{garbage")
+        write_file(f, b"x")
+        write_file(self.env.registry_path, "{garbage")
         st = self.deliver(o, send_request("a", files=[fspec(f)]))
         self.assertEqual(st["exit_code"], 2)
         self.assertEqual(o.fake.tg.sends(), [])
@@ -739,7 +739,7 @@ class TmpWriterLock(OwnerCase):
     def old_tmp(self, age):
         d = write_package(self.env.root("a"), send_request("a"), where="tmp")
         lock = d / ".writer.lock"
-        lock.write_bytes(b"")
+        write_file(lock, b"")
         os.chmod(lock, 0o600)
         for p in (lock, d / "request.json", d):
             os.utime(p, (NOW - age, NOW - age))
@@ -911,8 +911,8 @@ class Crash(OwnerCase):
         req = send_request("a")
         write_package(self.env.root("a"), req)
         sdir = self.env.root("a") / "status"
-        sdir.mkdir(exist_ok=True, mode=0o700)
-        (sdir / f"{req['request_id']}.json").write_text(json.dumps({
+        mkdirs(sdir)
+        write_file(sdir / f"{req['request_id']}.json", json.dumps({
             "schema_version": 1, "request_id": req["request_id"], "operation": "send",
             "state": "sending", "code": "SENDING", "exit_code": 0, "retry_after": None, "result": {},
             "request_hash": hashlib.sha256(json.dumps(req, sort_keys=True, ensure_ascii=False,

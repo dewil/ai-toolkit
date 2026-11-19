@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_telegram_session_owner_fakes import (  # noqa: E402
-    Base, FakeClock, FakeStore, FakeTelegram, NOW, import_owner, run, write_heartbeat,
+    Base, FakeClock, FakeStore, FakeTelegram, NOW, import_owner, mkdirs, run, write_file, write_heartbeat,
 )
 
 
@@ -81,7 +81,7 @@ class StartReady(Base):
 
     def test_existing_session_not_truncated(self):  # F1
         p = Path(self.env.accounts["a"]["session_path"])
-        p.write_bytes(b"SQLite format 3\x00data")
+        write_file(p, b"SQLite format 3\x00data")
         o = self.env.make_owner("a")
         start(o)
         self.assertEqual(p.read_bytes(), b"SQLite format 3\x00data")
@@ -134,7 +134,7 @@ class Registry(Base):
     def test_registry_without_own_entry(self):  # F22
         reg = json.loads(self.env.registry_path.read_text())
         reg["accounts"].pop("a")
-        self.env.registry_path.write_text(json.dumps(reg))
+        write_file(self.env.registry_path, json.dumps(reg))
         o = self.env.make_owner("a")
         r = start(o)
         self.assertEqual((r["code"], r["exit_code"]), ("INVALID_CONFIG", 2))
@@ -143,7 +143,7 @@ class Registry(Base):
     def test_registry_path_mismatch(self):  # F22
         reg = json.loads(self.env.registry_path.read_text())
         reg["accounts"]["a"]["session_path"] = str(self.base / "other.session")
-        self.env.registry_path.write_text(json.dumps(reg))
+        write_file(self.env.registry_path, json.dumps(reg))
         o = self.env.make_owner("a")
         r = start(o)
         self.assertEqual((r["code"], r["exit_code"]), ("INVALID_CONFIG", 2))
@@ -152,7 +152,7 @@ class Registry(Base):
     def test_registry_incomplete_entry(self):  # F22
         reg = json.loads(self.env.registry_path.read_text())
         del reg["accounts"]["b"]["owner_root"]
-        self.env.registry_path.write_text(json.dumps(reg))
+        write_file(self.env.registry_path, json.dumps(reg))
         o = self.env.make_owner("a")
         self.assertEqual(start(o)["exit_code"], 2)
         self.assertEqual(o.fake.factory_calls, [])
@@ -160,7 +160,7 @@ class Registry(Base):
     def test_shared_owner_root_different_accounts_forbidden(self):  # F1
         reg = json.loads(self.env.registry_path.read_text())
         reg["accounts"]["b"]["owner_root"] = reg["accounts"]["a"]["owner_root"]
-        self.env.registry_path.write_text(json.dumps(reg))
+        write_file(self.env.registry_path, json.dumps(reg))
         o = self.env.make_owner("a")
         r = start(o)
         self.assertEqual(r["exit_code"], 2)
@@ -329,10 +329,10 @@ class StoreAdapter(Base):
 
     def test_publish_renames_without_overwrite(self):
         src, dst = self.base / "src", self.base / "dst"
-        src.mkdir()
-        (src / "x").write_text("1")
-        dst.mkdir()
-        (dst / "y").write_text("keep")
+        mkdirs(src)
+        write_file(src / "x", "1")
+        mkdirs(dst)
+        write_file(dst / "y", "keep")
         with self.assertRaises(OSError):
             self.store.publish(src, dst)
         self.assertEqual((dst / "y").read_text(), "keep")
@@ -344,8 +344,7 @@ class StoreAdapter(Base):
 
     def test_inspect_fields_missing_and_kinds(self):
         f = self.base / "f"
-        f.write_text("abc")
-        os.chmod(f, 0o600)
+        write_file(f, "abc")
         info = self.store.inspect(f)
         self.assertEqual((info["kind"], info["size"], info["mode"], info["uid"]),
                          ("file", 3, 0o600, os.getuid()))
@@ -360,7 +359,7 @@ class StoreAdapter(Base):
 
     def test_lock_busy_is_blockingioerror_shared_ok_no_truncate(self):
         p = self.base / "x.lock"
-        p.write_bytes(b"data")
+        write_file(p, b"data")
         a = self.store.lock(p)
         with self.assertRaises(BlockingIOError):
             import_owner().Store().lock(p)
@@ -374,7 +373,7 @@ class StoreAdapter(Base):
     def test_snapshot_bounded_and_reports_devino_sha(self):
         import hashlib
         src = self.base / "src.bin"
-        src.write_bytes(b"x" * 10)
+        write_file(src, b"x" * 10)
         info = self.store.snapshot(src, self.base / "copy.bin", max_bytes=10)
         st = os.stat(src)
         self.assertEqual((info["size"], info["dev"], info["ino"]), (10, st.st_dev, st.st_ino))
@@ -384,8 +383,8 @@ class StoreAdapter(Base):
 
     def test_remove_and_list_recursive(self):
         d = self.base / "d"
-        (d / "e").mkdir(parents=True)
-        (d / "e" / "f").write_text("1")
+        mkdirs(d / "e")
+        write_file(d / "e" / "f", "1")
         self.assertEqual({p.name for p in self.store.list(d)}, {"e", "f"})
         self.store.remove(d)
         self.assertFalse(d.exists())

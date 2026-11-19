@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_telegram_session_owner_fakes import (  # noqa: E402
-    Base, FakeStore, FakeTelegram, NOW, import_owner, read_status, refresh_request, run, write_package,
+    Base, FakeStore, FakeTelegram, NOW, import_owner, mkdirs, read_status, refresh_request, run, write_file, write_package,
 )
 
 PEER = {"account": "a", "kind": "User", "id": 1001, "username": None}
@@ -39,11 +39,11 @@ def ev(kind, record=None, ids=None, rev=(NOW, 1), peer=PEER):
 
 
 def write_mirror(path: Path, ids, chat_id=1001, **extra):
-    path.parent.mkdir(parents=True, exist_ok=True)
+    mkdirs(path.parent)
     data = {"name": "T", "type": "personal_chat", "id": chat_id, "topics": [],
             "messages": [rec(i) for i in ids]}
     data.update(extra)
-    path.write_text(json.dumps(data, ensure_ascii=False))
+    write_file(path, json.dumps(data, ensure_ascii=False))
     return data
 
 
@@ -136,7 +136,7 @@ class Dest(MirrorCase):
         self.addCleanup(lambda: run(o.close()))
         self.step_all(o)
         self.assertEqual(self.mirror.read_bytes(), before)
-        self.mirror.write_text("{broken")
+        write_file(self.mirror, "{broken")
         o2 = self.owner()
         run(o2.start())
         self.addCleanup(lambda: run(o2.close()))

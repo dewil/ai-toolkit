@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_telegram_session_owner_fakes import (  # noqa: E402
     Base, FakeClock, NOW, import_client, refresh_request, req_hash, send_request,
-    write_heartbeat, write_package,
+    mkdirs, write_file, write_heartbeat, write_package,
 )
 
 
@@ -67,7 +67,7 @@ class Readiness(Base):
             "degraded": lambda: write_heartbeat(self.root, state="degraded", now=self.clock.utc()),
             "stopping": lambda: write_heartbeat(self.root, state="stopping", now=self.clock.utc()),
             "missing": lambda: None,
-            "bad_json": lambda: (self.root / "heartbeat.json").write_text("{not json"),
+            "bad_json": lambda: write_file(self.root / "heartbeat.json", "{not json"),
             "bad_version": lambda: write_heartbeat(self.root, schema_version=2, now=self.clock.utc()),
             "extra_field": lambda: write_heartbeat(self.root, extra=1, now=self.clock.utc()),
             "bad_pid": lambda: write_heartbeat(self.root, pid=0, now=self.clock.utc()),
@@ -243,7 +243,7 @@ class Limits(Base):
 
     def test_caption_limit_1024_with_files(self):  # F22
         f = self.base / "f.txt"
-        f.write_bytes(b"x")
+        write_file(f, b"x")
         import hashlib
         spec = {"source": str(f), "name": "f.txt", "size": 1,
                 "sha256": hashlib.sha256(b"x").hexdigest()}
@@ -255,7 +255,7 @@ class Limits(Base):
         specs = []
         for i in range(11):
             f = self.base / f"f{i}.txt"
-            f.write_bytes(b"x")
+            write_file(f, b"x")
             specs.append({"source": str(f), "name": f.name, "size": 1,
                           "sha256": hashlib.sha256(b"x").hexdigest()})
         r = self.sub(send_request("a", files=specs))
@@ -327,14 +327,15 @@ class QuotaRace(Base):
 
     def test_race_for_last_bytes_only_one_fits(self):  # F22: 512 MiB спула
         big = self.root / "outbox" / str(uuid.uuid4())
-        big.mkdir(parents=True, mode=0o700)
+        mkdirs(big)
         with open(big / "payload.bin", "wb") as fh:
+            os.fchmod(fh.fileno(), 0o600)
             fh.truncate(512 * 1024 * 1024 - 1536 * 1024)  # остается 1.5 MiB
         import hashlib
         reqs = []
         for i in range(2):
             f = self.base / f"att{i}.bin"
-            f.write_bytes(b"a" * (1024 * 1024))
+            write_file(f, b"a" * (1024 * 1024))
             spec = {"source": str(f), "name": f.name, "size": 1024 * 1024,
                     "sha256": hashlib.sha256(b"a" * (1024 * 1024)).hexdigest()}
             reqs.append(send_request("a", files=[spec]))
