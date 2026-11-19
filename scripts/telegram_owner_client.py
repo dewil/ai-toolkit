@@ -202,6 +202,7 @@ def _schedule(request, clock):
         raise _Error("INVALID_REQUEST") from None
     if dt.minute % 15 == 0 and not schedule["exact_minute"]:
         raise _Error("ROUND_MINUTE", 6)
+    return dt.timestamp()
 
 
 def _validate(request, clock):
@@ -250,11 +251,11 @@ def _validate(request, clock):
                         or not isinstance(f["sha256"], str) or re.fullmatch(r"[a-fA-F0-9]{64}", f["sha256"]) is None):
                     raise _Error("INVALID_REQUEST")
                 _path(f["source"], "INVALID_REQUEST")
-            _schedule(request, clock)
-            if (not request["text"] and not files or options["voice"] and len(files) != 1
+            if (options["voice"] and len(files) != 1
                     or len(files) >= 2 and (request["schedule"]["at"] is not None
                                             or request["schedule"]["remind"] or options["voice"] or options["html"])):
                 raise _Error("INVALID_REQUEST")
+            _schedule(request, clock)
         else:
             raise _Error("INVALID_REQUEST")
         data = _json(request)

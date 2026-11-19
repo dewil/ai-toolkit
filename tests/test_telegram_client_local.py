@@ -342,6 +342,7 @@ class ClientLocal(Base):
         for index in range(2):
             path = self.base / f"attachment-{index}.bin"
             path.write_bytes(b"x" * (1024 * 1024))
+            path.chmod(0o600)
             requests.append(send_request(files=[{"source": str(path), "name": path.name,
                                                  "size": 1024 * 1024,
                                                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}]))

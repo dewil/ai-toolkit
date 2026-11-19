@@ -6,6 +6,8 @@ loads credentials, opens a session, or imports Telethon.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from copy import deepcopy
+from datetime import datetime, timezone
 import ctypes
 import errno
 import fcntl
@@ -269,6 +271,10 @@ class Owner:
         self._heartbeat_at = None
         self._retry_at = 0
         self._instance = str(uuid.uuid4())
+        self._pace = {}
+        self._stepping = False
+        self._queue_cursor = ""
+        self._sweep_cursor = {"tmp": "", "status": ""}
 
     def _optional_inspect(self, path):
         try:
@@ -392,6 +398,7 @@ class Owner:
             self._validate()
             self._acquire(self.root / "owner.lock")
             self._acquire(self.session_path)
+            self._load_pace()
             self._telegram = self.telegram_factory()
             await self._telegram.connect()
             await self._catch_up()
@@ -411,13 +418,15 @@ class Owner:
         return {"code": code, "exit_code": 2}
 
     async def step(self) -> bool:
-        """Maintain readiness without sleeping; request processing follows later."""
-        if not self._started:
+        """Do bounded maintenance and at most one send, without sleeping."""
+        if not self._started or self._stepping:
             return False
-        now = self.clock.monotonic()
+        self._stepping = True
         progress = False
         try:
-            if now >= self._retry_at:
+            self._heartbeat(self._state)
+            progress = self._sweep()
+            if self.clock.monotonic() >= self._retry_at:
                 if self._state == "degraded":
                     await self._telegram.connect()
                     await self._catch_up()
@@ -430,14 +439,407 @@ class Owner:
                     progress = True
                 if any(event["kind"] == "overflow" for event in events):
                     self._heartbeat("degraded")
-            self._heartbeat(self._state)
-        except FloodWait as error:
-            self._retry_at = self.clock.monotonic() + error.seconds
+                else:
+                    progress = await self._step_send() or progress
+                self._heartbeat(self._state)
+            else:
+                # Local recovery/expiry must continue during account backoff.
+                progress = await self._step_send(allow_rpc=False) or progress
+        except BlockingIOError:
+            pass
+        except Exception as error:
+            self._network_failure(error)
+        finally:
+            self._stepping = False
+        return progress
+
+    @staticmethod
+    def _flood_seconds(error):
+        # Duck-typed Telegram adapters may translate their own FloodWait class.
+        if isinstance(error, FloodWait) or type(error).__name__ == "FloodWait":
+            return max(0, float(error.seconds))
+        return None
+
+    def _network_failure(self, error):
+        seconds = self._flood_seconds(error)
+        self._retry_at = self.clock.monotonic() + (15 if seconds is None else seconds)
+        if seconds is None:
             self._degraded()
+
+    def _load_pace(self):
+        import telegram_owner_client as client
+
+        path = self.root / "pace.json"
+        if self._optional_inspect(path) is not None:
+            client._private(self.store, path, "file")
+            self._pace = client._read_json(self.store, path)
+            if not isinstance(self._pace, dict):
+                raise _StartError("INVALID_CONFIG")
+        else:
+            last = client.read_last_account_status(self.root, self.account, store=self.store)
+            self._pace = deepcopy(last.get("pace", {})) if last else {}
+
+    def _save_pace(self):
+        import telegram_owner_client as client
+
+        data = client._json(self._pace)
+        if len(data) > client.JSON_LIMIT:
+            raise client._Error("QUEUE_FULL")
+        self.store.atomic_write(self.root / "pace.json", data)
+
+    def _write_status(self, request, previous, state, code, exit_code=0, *, result=None,
+                      retry_after=None, retry_after_utc=None):
+        import telegram_owner_client as client
+
+        now = self.clock.utc()
+        st = client._reply(request, code, exit_code, state=state,
+                           result=deepcopy(result if result is not None else previous.get("result", {})))
+        st.update(request_id=previous["request_id"], account=self.account)
+        st.update(request_hash=previous["request_hash"],
+                  accepted_at=previous.get("accepted_at", now), updated_at=now,
+                  retain_until=None, pace=deepcopy(self._pace), retry_after=retry_after)
+        if state in ("sent", "refreshed", "rejected"):
+            st["retain_until"] = now + client.WEEK
+        elif state == "scheduled":
+            st["retain_until"] = st["result"]["at"] + client.WEEK
+        if state == "unknown":
+            st["next_step"] = "Проверьте результат вручную; автоматический повтор запрещен"
+        if retry_after_utc is not None:
+            st["retry_after_utc"] = retry_after_utc
+        for key in ("pace_reservation",):
+            if key in previous:
+                st[key] = deepcopy(previous[key])
+        data = client._json(st)
+        if len(data) > client.JSON_LIMIT:
+            raise client._Error("QUEUE_FULL")
+        with self.store.lock(self.root / "quota.lock"):
+            self.store.atomic_write(self.root / "status" / f"{st['request_id']}.json", data)
+            # A terminal status occupies its actual bytes; no future copies
+            # need reservation. Retained bodies remain charged by _usage.
+            if state not in ("queued", "sending"):
+                reserve = self.root / "outbox" / st["request_id"] / ".reservation.json"
+                if self._optional_inspect(reserve) is not None:
+                    self.store.remove(reserve)
+        return st
+
+    def _sweep(self):
+        """Rotate bounded batches so retained entries cannot starve cleanup."""
+        import telegram_owner_client as client
+
+        progress = False
+        with self.store.lock(self.root / "quota.lock"):
+            for name in ("tmp", "status"):
+                directory = self.root / name
+                if self._optional_inspect(directory) is None:
+                    continue
+                paths = [p for p in self.store.list(directory) if p.parent == directory]
+                paths.sort(key=lambda p: p.name)
+                cursor = self._sweep_cursor[name]
+                paths = [p for p in paths if p.name > cursor] + [p for p in paths if p.name <= cursor]
+                for path in paths[:16]:
+                    self._sweep_cursor[name] = path.name
+                    try:
+                        if name == "tmp":
+                            before = client._private(self.store, path, "dir")
+                            if self.clock.utc() - before["mtime"] <= 3600:
+                                continue
+                            with self.store.lock(path / ".writer.lock"):
+                                after = client._private(self.store, path, "dir")
+                                if (before["dev"], before["ino"]) != (after["dev"], after["ino"]):
+                                    continue
+                                self.store.remove(path)
+                        else:
+                            if path.suffix != ".json" or not client._uuid(path.stem):
+                                continue
+                            st = client._status(self.store, self.root, path.stem)
+                            until = st.get("retain_until")
+                            if (st.get("state") not in ("sent", "scheduled", "refreshed", "rejected")
+                                    or not client._number(until) or self.clock.utc() < until):
+                                continue
+                            package = self.root / "outbox" / path.stem
+                            if self._optional_inspect(package) is not None:
+                                client._private(self.store, package, "dir")
+                                self.store.remove(package)
+                            self.store.remove(path)
+                        progress = True
+                    except BlockingIOError:
+                        continue
+                    except (OSError, client._Error, ValueError, KeyError, TypeError):
+                        # Status stays authoritative until outbox deletion and
+                        # fsync succeed. Terminal entries can never be resent.
+                        self._degraded()
+        return progress
+
+    def _next_package(self):
+        import telegram_owner_client as client
+
+        directory = self.root / "outbox"
+        if self._optional_inspect(directory) is None:
+            return None
+        paths = sorted(p for p in self.store.list(directory)
+                       if p.parent == directory and client._uuid(p.name))
+        paths = ([p for p in paths if p.name > self._queue_cursor]
+                 + [p for p in paths if p.name <= self._queue_cursor])
+        for path in paths:
+            st = client._status(self.store, self.root, path.name)
+            if st is None or st.get("state") in ("queued", "sending"):
+                self._queue_cursor = path.name
+                return path, st
+        return None
+
+    def _installation(self):
+        import telegram_owner_client as client
+
+        registry = client._registry(self.store, self.config["installation_config"])
+        client._private(self.store, registry["path"], "file")
+        own = registry["accounts"].get(self.account)
+        if own is None:
+            raise client._Error("INVALID_CONFIG")
+        for key in ("owner_root", "auth_path", "session_path"):
+            configured, registered = Path(self.config[key]), Path(own[key])
+            if key == "session_path":
+                configured, registered = _session(configured), _session(registered)
+            if client._realpath(self.store, configured) != client._realpath(self.store, registered):
+                raise client._Error("INVALID_CONFIG")
+        return registry
+
+    def _accept(self, package, request, files, registry):
+        """Independently validate originals and replace client copies under quota."""
+        import telegram_owner_client as client
+
+        sources = client._local_deny(request, registry, self.store)
+        packages, used, statuses = client._usage(self.store, self.root)
+        own_size = sum(self.store.inspect(p)["size"] for p in self.store.list(package)
+                       if self.store.inspect(p)["kind"] == "file")
+        reserve = package / ".reservation.json"
+        if self._optional_inspect(reserve) is not None:
+            own_size = max(own_size, client._read_json(self.store, reserve)["bytes"])
+        required = len(client._json(request)) + sum(f["size"] for f in files) + client.JSON_LIMIT + 1024
+        if (packages > client.PACKAGE_LIMIT or statuses > client.STATUS_LIMIT
+                or used - own_size + required > client.SPOOL_LIMIT):
+            raise client._Error("QUEUE_FULL")
+        self.store.atomic_write(reserve, client._json({"request_id": request["request_id"], "bytes": required}))
+        copies = package / "files"
+        if self._optional_inspect(copies) is not None:
+            self.store.remove(copies)
+        uploads = []
+        for index, (spec, before) in enumerate(zip(files, sources)):
+            path = copies / str(index)
+            try:
+                copied = self.store.snapshot(Path(spec["source"]), path, max_bytes=client.FILE_LIMIT)
+                after = self.store.inspect(Path(spec["source"]))
+            except OSError as error:
+                raise client._Error("LIMIT_EXCEEDED" if error.errno == errno.EFBIG
+                                    else "ATTACHMENT_DENIED") from None
+            if (copied["size"] != spec["size"] or copied["sha256"].lower() != spec["sha256"].lower()
+                    or (copied["dev"], copied["ino"]) != (before["dev"], before["ino"])
+                    or (after["dev"], after["ino"], after["size"]) !=
+                       (before["dev"], before["ino"], before["size"])):
+                raise client._Error("ATTACHMENT_DENIED")
+            uploads.append(path)
+        return uploads
+
+    def _pace_wait(self, key, at):
+        now = self.clock.utc()
+        wait = 0
+        gate = self._pace.get(key, {})
+        for rec in gate.get("records", []):
+            if at is None and not rec["scheduled"] and rec["at"] > now:
+                continue
+            diff = abs((now if at is None else at) - rec["at"])
+            wait = max(wait, rec["gap"] - diff)
+        if "records" not in gate and at is None:
+            wait = max(wait, gate.get("next_allowed_at", now) - now)
+        return max(0, wait)
+
+    def _reserve_pace(self, request, peer, st):
+        key = f"{peer['kind']}:{peer['id']}"
+        reservation = st.get("pace_reservation")
+        if reservation is None:
+            gap = max(40, min(40 + len(request["text"]) / 250 * 60, 180)
+                      * (1 - self.rng.uniform(0, 0.35)))
+            reservation = {"key": key, "record": {"request_id": request["request_id"],
+                           "at": st["result"]["at"] if st["result"]["at"] is not None else self.clock.utc(),
+                           "gap": gap, "scheduled": st["result"]["at"] is not None}}
+            st["pace_reservation"] = reservation
+        else:
+            reservation["record"]["at"] = (st["result"]["at"] if st["result"]["at"] is not None
+                                            else self.clock.utc())
+        gate = self._pace.setdefault(key, {"aliases": [], "records": []})
+        aliases = [request["target"]["peer"], peer["id"]]
+        if peer.get("username"):
+            aliases.extend((peer["username"], "@" + peer["username"].lstrip("@")))
+        for alias in aliases:
+            if alias not in gate["aliases"]:
+                gate["aliases"].append(alias)
+        records = gate.setdefault("records", [])
+        records[:] = [r for r in records if r["request_id"] != request["request_id"]
+                      and r["at"] + r["gap"] > self.clock.utc()]
+        records.append(deepcopy(reservation["record"]))
+        gate["next_allowed_at"] = max(r["at"] + r["gap"] for r in records)
+
+    def _recover_pace(self, snapshot):
+        """A crashed request cannot replace newer gates from other requests."""
+        for key, old in snapshot.items():
+            gate = self._pace.setdefault(key, {"aliases": [], "records": []})
+            for alias in old.get("aliases", []):
+                if alias not in gate["aliases"]:
+                    gate["aliases"].append(alias)
+            records = gate.setdefault("records", [])
+            known = {r["request_id"] for r in records}
+            records.extend(deepcopy(r) for r in old.get("records", []) if r["request_id"] not in known)
+            gate["next_allowed_at"] = max(gate.get("next_allowed_at", 0), old.get("next_allowed_at", 0))
+        self._save_pace()
+
+    async def _step_send(self, *, allow_rpc=True):
+        import telegram_owner_client as client
+
+        selected = self._next_package()
+        if selected is None:
+            return False
+        package, previous = selected
+        request = {"request_id": package.name, "operation": "send", "account": self.account}
+        st = previous or {"request_id": package.name, "request_hash": None, "accepted_at": self.clock.utc(),
+                         "result": {"message_ids": [], "scheduled_ids": [],
+                                                           "at": None, "verification": "api_ack"}}
+        possible_send = False
+        pace_before = None
+        try:
+            # Recovery precedes expiry/schema checks. The durable sending
+            # marker reserves the outcome even if request.json was damaged.
+            if previous and previous["state"] == "sending":
+                self._recover_pace(previous.get("pace", {}))
+                self._write_status(request, st, "unknown", "SEND_UNCERTAIN", 4)
+                return True
+            with self.store.lock(self.root / "quota.lock"):
+                client._private(self.store, package, "dir")
+                client._private(self.store, package / "request.json", "file")
+                registry = self._installation()
+                request = client._read_json(self.store, package / "request.json")
+                digest = hashlib.sha256(client._json(request)).hexdigest()
+                if previous and previous["request_hash"] != digest:
+                    return False
+                st["request_hash"] = digest
+                if not isinstance(request, dict):
+                    raise client._Error("INVALID_REQUEST")
+                if request.get("request_id") != package.name:
+                    raise client._Error("INVALID_REQUEST")
+                if request.get("account") != self.account:
+                    raise client._Error("ACCOUNT_NOT_MANAGED")
+                if not allow_rpc:
+                    if client._number(request.get("expires_at")) and self.clock.utc() >= request["expires_at"]:
+                        raise client._Error("REQUEST_EXPIRED")
+                    return False
+                _, files = client._validate(request, self.clock)
+                # Refresh/checkpoint processing belongs to the mirror slice.
+                if request["operation"] != "send":
+                    return False
+                at = client._schedule(request, self.clock)
+                if request["schedule"]["remind"]:
+                    at = st["result"].get("at")
+                    if at is None:
+                        at = self.clock.utc() + 180 + self.rng.randint(1, 59)
+                st["result"]["at"] = at
+                copies = self._accept(package, request, files, registry)
+            if request["schedule"]["remind"]:
+                # This must be durable before upload, including on retry.
+                st = self._write_status(request, st, "queued", "QUEUED")
+            peer = await self._telegram.resolve(self.account, request["target"]["peer"])
+            if (peer.get("account") != self.account or peer.get("kind") not in ("User", "Chat", "Channel")
+                    or type(peer.get("id")) is not int or peer["id"] <= 0):
+                raise client._Error("INVALID_REQUEST")
+            expected = request["target"]["expected_username"]
+            if expected is not None and expected.lstrip("@").casefold() != (peer.get("username") or "").lstrip("@").casefold():
+                raise client._Error("USERNAME_MISMATCH")
+            key = f"{peer['kind']}:{peer['id']}"
+            if not request["options"]["no_pace_check"] and not request["schedule"]["remind"]:
+                wait = self._pace_wait(key, at)
+                if wait > 0:
+                    self._write_status(request, st, "rejected", "PACE_TOO_EARLY", 3, retry_after=wait)
+                    return True
+            uploads = [await self._telegram.upload(path) for path in copies]
+            if self.clock.utc() >= request["expires_at"]:
+                raise client._Error("REQUEST_EXPIRED")
+            if at is not None and not 120 <= at - self.clock.utc() <= 366 * 86400:
+                raise client._Error("INVALID_REQUEST")
+            outgoing = deepcopy(request)
+            outgoing["schedule"].update(at=at, timezone=None)
+            pace_before = deepcopy(self._pace)
+            self._reserve_pace(request, peer, st)
+            st = self._write_status(request, st, "sending", "SENDING")
+            self._save_pace()
+            possible_send = True
+            ack = await self._telegram.send(outgoing, peer, uploads)
+            result = {"message_ids": ack.get("message_ids", []),
+                      "scheduled_ids": ack.get("scheduled_ids", []), "at": at, "verification": "api_ack"}
+            st["result"] = result
+            ids = result["scheduled_ids"] if at is not None else result["message_ids"]
+            if (not isinstance(ids, list) or len(ids) != max(1, len(files))
+                    or any(type(i) is not int or i <= 0 for i in ids) or len(set(ids)) != len(ids)):
+                raise SendUncertain(result["message_ids"])
+            if at is not None:
+                result["verification"] = await self._verify_schedule(request, peer, result)
+            self._write_status(request, st, "scheduled" if at is not None else "sent",
+                               "SCHEDULED" if at is not None else "SENT", result=result)
+        except BlockingIOError:
+            if possible_send:
+                self._uncertain(request, st)
+            return False
+        except Exception as error:
+            seconds = self._flood_seconds(error)
+            if possible_send and (seconds is None or st["result"].get("scheduled_ids")):
+                if isinstance(error, SendUncertain) and error.message_ids:
+                    st["result"]["message_ids"] = error.message_ids
+                if isinstance(error, Disconnected) or seconds is not None:
+                    self._network_failure(error)
+                self._uncertain(request, st)
+            elif seconds is not None or isinstance(error, Disconnected):
+                self._network_failure(error)
+                if pace_before is not None:
+                    self._pace = pace_before
+                    self._save_pace()
+                retry = None if seconds is None else datetime.fromtimestamp(
+                    self.clock.utc() + seconds, timezone.utc).isoformat().replace("+00:00", "Z")
+                self._write_status(request, st, "queued", "QUEUED", retry_after_utc=retry)
+            else:
+                if pace_before is not None:
+                    self._pace = pace_before
+                    self._save_pace()
+                if isinstance(error, client._Error):
+                    code, exit_code = error.code, error.exit_code
+                else:
+                    code, exit_code = "INVALID_REQUEST", 2
+                self._write_status(request, st, "rejected", code, exit_code)
+        return True
+
+    def _uncertain(self, request, st):
+        try:
+            self._write_status(request, st, "unknown", "SEND_UNCERTAIN", 4)
         except Exception:
+            # The prior sending marker is sufficient to prevent another RPC.
             self._retry_at = self.clock.monotonic() + 15
             self._degraded()
-        return progress
+
+    async def _verify_schedule(self, request, peer, result):
+        unavailable = False
+        try:
+            scheduled = await self._telegram.scheduled(peer)
+        except Exception as error:
+            if isinstance(error, Disconnected) or self._flood_seconds(error) is not None:
+                self._network_failure(error)
+            scheduled, unavailable = [], True
+        rows = [row for row in scheduled if row.get("id") in result["scheduled_ids"]]
+        if rows:
+            if (len(rows) != len(result["scheduled_ids"])
+                    or {row["id"] for row in rows} != set(result["scheduled_ids"])
+                    or any(row.get("at") != result["at"] or row.get("text") != request["text"] for row in rows)):
+                raise SendUncertain(result["message_ids"])
+            return "scheduled_verified"
+        unavailable = unavailable or not rows
+        if (unavailable and request["target"]["peer"] == "me" and not request["schedule"]["remind"]
+                and 0 < result["at"] - self.clock.utc() <= 180):
+            return "unavailable_saved_near"
+        raise SendUncertain(result["message_ids"])
 
     def _degraded(self):
         try:
