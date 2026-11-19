@@ -31,6 +31,9 @@ def to_unix(v) -> float:
     return dt.datetime.fromisoformat(v).timestamp()
 
 
+AT_OK = NOW + 3600 + 7 * 60 + 7  # 09:07:07 UTC - минута :07, не круглая
+
+
 def fspec(path: Path) -> dict:
     data = Path(path).read_bytes()
     return {"source": str(path), "name": Path(path).name, "size": len(data),
@@ -77,6 +80,8 @@ class Basics(OwnerCase):
         o = self.make()
         req = send_request("a")
         d = write_package(self.env.root("a"), req, where="tmp", nonce=str(uuid.uuid4()))
+        for p in (d / "request.json", d):  # mtime по FakeClock, а не по реальным часам ФС
+            os.utime(p, (NOW, NOW))
         self.assertFalse(run(o.step()))
         self.assertEqual(o.fake.tg.sends(), [])
         mkdirs((self.env.root("a") / "outbox"))
@@ -250,7 +255,8 @@ class Pace(OwnerCase):
         self.deliver_ok(o)
         r2, st = self.deliver_ok(o, text="второе")
         self.assertEqual((st["state"], st["code"], st["exit_code"]), ("rejected", "PACE_TOO_EARLY", 3))
-        self.assertAlmostEqual(st["retry_after"], 40.0, delta=0.5)
+        # gap = max(40, min(40 + chars/250*60, 180)) * (1 - uniform(0, 0.35)); "Проверка" = 8 знаков, uniform = 0
+        self.assertAlmostEqual(st["retry_after"], 40 + 8 / 250 * 60, delta=0.5)
         self.assertEqual(len(o.fake.tg.sends()), 1)
         self.assertEqual(o.fake.clock.async_sleeps, [])  # без сна/переноса
         self.assertEqual(o.fake.clock.sleeps, [])
@@ -352,15 +358,15 @@ class Schedule(OwnerCase):
         ]
         for at, sch, (state, code) in cases:
             with self.subTest(at=at):
-                o.fake.tg.scheduled_data = [{"id": 900, "at": to_unix(at), "text": "Проверка"}]
-                o.fake.tg.send_results = [{"message_ids": [], "scheduled_ids": [900], "at": to_unix(at)}]
                 o.fake.clock.advance(300)
-                req = send_request("a", schedule=self.sched(at, **sch))
+                # at пересчитан относительно текущих часов теста; ответ фейка Telegram совпадает с запрошенным
+                shift = o.fake.clock.utc() - NOW
+                at_shifted = to_unix(at) + shift
+                o.fake.tg.scheduled_data = [{"id": 900, "at": at_shifted, "text": "Проверка"}]
+                o.fake.tg.send_results = [{"message_ids": [], "scheduled_ids": [900], "at": at_shifted}]
+                req = send_request("a", schedule=self.sched(iso(at_shifted), **sch))
                 req["created_at"] = int(o.fake.clock.utc())
                 req["expires_at"] = req["created_at"] + 86400
-                # at пересчитан относительно текущих часов теста
-                shift = o.fake.clock.utc() - NOW
-                req["schedule"]["at"] = iso(to_unix(at) + shift)
                 st = self.deliver(o, req)
                 self.assertEqual(st["state"], state)
                 self.assertEqual(st["exit_code"], code)
@@ -412,23 +418,25 @@ class Schedule(OwnerCase):
         self.assertEqual(o.fake.tg.sends(), [])
 
     def test_scheduled_mismatch_text_or_date_unknown(self):  # F19
-        for bad in ({"id": 900, "at": NOW + 3607.0, "text": "Другой"},
+        for bad in ({"id": 900, "at": float(AT_OK), "text": "Другой"},
                     {"id": 900, "at": NOW + 7200.0, "text": "Проверка"},
                     None):
             with self.subTest(bad=bad):
                 o = self.make()
-                at = iso(NOW + 3607)
+                at = iso(AT_OK)
                 o.fake.tg.scheduled_data = [bad] if bad else []
-                o.fake.tg.send_results = [{"message_ids": [], "scheduled_ids": [900], "at": NOW + 3607.0}]
-                st = self.deliver(o, send_request("a", peer=77, schedule=self.sched(at)))
-                self.assertEqual((st["state"], st["code"], st["exit_code"]), ("unknown", "SEND_UNCERTAIN", 4))
+                o.fake.tg.send_results = [{"message_ids": [], "scheduled_ids": [900], "at": float(AT_OK)}]
+                req = send_request("a", peer=77, schedule=self.sched(at))
+                req["options"]["no_pace_check"] = True  # unknown резервирует темп; между subTest он не предмет
+                st = self.deliver(o, req)
                 run(o.close())
+                self.assertEqual((st["state"], st["code"], st["exit_code"]), ("unknown", "SEND_UNCERTAIN", 4))
 
     def test_scheduled_verified(self):  # F19
         o = self.make()
-        at = iso(NOW + 3607)
-        o.fake.tg.scheduled_data = [{"id": 900, "at": NOW + 3607.0, "text": "Проверка"}]
-        o.fake.tg.send_results = [{"message_ids": [], "scheduled_ids": [900], "at": NOW + 3607.0}]
+        at = iso(AT_OK)
+        o.fake.tg.scheduled_data = [{"id": 900, "at": float(AT_OK), "text": "Проверка"}]
+        o.fake.tg.send_results = [{"message_ids": [], "scheduled_ids": [900], "at": float(AT_OK)}]
         st = self.deliver(o, send_request("a", peer=77, schedule=self.sched(at)))
         self.assertEqual((st["state"], st["code"], st["exit_code"]), ("scheduled", "SCHEDULED", 0))
         self.assertEqual(st["result"]["scheduled_ids"], [900])
@@ -456,7 +464,9 @@ class NearMe(OwnerCase):
         shift = base_lead - lead_at_verification
         o.fake.tg.hooks["send"] = lambda: o.fake.clock.advance(shift)
         sch = {"at": iso(at), "timezone": None, "exact_minute": False, "remind": False}
-        st = self.deliver(o, send_request("a", peer=peer, schedule=sch))
+        req = send_request("a", peer=peer, schedule=sch)
+        req["options"]["no_pace_check"] = True  # темп сохраняется между установками на одном спуле; он здесь не предмет
+        st = self.deliver(o, req)
         run(o.close())
         return st
 
@@ -554,13 +564,16 @@ class AlbumAndLimits(OwnerCase):
         for n, code in ((1, "SENT"), (2, "SENT"), (10, "SENT"), (11, "LIMIT_EXCEEDED")):
             with self.subTest(n=n):
                 o = self.make(rng=FakeRNG())
-                st = self.deliver(o, send_request("a", files=self.files(n)))
+                req = send_request("a", files=self.files(n))
+                req["options"]["no_pace_check"] = True  # темп переживает рестарт; здесь проверяется только число файлов
+                o.fake.tg.send_results = [{"message_ids": list(range(601, 601 + n)), "scheduled_ids": [], "at": None}]
+                st = self.deliver(o, req)
+                run(o.close())  # до проверок: упавший subTest не должен оставлять owner запущенным
                 self.assertEqual(st["code"], code)
                 if code == "SENT":
                     self.assertEqual(len(o.fake.tg.uploads()), n)
                 else:
                     self.assertEqual(o.fake.tg.sends(), [])
-                run(o.close())
 
     def test_album_incompatible_flags(self):  # F20
         o = self.make()
@@ -571,7 +584,7 @@ class AlbumAndLimits(OwnerCase):
                 st = self.deliver(o, req)
                 self.assertEqual((st["code"], st["exit_code"]), ("INVALID_REQUEST", 2))
         req = send_request("a", files=self.files(2),
-                           schedule={"at": iso(NOW + 3607), "timezone": None, "exact_minute": False, "remind": False})
+                           schedule={"at": iso(AT_OK), "timezone": None, "exact_minute": False, "remind": False})
         st = self.deliver(o, req)
         self.assertEqual((st["code"], st["exit_code"]), ("INVALID_REQUEST", 2))
         self.assertEqual(o.fake.tg.sends(), [])
@@ -688,6 +701,7 @@ class Denylist(OwnerCase):
         write_file(csec, "{}")
         ok = self.deliver(o, send_request("a", files=[fspec(csec)]))
         self.assertEqual(ok["code"], "SENT")  # c еще не в реестре
+        o.fake.tg.calls.clear()  # дальше проверяется отсутствие вызовов именно после отказа
         o.fake.clock.advance(1000)
         self.env.write_registry(extra={"c": {"auth_path": str(csec), "session_path": str(newdir / "c.session"),
                                                "owner_root": str(newdir / "root")}})
@@ -711,8 +725,10 @@ class Retention(OwnerCase):
         o = self.make()
         old = write_package(self.env.root("a"), send_request("a"), where="tmp")
         fresh = write_package(self.env.root("a"), send_request("a"), where="tmp")
-        os.utime(old, (NOW - 3601, NOW - 3601))
-        os.utime(old / "request.json", (NOW - 3601, NOW - 3601))
+        for p in (old, old / "request.json"):
+            os.utime(p, (NOW - 3601, NOW - 3601))
+        for p in (fresh, fresh / "request.json"):  # свежий - относительно FakeClock
+            os.utime(p, (NOW, NOW))
         run(o.step())
         self.assertFalse(old.exists())
         self.assertTrue(fresh.exists())
@@ -851,7 +867,7 @@ class TtlSweep(OwnerCase):
 
     def test_scheduled_kept_until_at_plus_7_days(self):  # Q4
         o = self.make()
-        at = NOW + 3607
+        at = AT_OK
         o.fake.tg.scheduled_data = [{"id": 900, "at": float(at), "text": "Проверка"}]
         o.fake.tg.send_results = [{"message_ids": [], "scheduled_ids": [900], "at": float(at)}]
         sch = {"at": iso(at), "timezone": None, "exact_minute": False, "remind": False}
@@ -1021,7 +1037,7 @@ class Backoff(OwnerCase):
 
     def test_flood_wait_keeps_queued_and_retries_with_same_schedule_after_deadline(self):  # F21, решение dwl 14
         tg = FakeTelegram("a")
-        at = NOW + 3607
+        at = AT_OK
         tg.send_results = [FloodWait(30), {"message_ids": [], "scheduled_ids": [900], "at": float(at)}]
         tg.scheduled_data = [{"id": 900, "at": float(at), "text": "Проверка"}]
         o = self.make(tg=tg)
