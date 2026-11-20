@@ -5,7 +5,7 @@ description: "Отправить сообщение в Telegram-чат от им
 
 # telegram-send
 
-Скилл для отправки сообщения в Telegram-чат проекта **от имени пользователя**. Личка и группа отправляются одинаково. Скрипт-эталон - `scripts/telegram-send.py` (top-level папка `scripts/` в корне проекта). Авторизация общая с `telegram-snapshot` (`~/.config/telegram-snapshot/auth.json` + `.session`), адресаты берутся из `.telegram-snapshot.json`.
+Скилл для отправки сообщения в Telegram-чат проекта **от имени пользователя**. Личка и группа отправляются одинаково. Скрипт-эталон - `scripts/telegram-send.py` (top-level папка `scripts/` в корне проекта). В direct-режиме авторизация общая с `telegram-snapshot` (`~/.config/telegram-snapshot/auth.json` + `.session`). В owner-режиме клиент работает только с локальным спулом. Адресаты берутся из `.telegram-snapshot.json`.
 
 ## Когда применять
 
@@ -16,6 +16,16 @@ description: "Отправить сообщение в Telegram-чат от им
 
 - Чтение/анализ истории чатов - это `telegram-snapshot` (`result.json` уже на диске, читай напрямую).
 - Адресата нет в `.telegram-snapshot.json` - сначала добавить его туда (см. ниже), отдельного механизма отправки "куда угодно" у скрипта нет.
+
+## Выбор owner или direct
+
+До авторизации проверь `.telegram-snapshot.json`: `owner_config` (карта account -> owner_root) или `owner_root` включает owner-режим. `--owner-config PATH` или `--owner-root PATH` заменяет оба проектных поля целиком, включая конфликт в перекрытом файле. Оба поля в выбранном источнике, пустое значение или битый конфиг дают `INVALID_CONFIG/2`. Без обоих полей сохраняется прежний direct. Один экземпляр owner обслуживает один account; send выбирает account из chats[label], send-one из `--account` (по умолчанию default).
+
+В owner-режиме запускай те же скрипты и используй `--json` для Reply. UUID заявки печатается в stderr до ожидания. Без `--send` выполняется локальный dry-run: без сети, авторизации и записи в спул, с пометкой "адресат не проверен" и возрастом данных темпа. При отсутствии копии реестра также печатается "denylist соседних экземпляров не проверен". Это допустимый dry-run, но отправку повторно проверяет owner по полному реестру. `--remind` в send-one выбирает срок один раз у owner.
+
+Коды owner: 0 - sent/scheduled либо пригодный dry-run (scheduled означает очередь); 2 - конфиг, заявка, вложения, квота или срок; 3 - `PACE_TOO_EARLY` с retry_after, без сна/переноса; 4 - `WAIT_TIMEOUT` или `SEND_UNCERTAIN`; 6 - `ROUND_MINUTE`; 7 - `OWNER_UNAVAILABLE` до публикации. При 7 сообщи об отсутствии готового owner выбранного account и проверь его user unit; прямую отправку автоматически не запускай. После публикации потеря owner дает ожидание и 4. При timeout проверь status прежнего request_id; при unknown нужен ручной разбор без автоповтора. `--request-id` повторяет прежний конверт, менять его поля нельзя. Для чтения ответа доступна функция `telegram_owner_client.status`.
+
+Установка, реестр, права, systemd и откат: [telegram-session-owner.md](../../docs/telegram-session-owner.md). Авторизацию и ремонт session из direct-инструкций ниже выполняют при остановленном owner этого account и остановленных direct-пользователях той же session.
 
 ## Обязательный гейт отправки
 

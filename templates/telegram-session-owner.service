@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram session owner (%i)
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Replace these three placeholders before installing as an @.service unit.
+ExecStart=<python> <script> --instance %i --config <config_dir>/%i.json
+UMask=0077
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+StandardInput=null
+
+[Install]
+WantedBy=default.target

@@ -67,32 +67,37 @@ from telegram_mirror import (
     migrate_legacy, repair_legacy_migration,
 )
 
-try:
-    from telethon import TelegramClient
-    from telethon.tl.types import (
-        Channel,
-        Chat,
-        MessageActionTopicCreate,
-        MessageActionTopicEdit,
-        MessageEntityBold,
-        MessageEntityCode,
-        MessageEntityItalic,
-        MessageEntityMention,
-        MessageEntityMentionName,
-        MessageEntityPre,
-        MessageEntityStrike,
-        MessageEntityTextUrl,
-        MessageEntityUnderline,
-        MessageEntityUrl,
-        MessageMediaWebPage,
-        PeerChannel,
-        PeerChat,
-    )
-except ImportError:
-    sys.stderr.write(
-        "telethon не установлен. Поставь: pip3 install --user telethon\n"
-    )
-    sys.exit(2)
+import telegram_owner_cli as owner_cli
+
+TelegramClient = None
+_TYPES_LOADED = False
+
+
+def load_telethon():
+    global TelegramClient, _TYPES_LOADED
+    try:
+        if TelegramClient is None:
+            from telethon import TelegramClient as client_class
+            TelegramClient = client_class
+        if not _TYPES_LOADED:
+            from telethon.tl import types
+            for name in ("Channel", "Chat", "MessageActionTopicCreate", "MessageActionTopicEdit",
+                         "MessageEntityBold", "MessageEntityCode", "MessageEntityItalic",
+                         "MessageEntityMention", "MessageEntityMentionName", "MessageEntityPre",
+                         "MessageEntityStrike", "MessageEntityTextUrl", "MessageEntityUnderline",
+                         "MessageEntityUrl", "MessageMediaWebPage", "PeerChannel", "PeerChat"):
+                globals()[name] = getattr(types, name)
+            _TYPES_LOADED = True
+    except ImportError:
+        sys.stderr.write("telethon не установлен. Поставь: pip3 install --user telethon\n")
+        raise SystemExit(2) from None
+
+
+def __getattr__(name):
+    if name.startswith("Message") or name in ("Channel", "Chat", "PeerChannel", "PeerChat"):
+        load_telethon()
+        return globals()[name]
+    raise AttributeError(name)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -141,18 +146,19 @@ MEDIA_TTL_DEFAULT = MEDIA_TTL_HOURS
 EDIT_WINDOW = int(os.environ.get("TELEGRAM_SNAPSHOT_EDIT_WINDOW", "50"))
 PROJECT_CONFIG_PATH = PROJECT_ROOT / ".telegram-snapshot.json"
 
-ENTITY_MAP = {
-    MessageEntityBold: "bold",
-    MessageEntityItalic: "italic",
-    MessageEntityUnderline: "underline",
-    MessageEntityStrike: "strikethrough",
-    MessageEntityCode: "code",
-    MessageEntityPre: "pre",
-    MessageEntityUrl: "link",
-    MessageEntityTextUrl: "text_link",
-    MessageEntityMention: "mention",
-    MessageEntityMentionName: "mention_name",
-}
+def entity_map():
+    return {
+        MessageEntityBold: "bold",
+        MessageEntityItalic: "italic",
+        MessageEntityUnderline: "underline",
+        MessageEntityStrike: "strikethrough",
+        MessageEntityCode: "code",
+        MessageEntityPre: "pre",
+        MessageEntityUrl: "link",
+        MessageEntityTextUrl: "text_link",
+        MessageEntityMention: "mention",
+        MessageEntityMentionName: "mention_name",
+    }
 
 
 def load_auth(account: str = "default") -> dict:
@@ -615,6 +621,7 @@ def entities_to_text_entities(text: str, entities) -> list[dict]:
     offset после него выделяет не тот текст (ревью 06.09.2026: "😀AB" с жирной
     A размечалось как жирная B). Поэтому режем UTF-16-представление.
     """
+    load_telethon()
     if not text:
         return []
     if not entities:
@@ -638,7 +645,7 @@ def entities_to_text_entities(text: str, entities) -> list[dict]:
             if start > cursor:
                 out.append({"type": "plain", "text": unit_slice(cursor, start)})
             segment = unit_slice(start, end)
-            etype = ENTITY_MAP.get(type(ent), "plain")
+            etype = entity_map().get(type(ent), "plain")
             item: dict = {"type": etype, "text": segment}
             if isinstance(ent, MessageEntityTextUrl):
                 item["href"] = ent.url
@@ -685,6 +692,7 @@ def sender_name(sender) -> str:
 
 
 def sender_id(msg) -> str:
+    load_telethon()
     peer = msg.from_id or msg.peer_id
     if peer is None:
         return ""
@@ -698,6 +706,7 @@ def sender_id(msg) -> str:
 
 def extract_topic_meta(msg) -> dict | None:
     """Если service-сообщение создает форумную тему - возвращает ее метаданные."""
+    load_telethon()
     if msg.action is None:
         return None
     if isinstance(msg.action, MessageActionTopicCreate):
@@ -720,7 +729,8 @@ def topic_id_from_reply(reply_to) -> int | None:
     return getattr(reply_to, "reply_to_top_id", None) or getattr(reply_to, "reply_to_msg_id", None)
 
 
-async def download_message_media(client: TelegramClient, msg, chat_media_dir: Path) -> str | None:
+async def download_message_media(client: TelegramClient, msg, chat_media_dir: Path, *,
+                                 safe_errors: bool = False) -> str | None:
     """Скачивает вложение сообщения в несинкаемый кэш. Возвращает имя файла или None.
 
     result.json НЕ трогаем - метаданные (file_name/mime) уже пишет
@@ -728,10 +738,13 @@ async def download_message_media(client: TelegramClient, msg, chat_media_dir: Pa
     (скрин - через Read визуально, файл - сканером). Превью ссылок (webpage)
     вложением не считаем. Имя файла несет <msg_id> для корреляции с сообщением.
     """
+    load_telethon()
     media = getattr(msg, "media", None)
     if not media or isinstance(media, MessageMediaWebPage):
         return None
     base = msg.file.name if (msg.file and msg.file.name) else None
+    if safe_errors and base:
+        base = Path(base).name
     ext = (msg.file.ext if msg.file else "") or ".bin"
     fname = f"{msg.id}_{base}" if base else f"{msg.id}{ext}"
     dest = chat_media_dir / fname
@@ -742,7 +755,10 @@ async def download_message_media(client: TelegramClient, msg, chat_media_dir: Pa
         await client.download_media(msg, file=str(dest))
         return dest.name
     except Exception as exc:  # noqa: BLE001 - best-effort, не роняем pull из-за одного файла
-        sys.stderr.write(f"медиа msg {msg.id}: не скачалось ({exc})\n")
+        if safe_errors:
+            sys.stderr.write("MEDIA_DOWNLOAD_FAILED\n")
+        else:
+            sys.stderr.write(f"медиа msg {msg.id}: не скачалось ({exc})\n")
         return None
 
 
@@ -786,6 +802,7 @@ async def fetch_new(client: TelegramClient, entity, min_id: int,
     download_media=False пропускает скачивание вложений (media=false в записи
     чата): метаданные файлов в сообщениях остаются, самих файлов в кэше нет.
     """
+    load_telethon()
     out: list[dict] = []
     new_topics: list[dict] = []
     topic_edits: dict = {}
@@ -884,6 +901,7 @@ async def message_to_record(client: TelegramClient, msg) -> dict | None:
 
 def chat_type_from_entity(entity) -> str:
     """Маппит Telethon entity на тип чата в формате Telegram Desktop export."""
+    load_telethon()
     if isinstance(entity, Channel):
         has_username = bool(getattr(entity, "username", None))
         if getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False):
@@ -909,6 +927,7 @@ async def resolve_entity(client: TelegramClient, chat_id: int, dialog_entities: 
     у них корректный access_hash. get_entity оставлен только как фолбэк для
     чатов, которых нет в списке диалогов (архивные/скрытые).
     """
+    load_telethon()
     entity = dialog_entities.get(chat_id)
     if entity is not None:
         return entity
@@ -1060,6 +1079,7 @@ async def process_chat(client: TelegramClient, chats_root: Path, label: str, cha
 
 
 async def amain() -> int:
+    load_telethon()
     project_cfg = load_project_config()
     chats_root = chats_root_path(project_cfg)
 
@@ -1167,6 +1187,47 @@ async def amain() -> int:
 
 
 def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description="Снапшот Telegram-чатов проекта")
+    owner_cli.arguments(parser, request_id=False)
+    args = parser.parse_args()
+    try:
+        cfg = owner_cli.project(PROJECT_CONFIG_PATH)
+        route = owner_cli.Route(args, cfg, PROJECT_ROOT)
+        if route.enabled:
+            results = []
+            if not isinstance(cfg.get("chats"), dict) or not cfg["chats"]:
+                return owner_cli.error(args)
+            for label, value in cfg["chats"].items():
+                account = value.get("account", "default") if isinstance(value, dict) else "default"
+                peer = value.get("id") if isinstance(value, dict) else value
+                dest, request = None, {}
+                try:
+                    entry = chat_entry(value)
+                    account, peer = entry["account"], entry["id"]
+                    dest = (resolve_dest(entry["dest"]) if entry.get("dest") else
+                            resolve_label_target(chats_root_path(cfg), label))
+                    request = owner_cli.refresh_request(args, account, peer, dest)
+                    reply = owner_cli.execute(route, request, args)
+                except owner_cli.client._Error as exc:
+                    reply = owner_cli.client._reply(request, exc.code, exc.exit_code)
+                except (OSError, ValueError, KeyError, TypeError):
+                    reply = owner_cli.client._reply(request, "INVALID_CONFIG")
+                results.append({"account": account, "peer": peer,
+                                "dest": str(dest) if dest is not None else None, "reply": reply})
+            codes = [r["reply"]["exit_code"] for r in results]
+            code = 7 if 7 in codes else next((c for c in codes if c), 0)
+            if args.json:
+                print(json.dumps({"exit_code": code, "results": results}, ensure_ascii=False))
+            else:
+                for item in results:
+                    print(f"{item['account']} {item['peer']} {item['dest']}")
+                    owner_cli.emit(item["reply"], args)
+            return code
+    except owner_cli.client._Error as exc:
+        return owner_cli.error(args, exc.code)
+    except (OSError, ValueError, KeyError, TypeError):
+        return owner_cli.error(args)
     return asyncio.run(amain())
 
 

@@ -521,6 +521,13 @@ class Owner:
             self._validate()
             self._acquire(self.root / "owner.lock")
             self._acquire(self.session_path)
+            # 5d: publish a non-secret registry for local clients before ready.
+            registry = self._installation()
+            self.store.atomic_write(self.root / "installation.json",
+                                    json.dumps({"accounts": registry["accounts"]}).encode("utf-8"))
+            self.store.atomic_write(self.root / "instance.json", json.dumps({
+                key: str(self.config[key]) for key in
+                ("auth_path", "session_path", "owner_root")}).encode("utf-8"))
             if self._optional_inspect(self.root / "heartbeat.json") is not None:
                 self._heartbeat("degraded")
             self._load_pace()
@@ -905,7 +912,11 @@ class Owner:
                     or any(type(i) is not int or i <= 0 for i in ids) or len(set(ids)) != len(ids)):
                 raise SendUncertain(result["message_ids"])
             if at is not None:
-                result["verification"] = await self._verify_schedule(request, peer, result)
+                if ack.get("at", at) != at:
+                    raise SendUncertain(result["message_ids"])
+                verification_request = deepcopy(request)
+                verification_request["text"] = ack.get("text", request["text"])
+                result["verification"] = await self._verify_schedule(verification_request, peer, result)
             self._write_status(request, st, "scheduled" if at is not None else "sent",
                                "SCHEDULED" if at is not None else "SENT", result=result)
         except BlockingIOError:
@@ -1005,6 +1016,55 @@ class Owner:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI wiring and the real Telegram adapter are implemented in slice 5."""
-    logging.getLogger(__name__).error("INVALID_CONFIG: Telegram CLI adapter unavailable")
-    return 2
+    """Run one configured instance; the factory is reached only after locks."""
+    import argparse
+    import asyncio
+    import random
+    import signal
+    import sys
+    from telegram_owner_cli import Clock
+
+    parser = argparse.ArgumentParser(description="Владелец одной Telegram-сессии")
+    parser.add_argument("--instance", required=True)
+    parser.add_argument("--config", required=True, type=Path)
+    args = parser.parse_args(argv)
+    os.umask(0o077)
+    try:
+        store = Store()
+        # Config is private infrastructure too; bound reads before decoding.
+        import telegram_owner_client as client
+        client._private(store, args.config.absolute(), "file")
+        config = client._read_json(store, args.config.absolute())
+        config["instance"] = args.instance
+    except (OSError, ValueError, KeyError, TypeError, client._Error):
+        print("INVALID_CONFIG", file=sys.stderr)
+        return 2
+
+    async def run():
+        from telegram_owner_telethon import Telegram
+        clock = Clock()
+        owner = Owner(config, telegram_factory=lambda: Telegram(config),
+                      clock=clock, rng=random.Random(), store=store)
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+        try:
+            reply = await owner.start()
+            if reply["exit_code"]:
+                print(reply["code"], file=sys.stderr)
+                return reply["exit_code"]
+            while not stop.is_set():
+                await owner.step()
+                # Bounded idle wait; signals wake it immediately.
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    pass
+            return 0
+        finally:
+            await owner.close()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.remove_signal_handler(sig)
+
+    return asyncio.run(run())

@@ -686,25 +686,37 @@ def check_local_pace(request: dict, last_status: dict | None, *, clock) -> dict:
         return _reply(request, "INVALID_REQUEST", result=result)
 
 
-def dry_run(owner_root: Path, request: dict, *, installation_config: Path,
+def _own_registry(root, account, store):
+    """5d: use own instance metadata when the installation copy is absent."""
+    path = root / "instance.json"
+    own = _read_json(store, path) if _inspect(store, path) is not None else {
+        "auth_path": str(Path.home() / ".config" / "telegram-snapshot" / "auth.json"),
+        "session_path": str(root / "session"), "owner_root": str(root)}
+    if any(not isinstance(own.get(k), str) for k in ("auth_path", "session_path", "owner_root")):
+        raise _Error("INVALID_CONFIG")
+    return {"path": path, "accounts": {account: own}}
+
+
+def dry_run(owner_root: Path, request: dict, *, installation_config: Path | None,
             clock, store: Store) -> dict:
     report = {"message": "адресат не проверен; данные темпа отсутствуют", "resolve": "resolve отсутствует"}
     try:
         root = _path(owner_root)
-        registry = _registry(store, installation_config)
         try:
             store.inspect(root)
         except (FileNotFoundError, PermissionError):
             return _reply(request, "OWNER_UNAVAILABLE", 7, state="unavailable", result=report)
         _infrastructure(store, root)
-        if not isinstance(request, dict) or request.get("account") not in registry["accounts"]:
+        if not _ready(store, root, clock):
+            return _reply(request, "OWNER_UNAVAILABLE", 7, state="unavailable", result=report)
+        registry = (_registry(store, installation_config) if installation_config is not None
+                    else _own_registry(root, request["account"], store))
+        if request["account"] not in registry["accounts"]:
             raise _Error("ACCOUNT_NOT_MANAGED")
         configured = Path(registry["accounts"][request["account"]]["owner_root"])
         a, b = store.inspect(root), store.inspect(configured)
         if a["realpath"] != b["realpath"] or (a["dev"], a["ino"]) != (b["dev"], b["ino"]):
             raise _Error("INVALID_CONFIG")
-        if not _ready(store, root, clock):
-            return _reply(request, "OWNER_UNAVAILABLE", 7, state="unavailable", result=report)
         data, files = _validate(request, clock)
         _local_deny(request, registry, store)
         # Read-only integrity check. No snapshots, locks or reservations.
@@ -719,7 +731,10 @@ def dry_run(owner_root: Path, request: dict, *, installation_config: Path,
                     or len(data) != spec["size"] or hashlib.sha256(data).hexdigest() != spec["sha256"].lower()):
                 raise _Error("ATTACHMENT_DENIED")
         last = read_last_account_status(root, request["account"], store=store)
-        return check_local_pace(request, last, clock=clock)
+        reply = check_local_pace(request, last, clock=clock)
+        if installation_config is None:
+            reply["result"]["message"] += "; denylist соседних экземпляров не проверен"
+        return reply
     except _Error as error:
         return _reply(request, error.code, error.exit_code, result=report)
     except (OSError, ValueError, KeyError, TypeError):
