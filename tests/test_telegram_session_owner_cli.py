@@ -9,6 +9,7 @@ Owner-режим - RED, пока CLI не подключены к telegram_owner
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -180,7 +181,10 @@ class FakeOwnerThread(threading.Thread):
                                          "checkpoint_id": "c", "updated_at": time.time()} if refresh else
                                         {"message_ids": [1], "scheduled_ids": [], "at": None,
                                          "verification": "api_ack"}),
-                             "request_hash": "0" * 64, "accepted_at": time.time(),
+                             "request_hash": hashlib.sha256(json.dumps(
+                                 req, sort_keys=True, ensure_ascii=False,
+                                 separators=(",", ":")).encode("utf-8")).hexdigest(),
+                             "accepted_at": time.time(),
                              "updated_at": time.time(), "retain_until": time.time() + 86400}
                     tmp = status / f".{d.name}.tmp"
                     write_file(tmp, json.dumps(reply))
