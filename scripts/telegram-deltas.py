@@ -22,6 +22,9 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from telegram_mirror import read_pair
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_CONFIG_PATH = PROJECT_ROOT / ".telegram-snapshot.json"
 
@@ -227,8 +230,9 @@ PERSONAL_PREFIX = "1-1/"
 def emit_chat(label: str, display: str, chats_root, hours: int,
               topic_id: int | None = None, dest_dir: Path | None = None) -> int:
     chat_dir = dest_dir if dest_dir is not None else chats_root / label
-    cur = load_messages(chat_dir / "result.json")
-    prev = load_messages(chat_dir / "result.prev.json")
+    with read_pair(chat_dir):
+        cur = load_messages(chat_dir / "result.json")
+        prev = load_messages(chat_dir / "result.prev.json")
 
     new = filter_new(cur, prev, hours, topic_id)
     suffix = "" if prev else f" (нет .prev, окно {hours}ч)"

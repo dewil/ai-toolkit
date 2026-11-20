@@ -9,6 +9,18 @@ description: "Настроить или починить инкрементал�
 
 Скрипты-эталоны лежат в каноне в `scripts/telegram-snapshot.py` и `scripts/telegram-deltas.py` (top-level папка `scripts/`, не внутри папки скилла). `.AI` bootstrap типа management копирует их в `scripts/` в корне проекта - оттуда же, где их ожидает скилл при запуске (`python3 scripts/telegram-snapshot.py`). В эталонной версии уже есть `iter_dialogs()` прогрев (см. шаг 5).
 
+## Owner-режим
+
+Сначала проверь поля `owner_config`/`owner_root` в `.telegram-snapshot.json`. При наличии одного из них snapshot и pull-one отправляют локальные refresh/checkpoint-заявки владельцу сессии; auth/Telethon у клиента не нужны. Без полей сохраняется direct по инструкции ниже. Флаги `--owner-config PATH`/`--owner-root PATH` доступны обоим скриптам и целиком заменяют проектный источник, даже если в нем были оба поля. Оба поля в выбранном источнике, пустое значение или битый конфиг дают `INVALID_CONFIG/2`.
+
+Owner обслуживает один account и заранее зарегистрированные destinations. Snapshot выбирает account из каждой записи chats (короткая запись означает default), pull-one - из `--account`. Pull-one сопоставляет account/chat_id/абсолютный путь назначения; незарегистрированный путь дает `DESTINATION_NOT_REGISTERED/2` с next_step регистрации. Флаг `--no-media` у pull-one управляет только direct; в owner-режиме media/cache/TTL берутся из зарегистрированного project_config, фильтр topic_id ограничивает отчет, подписка остается на весь peer. `telegram-deltas.py` всегда читает файлы и не подключается к Telegram.
+
+Snapshot поддерживает `--json`: `{exit_code, results:[{account,peer,dest,reply}]}`. Он продолжает остальные account при недоступности одного, показывает все результаты и возвращает 7, если хотя бы один account недоступен до публикации; иначе первый ненулевой код по порядку chats либо 0. Pull-one с `--json` печатает Reply. UUID заявки выводится в stderr до ожидания.
+
+Коды owner: 0 - refreshed/sent/scheduled; 2 - конфиг, заявка, незарегистрированное назначение или лимиты; 3 - отказ темпа; 4 - timeout/unknown; 6 - ровная минута; 7 - `OWNER_UNAVAILABLE` до публикации. При 7 проверь готовность user unit выбранного account; автоматического перехода на direct нет. После публикации потеря heartbeat приводит к ожиданию и `WAIT_TIMEOUT/4`; заявка остается, статус читают по прежнему request_id. Unknown отправки разбирают вручную без повтора.
+
+[Установка и эксплуатация owner](../../docs/telegram-session-owner.md) описывает экземпляры, конфиги, остановку для авторизации и откат. Действия с auth/session ниже относятся к direct или выполняются при остановленном owner и всех direct-пользователях этой session. Sync доставляет скрипты, установку сервиса выполняет человек отдельно.
+
 ## Когда применять
 
 - Пользователь впервые настраивает скрипты `scripts/telegram-snapshot.py` / `telegram-deltas.py` на новом устройстве.

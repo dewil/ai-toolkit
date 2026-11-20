@@ -69,6 +69,7 @@ async def amain(
             f"Штатное место: {tgs.MIRROR_STORE / tgs.project_store_slug()}/<label>\n"
         )
 
+    tgs.load_telethon()
     auth = tgs.load_auth(account)
     session_path = str(tgs.AUTH_DIR / auth["session_name"])
 
@@ -148,7 +149,25 @@ def main() -> int:
         "--no-media", action="store_true",
         help="не скачивать вложения (только текст и метаданные)",
     )
+    tgs.owner_cli.arguments(parser)
     args = parser.parse_args()
+    try:
+        cfg = tgs.owner_cli.project(tgs.PROJECT_CONFIG_PATH)
+        route = tgs.owner_cli.Route(args, cfg, tgs.PROJECT_ROOT)
+        if route.enabled:
+            try:
+                dest = tgs.resolve_dest(args.out_path)
+            except SystemExit:
+                raise tgs.owner_cli.client._Error("UNSAFE_PATH") from None
+            request = tgs.owner_cli.refresh_request(args, args.account, args.chat_id,
+                                                   dest)
+            reply = tgs.owner_cli.execute(route, request, args)
+            return tgs.owner_cli.emit(reply, args)
+    except tgs.owner_cli.client._Error as exc:
+        return tgs.owner_cli.error(args, exc.code)
+    except (OSError, ValueError, KeyError, TypeError):
+        return tgs.owner_cli.error(args)
+
     return asyncio.run(amain(
         args.chat_id, args.out_path, args.username, args.account,
         download_media=not args.no_media,

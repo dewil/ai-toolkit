@@ -87,6 +87,7 @@ async def amain(args) -> int:
         )
         return 2
 
+    tgs.load_telethon()
     auth = tgs.load_auth(args.account)
     session_path = str(tgs.AUTH_DIR / auth["session_name"])
     client = tgs.TelegramClient(session_path, auth["api_id"], auth["api_hash"], **tgs.client_kwargs(auth))
@@ -338,7 +339,20 @@ def main() -> int:
     parser.add_argument("--exact-minute", action="store_true", dest="exact_minute",
                         help="разрешить ровную минуту (:00/:15/:30/:45, независимо от секунд) в "
                              "--schedule (см. тот же флаг в telegram-send.py)")
+    tgs.owner_cli.arguments(parser)
     args = parser.parse_args()
+    try:
+        cfg = tgs.owner_cli.project(tgs.PROJECT_CONFIG_PATH)
+        route = tgs.owner_cli.Route(args, cfg, tgs.PROJECT_ROOT)
+        if route.enabled:
+            peer = SAVED if args.chat_id.strip().lower() == SAVED else int(args.chat_id)
+            return tgs.owner_cli.send(route, args, account=args.account, peer=peer,
+                                      topic=args.topic, username=args.username)
+    except tgs.owner_cli.client._Error as exc:
+        return tgs.owner_cli.error(args, exc.code)
+    except (OSError, ValueError, KeyError, TypeError):
+        return tgs.owner_cli.error(args)
+
     if args.remind:
         # Сообщение себе напрямую Telegram не сопровождает уведомлением (исходящее),
         # отложенное - доставляет как напоминание, со звуком на всех устройствах.

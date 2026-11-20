@@ -63,14 +63,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-try:
-    from telethon import TelegramClient
-    from telethon import utils as telethon_utils
-except ImportError:
-    sys.stderr.write(
-        "telethon не установлен. Поставь: pip3 install --user telethon\n"
-    )
-    sys.exit(2)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import telegram_owner_cli as owner_cli
+
+TelegramClient = telethon_utils = None
+
+
+def load_telethon():
+    global TelegramClient, telethon_utils
+    try:
+        if TelegramClient is None:
+            from telethon import TelegramClient as client_class
+            TelegramClient = client_class
+        if telethon_utils is None:
+            from telethon import utils
+            telethon_utils = utils
+    except ImportError:
+        sys.stderr.write("telethon не установлен. Поставь: pip3 install --user telethon\n")
+        raise SystemExit(2) from None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1121,6 +1131,7 @@ async def amain(args) -> int:
             sys.stderr.write(f"Подпись: {exc}\n")
             return 2
 
+    load_telethon()
     auth = load_auth(entry["account"])
     session_path = str(AUTH_DIR / auth["session_name"])
     client = TelegramClient(session_path, auth["api_id"], auth["api_hash"], **client_kwargs(auth))
@@ -1366,7 +1377,20 @@ def main() -> int:
                              "(rules/outbound-timing.md, \"Ровная минута\"). Обход - "
                              "только когда минуту назвал сам пользователь явно "
                              "('ровно в 9:00', 'к началу созвона')")
+    owner_cli.arguments(parser)
     args = parser.parse_args()
+    try:
+        cfg = owner_cli.project(PROJECT_CONFIG_PATH)
+        route = owner_cli.Route(args, cfg, PROJECT_ROOT)
+        if route.enabled:
+            entry = chat_entry(cfg["chats"][args.to])
+            return owner_cli.send(route, args, account=entry["account"], peer=entry["id"],
+                                  topic=args.topic if args.topic is not None else entry["topic_id"])
+    except owner_cli.client._Error as exc:
+        return owner_cli.error(args, exc.code)
+    except (OSError, ValueError, KeyError, TypeError):
+        return owner_cli.error(args)
+
     if args.schedule_tz is not None and args.schedule is None:
         sys.stderr.write("--schedule-tz без --schedule: пояс задается только вместе со временем доставки\n")
         return 2
