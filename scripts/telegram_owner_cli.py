@@ -33,16 +33,15 @@ def arguments(parser, *, request_id=True):
 
 
 def project(path):
+    """Read routing hints; direct commands retain their own config validation."""
     try:
         with Path(path).open(encoding="utf-8") as stream:
             data = json.load(stream)
         if not isinstance(data, dict):
             raise ValueError
         return data
-    except FileNotFoundError:
-        return {}
     except (OSError, ValueError):
-        raise client._Error("INVALID_CONFIG") from None
+        return {}
 
 
 class Route:
@@ -169,6 +168,8 @@ def send(route, args, *, account, peer, topic=None, username=None):
         text = args.text
         if text is None:
             text = "" if sys.stdin.isatty() else sys.stdin.read().rstrip("\n")
+        if not text.strip():
+            text = ""
         values = args.file or []
         if any(not isinstance(v, str) or not v.strip() or ".." in Path(v).parts for v in values):
             raise client._Error("INVALID_REQUEST")

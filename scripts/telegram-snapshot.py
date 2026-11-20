@@ -1198,6 +1198,8 @@ def main() -> int:
             results = []
             if not isinstance(cfg.get("chats"), dict) or not cfg["chats"]:
                 return owner_cli.error(args)
+            if "chats_root" not in cfg:
+                cfg["chats_root"] = default_chats_root()
             for label, value in cfg["chats"].items():
                 account = value.get("account", "default") if isinstance(value, dict) else "default"
                 peer = value.get("id") if isinstance(value, dict) else value

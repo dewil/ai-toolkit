@@ -673,6 +673,11 @@ class Owner:
                     self._sweep_cursor[name] = path.name
                     try:
                         if name == "tmp":
+                            parts = path.name.split(".")
+                            if len(parts) != 2 or not all(client._uuid(part) for part in parts):
+                                # Only protocol packages are eligible for cleanup.
+                                # Spool quota validation still inspects these entries.
+                                continue
                             before = client._private(self.store, path, "dir")
                             if self.clock.utc() - before["mtime"] <= 3600:
                                 continue

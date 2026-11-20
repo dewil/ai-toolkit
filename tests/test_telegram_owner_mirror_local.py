@@ -259,6 +259,26 @@ class MirrorLocal(Base):
         self.assertEqual([c[2] for c in tg.calls if c[0] == "history"], [100])
         self.assertTrue(load(self.path)["messages"][0]["deleted"])
 
+    def test_unknown_tmp_names_do_not_toggle_heartbeat_or_get_deleted(self):
+        o = self.start()
+        directory = self.env.root("a") / "tmp"
+        (directory / "unknown-directory").mkdir(parents=True)
+        write_file(directory / "unrelated.txt", "leave intact")
+        write_file(directory / "unknown-directory" / "payload", "leave intact")
+        heartbeat = o._heartbeat
+        transitions = []
+        def track(state):
+            transitions.append(state)
+            return heartbeat(state)
+        o._heartbeat = track
+        for _ in range(3):
+            o.fake.clock.advance(3601)
+            run(o.step())
+            self.assertEqual(self.heartbeat(), "ready")
+        self.assertNotIn("degraded", transitions)
+        self.assertEqual((directory / "unrelated.txt").read_text(), "leave intact")
+        self.assertEqual((directory / "unknown-directory" / "payload").read_text(), "leave intact")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

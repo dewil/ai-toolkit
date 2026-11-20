@@ -1,5 +1,7 @@
 """Additional offline checks for slice 5; independent suites stay unchanged."""
 import hashlib
+import contextlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -62,6 +64,101 @@ class CliLocal(unittest.TestCase):
         self.addCleanup(owner.stop)
         self.owners[account] = owner
         return owner
+
+    def invoke(self, name, args):
+        mod = fixture.load_script(fixture.SPECS[name][0], "review_local_" + uuid.uuid4().hex)
+        target = getattr(mod, "tgs", mod)
+        target.PROJECT_ROOT = self.ctx.tmp
+        target.PROJECT_CONFIG_PATH = self.ctx.cfg_path
+        target.MIRROR_STORE = self.ctx.tmp / "store"
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", [name, *args]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = mod.main()
+        return code, out.getvalue(), err.getvalue(), mod
+
+    def test_invalid_project_does_not_block_one_direct_or_cli_override(self):
+        for raw in (b"{broken", b"null", b"[]", b'"text"', b"\xff"):
+            self.ctx.cfg_path.write_bytes(raw)
+            for name in ("send-one", "pull-one"):
+                with self.subTest(raw=raw, name=name, route="direct"):
+                    mod = fixture.load_script(fixture.SPECS[name][0], "direct_local")
+                    target = getattr(mod, "tgs", mod)
+                    target.PROJECT_CONFIG_PATH = self.ctx.cfg_path
+                    direct = AsyncMock(return_value=23)
+                    args = fixture.SPECS[name][1]({"dest": self.ctx.dest})
+                    with patch.object(mod, "amain", direct), patch.object(sys, "argv", [name, *args]):
+                        self.assertEqual(mod.main(), 23)
+                    direct.assert_awaited_once()
+                for flags in (["--owner-root", str(self.ctx.roots["default"])],
+                              ["--owner-config", str(self.ctx.owner_config())]):
+                    with self.subTest(raw=raw, name=name, flags=flags):
+                        code, out, err, reached = fixture.run_cli(name, self.ctx, [*flags, "--json"])
+                        self.assertEqual(code, 7, (out, err))
+                        self.assertFalse(reached)
+
+    def test_snapshot_uses_same_default_root_as_direct_including_legacy(self):
+        owner = self.owner()
+        self.ctx.project(owner_root=str(owner.root), chats={"chat": {"id": 1001}})
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                if legacy:
+                    path = self.ctx.tmp / "Встречи" / "чаты" / "chat" / "result.json"
+                    path.parent.mkdir(parents=True)
+                    path.write_text('{}')
+                code, out, err, mod = self.invoke("snapshot", ["--json"])
+                self.assertEqual(code, 0, (out, err))
+                with contextlib.redirect_stderr(io.StringIO()):
+                    expected = (self.ctx.tmp / mod.default_chats_root() / "chat").resolve()
+                self.assertEqual(owner.seen[-1]["selector"]["dest"], str(expected))
+
+    def test_whitespace_send_is_rejected_before_publication(self):
+        owner = self.owner()
+        self.ctx.project(owner_root=str(owner.root))
+        for name in ("send", "send-one"):
+            for send in ([], ["--send"]):
+                for stdin in (False, True):
+                    args = ["--to", "chat"] if name == "send" else ["1001"]
+                    args += send + ([] if stdin else ["--text", " \t\n "])
+                    with self.subTest(name=name, send=send, stdin=stdin), \
+                            patch.object(sys, "stdin", io.StringIO(" \t\n ")):
+                        code, out, err, reached = fixture.run_cli(name, self.ctx, ["--json"], argv=args)
+                        self.assertEqual(code, 2, (out, err))
+                        self.assertEqual(json.loads(out)["code"], "INVALID_REQUEST")
+                        self.assertFalse(reached)
+        self.assertFalse(owner.seen)
+        self.assertFalse(list((owner.root / "outbox").glob("*")))
+
+    def test_whitespace_caption_with_file_stays_allowed_and_empty(self):
+        owner = self.owner()
+        self.ctx.project(owner_root=str(owner.root))
+        source = self.ctx.tmp / "attachment.txt"
+        Store().atomic_write(source, b"attachment")
+        for name in ("send", "send-one"):
+            args = ["--to", "chat"] if name == "send" else ["1001"]
+            code, out, err, _ = fixture.run_cli(name, self.ctx, ["--json"], argv=[
+                *args, "--text", " \t ", "--file", str(source), "--send"])
+            self.assertEqual(code, 0, (out, err))
+            self.assertEqual(owner.seen[-1]["text"], "")
+
+    def test_pull_one_relative_escape_returns_2_without_publication(self):
+        owner = self.owner()
+        self.ctx.project(owner_root=str(owner.root))
+        code, out, err, _ = fixture.run_cli("pull-one", self.ctx, ["--json"], argv=["1001", "../outside"])
+        self.assertEqual(code, 2, (out, err))
+        self.assertEqual(json.loads(out)["code"], "UNSAFE_PATH")
+        self.assertFalse(owner.seen)
+
+    def test_pull_one_registration_controls_username_and_media(self):
+        owner = self.owner()
+        self.ctx.project(owner_root=str(owner.root))
+        for extra in ([], ["ignored_username", "--no-media"]):
+            code, out, err, _ = fixture.run_cli("pull-one", self.ctx, ["--json"], argv=[
+                "1001", str(self.ctx.dest), *extra])
+            self.assertEqual(code, 0, (out, err))
+        first, second = owner.seen
+        self.assertEqual(first["selector"], second["selector"])
+        self.assertEqual(set(first), set(second))
 
     def test_send_one_pull_snapshot_use_a_hash_bound_reply(self):
         owner = self.owner()
@@ -205,6 +302,59 @@ class AdapterLocal(unittest.IsolatedAsyncioTestCase):
         self.adapter.utils = types.SimpleNamespace(get_attributes=Mock(return_value=(["attrs"], "audio/ogg")))
         self.request = {"text": "hi", "options": {"silent": True, "html": False, "voice": False},
                         "target": {"topic_id": 10, "reply_to": 11}, "schedule": {"at": None}}
+
+    async def test_media_system_exit_is_isolated_for_history_and_events(self):
+        from collections import deque
+        from datetime import datetime, timezone
+        names = ("UpdateDeleteChannelMessages", "UpdateDeleteMessages", "UpdateNewMessage",
+                 "UpdateNewChannelMessage", "UpdateEditMessage", "UpdateEditChannelMessage",
+                 "UpdatesTooLong", "UpdateChannelTooLong", "UpdateShortMessage", "UpdateShortChatMessage")
+        for stage in ("settings", "cleanup"):
+            for source in ("history", "events"):
+                with self.subTest(stage=stage, source=source):
+                    adapter = self.adapter
+                    adapter._media_errors, adapter._media_cleanup = {}, {}
+                    adapter.config = {"destinations": [
+                        {"destination_id": "bad", "project_root": "/PROJECT", "peer": 1,
+                         "project_config": {"media_cache": "relative-private-value"} if stage == "settings" else {}},
+                        {"destination_id": "good", "project_root": "/PROJECT", "peer": 1,
+                         "project_config": {}},
+                    ]}
+                    adapter._aliases = {1: self.peer}
+                    snapshot = fixture.load_script("telegram-snapshot.py", "media_review_local")
+                    snapshot.MEDIA_CACHE_DEFAULT = Path("/CACHE")
+                    snapshot.cleanup_old_media = Mock(side_effect=[SystemExit("private diagnostic"), 0]
+                                                      if stage == "cleanup" else None)
+                    snapshot.download_message_media = AsyncMock()
+                    adapter.snapshot = snapshot
+                    adapter._record = AsyncMock(return_value={"id": 1, "text": "hello"})
+                    msg = types.SimpleNamespace(action=None, peer_id=types.SimpleNamespace(user_id=1),
+                                                edit_date=None, date=datetime.now(timezone.utc))
+                    async def messages(*args, **kwargs):
+                        yield msg
+                    adapter.client.iter_messages = messages
+                    adapter.types = types.SimpleNamespace(**{n: type(n, (), {}) for n in names})
+                    adapter._overflow, adapter._seq = False, 0
+                    update = adapter.types.UpdateNewMessage()
+                    update.message = msg
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err), self.assertLogs("telegram_owner_telethon", "WARNING") as logs:
+                        for _ in range(2):
+                            if source == "history":
+                                result = await adapter.history(self.peer, after_id=0, limit=None)
+                            else:
+                                adapter._updates = deque([update])
+                                result = await adapter.events()
+                            self.assertEqual(len(result), 1)
+                            record = result[0] if source == "history" else result[0]["record"]
+                            self.assertEqual(record["text"], "hello")
+                    reason = "MEDIA_SETTINGS_INVALID" if stage == "settings" else "MEDIA_CLEANUP_REFUSED"
+                    self.assertEqual(adapter._media_errors, {"bad": reason})
+                    self.assertEqual(len(logs.output), 1)
+                    self.assertIn(reason, logs.output[0])
+                    self.assertIn("destination_index=1", logs.output[0])
+                    self.assertNotIn("private", "".join(logs.output) + err.getvalue())
+                    self.assertEqual(snapshot.download_message_media.await_count, 2)
 
     async def test_no_rpc_retry_on_uncertain_send(self):
         self.adapter.client.send_message.side_effect = OSError("opaque")

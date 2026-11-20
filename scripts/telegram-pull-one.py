@@ -155,8 +155,12 @@ def main() -> int:
         cfg = tgs.owner_cli.project(tgs.PROJECT_CONFIG_PATH)
         route = tgs.owner_cli.Route(args, cfg, tgs.PROJECT_ROOT)
         if route.enabled:
+            try:
+                dest = tgs.resolve_dest(args.out_path)
+            except SystemExit:
+                raise tgs.owner_cli.client._Error("UNSAFE_PATH") from None
             request = tgs.owner_cli.refresh_request(args, args.account, args.chat_id,
-                                                   tgs.resolve_dest(args.out_path))
+                                                   dest)
             reply = tgs.owner_cli.execute(route, request, args)
             return tgs.owner_cli.emit(reply, args)
     except tgs.owner_cli.client._Error as exc:

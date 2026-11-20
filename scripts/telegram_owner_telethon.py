@@ -10,6 +10,7 @@ from contextlib import redirect_stderr
 from datetime import datetime, timezone
 import importlib.util
 import io
+import logging
 from pathlib import Path
 import time
 import uuid
@@ -54,6 +55,7 @@ class Telegram:
         self._overflow = False
         self._seq = 0
         self._media_cleanup = {}
+        self._media_errors = {}
         self.client.add_event_handler(self._enqueue, events.Raw())
 
     async def _call(self, awaitable, *, sending=False):
@@ -138,26 +140,40 @@ class Telegram:
     async def _media(self, peer, msg):
         done = set()
         for dest in self._media_configs(peer):
+            destination_id = dest["destination_id"]
+            if destination_id in self._media_errors:
+                continue
             cfg = dest["project_config"]
             if cfg.get("media", True) is False:
                 continue
-            self.snapshot.PROJECT_ROOT = Path(dest["project_root"])
-            self.snapshot.apply_media_settings(cfg)
-            # Account is part of the namespace: equal ids in other sessions
-            # cannot collide. The snapshot helper preserves message filenames.
-            cache = self.snapshot.MEDIA_CACHE / self.account / f"{peer['kind']}-{peer['id']}"
-            if cache in done:
+            reason = "MEDIA_SETTINGS_INVALID"
+            try:
+                # Legacy helpers can exit with config values in their diagnostics.
+                # Refuse this destination's media without stopping text catch-up.
+                with redirect_stderr(io.StringIO()):
+                    self.snapshot.PROJECT_ROOT = Path(dest["project_root"])
+                    self.snapshot.apply_media_settings(cfg)
+                    # Account is part of the namespace: equal ids in other sessions
+                    # cannot collide. The helper preserves message filenames.
+                    cache = self.snapshot.MEDIA_CACHE / self.account / f"{peer['kind']}-{peer['id']}"
+                    if cache in done:
+                        continue
+                    last = self._media_cleanup.get(cache, 0)
+                    if time.monotonic() - last >= 3600:
+                        reason = "MEDIA_CLEANUP_REFUSED"
+                        old_cache = self.snapshot.MEDIA_CACHE
+                        try:
+                            self.snapshot.MEDIA_CACHE = cache
+                            self.snapshot.cleanup_old_media()
+                            self._media_cleanup[cache] = time.monotonic()
+                        finally:
+                            self.snapshot.MEDIA_CACHE = old_cache
+            except SystemExit:
+                self._media_errors[destination_id] = reason
+                index = self.config["destinations"].index(dest) + 1
+                logging.getLogger(__name__).warning("%s destination_index=%d", reason, index)
                 continue
             done.add(cache)
-            last = self._media_cleanup.get(cache, 0)
-            if time.monotonic() - last >= 3600:
-                old_cache = self.snapshot.MEDIA_CACHE
-                try:
-                    self.snapshot.MEDIA_CACHE = cache
-                    self.snapshot.cleanup_old_media()
-                    self._media_cleanup[cache] = time.monotonic()
-                finally:
-                    self.snapshot.MEDIA_CACHE = old_cache
             await self.snapshot.download_message_media(self.client, msg, cache, safe_errors=True)
 
     async def _read(self, peer, *, download_media=True, **kwargs):
