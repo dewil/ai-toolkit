@@ -1,7 +1,8 @@
 """Telethon implementation of the owner's Telegram port.
 
-Construction happens inside the locked factory. No interactive authorization,
-RPC retries or FloodWait sleeps: the durable owner controls those decisions.
+Construction happens inside the locked factory. No interactive authorization
+or hidden RPC retries. Only dialog loading permits bounded FloodWait sleeps;
+the durable owner controls backoff for other operations.
 """
 from __future__ import annotations
 
@@ -16,6 +17,10 @@ import time
 import uuid
 
 from telegram_session_owner import Disconnected, FloodWait, SendUncertain
+
+
+DIALOG_FLOOD_SLEEP_THRESHOLD = 120
+DIALOG_REQUEST_RETRIES = 3
 
 
 def _snapshot():
@@ -79,11 +84,23 @@ class Telegram:
         await self._call(self.client.connect())
         if not await self._call(self.client.is_user_authorized()):
             raise Disconnected()
+        # Dialog loading is the only place that may sleep on FloodWait: a large
+        # account always hits it on GetDialogs. Telethon sleeps only when a retry
+        # is allowed, so both the threshold and the retries are raised here and
+        # restored afterwards. A partial dialog list is never accepted.
+        retries = self.client._request_retries
+        self.client.flood_sleep_threshold = DIALOG_FLOOD_SLEEP_THRESHOLD
+        self.client._request_retries = DIALOG_REQUEST_RETRIES
         try:
             async for dialog in self.client.iter_dialogs():
                 self._dialogs[dialog.entity.id] = dialog.entity
+        except self.errors.FloodWaitError as exc:
+            raise FloodWait(exc.seconds) from None
         except Exception:
             raise Disconnected() from None
+        finally:
+            self.client.flood_sleep_threshold = 0
+            self.client._request_retries = retries
 
     async def disconnect(self):
         try:
