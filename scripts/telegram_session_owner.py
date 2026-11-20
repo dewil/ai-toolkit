@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -876,7 +877,7 @@ class Owner:
                     if request["schedule"]["remind"]:
                         at = st["result"].get("at")
                         if at is None:
-                            at = self.clock.utc() + 180 + self.rng.randint(1, 59)
+                            at = math.floor(self.clock.utc() + 180 + self.rng.randint(1, 59))
                     st["result"]["at"] = at
                     copies = self._accept(package, request, files, registry)
             if request["operation"] == "refresh":
