@@ -910,6 +910,7 @@ class Owner:
             st = self._write_status(request, st, "sending", "SENDING")
             self._save_pace()
             possible_send = True
+            sent_at = self.clock.utc()
             ack = await self._telegram.send(outgoing, peer, uploads)
             result = {"message_ids": ack.get("message_ids", []),
                       "scheduled_ids": ack.get("scheduled_ids", []), "at": at, "verification": "api_ack"}
@@ -921,9 +922,12 @@ class Owner:
             if at is not None:
                 if ack.get("at", at) != at:
                     raise SendUncertain(result["message_ids"])
-                verification_request = deepcopy(request)
-                verification_request["text"] = ack.get("text", request["text"])
-                result["verification"] = await self._verify_schedule(verification_request, peer, result)
+                # Remind's +181..239s may be absent from Saved Messages' queue.
+                # Allow processing down to the existing 120s minimum send lead.
+                if not (request["schedule"]["remind"] and 120 <= at - sent_at <= 239):
+                    verification_request = deepcopy(request)
+                    verification_request["text"] = ack.get("text", request["text"])
+                    result["verification"] = await self._verify_schedule(verification_request, peer, result)
             self._write_status(request, st, "scheduled" if at is not None else "sent",
                                "SCHEDULED" if at is not None else "SENT", result=result)
         except BlockingIOError:

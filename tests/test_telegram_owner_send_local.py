@@ -111,15 +111,104 @@ class SendLocal(Base):
         self.assertEqual((reply["code"], reply["exit_code"]), ("REQUEST_EXPIRED", 2))
         self.assertEqual(len(owner.fake.tg.calls), calls)
 
-    def test_remind_unavailable_verification_is_unknown_even_near(self):
+    def test_remind_api_ack_succeeds_without_queue_verification(self):
         owner = self.owner()
         owner.fake.tg.send_results = [{"message_ids": [], "scheduled_ids": [902], "at": NOW + 181}]
         owner.fake.tg.hooks["send"] = lambda: owner.fake.clock.advance(2)
         reply = self.deliver(owner, send_request(schedule=self.schedule(None, remind=True)))
-        self.assertEqual((reply["code"], reply["exit_code"]), ("SEND_UNCERTAIN", 4))
-        self.assertIsNone(reply["retain_until"])
+        self.assertEqual((reply["state"], reply["code"], reply["exit_code"]),
+                         ("scheduled", "SCHEDULED", 0))
+        self.assertEqual(reply["result"], {"message_ids": [], "scheduled_ids": [902],
+                                         "at": NOW + 181, "verification": "api_ack"})
+        self.assertEqual(reply["retain_until"], NOW + 181 + 7 * 86400)
         run(owner.step())
         self.assertEqual(len(owner.fake.tg.sends()), 1)
+
+    def test_remind_api_ack_window_boundaries_and_slow_response(self):
+        for jitter, response_delay in ((1, 0), (59, 0), (1, 70)):
+            with self.subTest(jitter=jitter, response_delay=response_delay):
+                owner = self.owner(rng=FakeRNG(randint=jitter))
+                at = NOW + 180 + jitter
+                owner.fake.tg.send_results = [{"scheduled_ids": [902], "at": at}]
+                owner.fake.tg.hooks["send"] = lambda: owner.fake.clock.advance(response_delay)
+                # A queue read is unnecessary even when it would fail.
+                owner.fake.tg.raises["scheduled"] = RuntimeError("unavailable")
+                reply = self.deliver(owner, send_request(schedule=self.schedule(None, remind=True)))
+                self.assertEqual((reply["state"], reply["code"], reply["exit_code"]),
+                                 ("scheduled", "SCHEDULED", 0))
+                self.assertEqual(reply["result"]["verification"], "api_ack")
+                self.assertEqual(reply["result"]["at"], at)
+                run(owner.close())
+
+    def test_remind_api_ack_allows_processing_to_minimum_send_lead(self):
+        for processing_delay in (1, 60, 61):
+            with self.subTest(processing_delay=processing_delay):
+                owner = self.owner(rng=FakeRNG(randint=1))
+                owner.fake.tg.hooks["resolve"] = lambda: owner.fake.clock.advance(processing_delay)
+                owner.fake.tg.send_results = [{"scheduled_ids": [902], "at": NOW + 181}]
+                reply = self.deliver(owner, send_request(schedule=self.schedule(None, remind=True)))
+                self.assertEqual((reply["code"], reply["exit_code"]), ("SCHEDULED", 0))
+                self.assertEqual(reply["result"]["verification"], "api_ack")
+                self.assertEqual(reply["result"]["at"], NOW + 181)
+                run(owner.close())
+
+    def test_remind_without_scheduled_ids_stays_uncertain(self):
+        for ack in ({"message_ids": [501], "scheduled_ids": [], "at": NOW + 181},
+                    {"message_ids": [501], "at": NOW + 181}):
+            with self.subTest(ack=ack):
+                owner = self.owner()
+                owner.fake.tg.send_results = [ack]
+                reply = self.deliver(owner, send_request(schedule=self.schedule(None, remind=True)))
+                self.assertEqual((reply["state"], reply["code"], reply["exit_code"]),
+                                 ("unknown", "SEND_UNCERTAIN", 4))
+                self.assertIsNone(reply["retain_until"])
+                run(owner.close())
+
+    def test_remind_ack_with_different_at_stays_uncertain(self):
+        for ack_at in (NOW + 180, NOW + 240):
+            with self.subTest(ack_at=ack_at):
+                owner = self.owner()
+                owner.fake.tg.send_results = [{"scheduled_ids": [902], "at": ack_at}]
+                reply = self.deliver(owner, send_request(schedule=self.schedule(None, remind=True)))
+                self.assertEqual((reply["code"], reply["exit_code"]), ("SEND_UNCERTAIN", 4))
+                run(owner.close())
+
+    def test_remind_outside_ack_window_keeps_queue_verification(self):
+        for verified in (False, True):
+            with self.subTest(verified=verified):
+                owner = self.owner(rng=FakeRNG(randint=59))
+                # At send time the saved schedule is 240s away after a clock correction.
+                owner.fake.tg.hooks["resolve"] = lambda: owner.fake.clock.advance(-1)
+                owner.fake.tg.send_results = [{"scheduled_ids": [902], "at": NOW + 239}]
+                if verified:
+                    owner.fake.tg.scheduled_data = [{"id": 902, "at": NOW + 239, "text": "Проверка"}]
+                reply = self.deliver(owner, send_request(schedule=self.schedule(None, remind=True)))
+                self.assertEqual((reply["code"], reply["exit_code"]),
+                                 ("SCHEDULED", 0) if verified else ("SEND_UNCERTAIN", 4))
+                if verified:
+                    self.assertEqual(reply["result"]["verification"], "scheduled_verified")
+                run(owner.close())
+
+    def test_remind_processing_below_minimum_send_lead_still_rejected(self):
+        owner = self.owner()
+        owner.fake.tg.hooks["resolve"] = lambda: owner.fake.clock.advance(62)
+        owner.fake.tg.send_results = [{"scheduled_ids": [902], "at": NOW + 181}]
+        reply = self.deliver(owner, send_request(schedule=self.schedule(None, remind=True)))
+        self.assertEqual((reply["code"], reply["exit_code"]), ("INVALID_REQUEST", 2))
+        self.assertEqual(owner.fake.tg.sends(), [])
+
+    def test_non_remind_in_remind_window_stays_uncertain_without_queue(self):
+        for lead in (181, 210, 239):
+            with self.subTest(lead=lead):
+                owner = self.owner()
+                at = NOW + lead
+                owner.fake.tg.send_results = [{"scheduled_ids": [902], "at": at}]
+                request = send_request(schedule=self.schedule(at, exact_minute=True))
+                request["options"]["no_pace_check"] = True
+                reply = self.deliver(owner, request)
+                self.assertEqual((reply["state"], reply["code"], reply["exit_code"]),
+                                 ("unknown", "SEND_UNCERTAIN", 4))
+                run(owner.close())
 
     def test_source_replaced_after_snapshot_cannot_be_uploaded(self):
         store = FakeStore()
