@@ -541,13 +541,15 @@ class Owner:
             code = "OWNER_ALREADY_RUNNING"
         except _StartError as error:
             code = str(error)
+        except (Disconnected, FloodWait):
+            code = "OWNER_UNAVAILABLE"
         except Exception:
             code = "INVALID_CONFIG"
         try:
             await self.close()
         except Exception:
             logging.getLogger(__name__).error("OWNER_START_CLEANUP_FAILED")
-        return {"code": code, "exit_code": 2}
+        return {"code": code, "exit_code": 7 if code == "OWNER_UNAVAILABLE" else 2}
 
     async def step(self) -> bool:
         """Do bounded maintenance and at most one send, without sleeping."""
