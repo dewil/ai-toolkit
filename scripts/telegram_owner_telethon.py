@@ -158,8 +158,8 @@ class Telegram:
                     cache = self.snapshot.MEDIA_CACHE / self.account / f"{peer['kind']}-{peer['id']}"
                     if cache in done:
                         continue
-                    last = self._media_cleanup.get(cache, 0)
-                    if time.monotonic() - last >= 3600:
+                    last = self._media_cleanup.get(cache)
+                    if last is None or time.monotonic() - last >= 3600:
                         reason = "MEDIA_CLEANUP_REFUSED"
                         old_cache = self.snapshot.MEDIA_CACHE
                         try:
