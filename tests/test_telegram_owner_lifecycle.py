@@ -43,6 +43,46 @@ class Reconnect(Base):
     def state(self):
         return json.loads((self.env.root("a") / "heartbeat.json").read_bytes())["state"]
 
+    def test_idle_listing_is_cached_and_sweep_has_30_second_interval(self):
+        owner = self.started()
+        root = self.env.root("a")
+        for name in ("tmp", "status", "outbox"):
+            mkdirs(root / name)
+        store = owner.fake.store
+        with patch.object(store, "list", wraps=store.list) as listing:
+            run(owner.step())  # первый проход уборки без ожидания
+            self.assertCountEqual([c.args[0] for c in listing.call_args_list],
+                                  [root / name for name in ("tmp", "status", "outbox")])
+            listing.reset_mock()
+            for _ in range(20):
+                run(owner.step())
+            owner.fake.clock.advance(29.9)
+            run(owner.step())
+            listing.assert_not_called()
+            owner.fake.clock.advance(0.1)
+            run(owner.step())
+            self.assertCountEqual([c.args[0] for c in listing.call_args_list],
+                                  [root / name for name in ("tmp", "status")])
+
+    def test_same_owner_restart_discards_terminal_cache_and_recovers_sending(self):
+        owner = self.started()
+        req = send_request("a")
+        root = self.env.root("a")
+        write_package(root, req)
+        run(owner.step())
+        self.assertEqual(read_status(root, req["request_id"])["state"], "sent")
+        run(owner.close())
+        # A durable sending marker restored while the owner is stopped must
+        # override its previous in-memory terminal observation.
+        status = read_status(root, req["request_id"])
+        status.update(state="sending", code="SENDING", retain_until=None)
+        owner.fake.store.atomic_write(root / "status" / f"{req['request_id']}.json",
+                                     json.dumps(status).encode())
+        self.assertEqual(run(owner.start())["code"], "READY")
+        run(owner.step())
+        self.assertEqual(read_status(root, req["request_id"])["state"], "unknown")
+        self.assertEqual(len(owner.fake.tg.sends()), 1)
+
     def test_step_resets_stale_transport_and_catches_up_before_ready(self):
         tg = StaleTransport()
         owner = self.started(tg=tg, destinations=[self.env.destination()])
@@ -118,6 +158,9 @@ class Reconnect(Base):
         run(owner.step())
         self.assertEqual(owner.fake.tg.names().count("connect"), 2)
         owner.fake.clock.advance(1)
+        run(owner.step())
+        self.assertEqual(owner.fake.tg.names().count("connect"), 2)
+        owner.fake.clock.advance(15)  # новый проход уборки: не чаще одного в 30 с
         run(owner.step())
         self.assertEqual(owner.fake.tg.names().count("connect"), 3)
 

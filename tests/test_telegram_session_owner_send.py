@@ -777,6 +777,7 @@ class TmpWriterLock(OwnerCase):
         self.assertTrue(d.exists(), "tmp с активным writer-lock удален по одному возрасту")
         self.assertEqual(o.fake.clock.async_sleeps, [])
         writer.__exit__(None, None, None)
+        o.fake.clock.advance(30)  # следующий проход уборки, без активного писателя
         run(o.step())
         self.assertFalse(d.exists())
 
@@ -837,6 +838,9 @@ class TtlSweep(OwnerCase):
         self.sweep(o)
         self.assertTrue(self.exists("outbox", rid) and self.exists("status", rid))
         o.fake.clock.advance(1)  # utc >= retain_until
+        self.sweep(o)
+        self.assertTrue(self.exists("outbox", rid) and self.exists("status", rid))
+        o.fake.clock.advance(29)  # 30 с после предыдущего прохода уборки
         self.sweep(o)
         self.assertFalse(self.exists("outbox", rid))
         self.assertFalse(self.exists("status", rid))
@@ -916,6 +920,7 @@ class TtlSweep(OwnerCase):
         except OSError:
             pass
         self.assertTrue(self.exists("status", rid))
+        o.fake.clock.advance(30)  # повтор удаления на следующей уборке
         self.sweep(o)
         self.assertFalse(self.exists("outbox", rid))
         self.assertFalse(self.exists("status", rid))

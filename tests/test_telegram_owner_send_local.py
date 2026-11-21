@@ -251,6 +251,7 @@ class SendLocal(Base):
         self.assertEqual(reply["code"], "SENT")
         self.assertTrue(any((self.env.root("a") / "outbox" / rid).exists() for rid in stale))
         for _ in range(4):
+            owner.fake.clock.advance(30)  # ротация на очередном проходе уборки
             run(owner.step())
         self.assertTrue(all(not (self.env.root("a") / "outbox" / rid).exists() for rid in stale))
 

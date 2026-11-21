@@ -34,6 +34,8 @@ RPC_TIMEOUTS = {"connect": 240, "disconnect": 15, "resolve": 30,
                 "upload": 120, "send": 60, "scheduled": 30}
 WATCHDOG_TIMEOUT = 300
 MIN_FAILURE_UPTIME = 60  # With RestartSec=15: at most 4 starts per 300s.
+SWEEP_INTERVAL = 30
+TERMINAL_STATES = frozenset(("sent", "scheduled", "refreshed", "rejected", "unknown"))
 
 
 class HeartbeatWatchdog:
@@ -332,6 +334,10 @@ class Owner:
         self._pace = {}
         self._stepping = False
         self._queue_cursor = ""
+        self._terminal_ids = set()
+        self._outbox_stamp = None
+        self._outbox_paths = ()
+        self._sweep_at = 0
         self._sweep_cursor = {"tmp": "", "status": ""}
         self._destinations = []
         self._mirrors = []
@@ -620,6 +626,11 @@ class Owner:
             await self._rpc("connect")
             await self._catch_up()
             self._heartbeat("ready")
+            # A new ownership interval always recovers from durable statuses.
+            self._terminal_ids.clear()
+            self._outbox_stamp = None
+            self._outbox_paths = ()
+            self._sweep_at = self.clock.monotonic()
             self._started = True
             return {"code": "READY", "exit_code": 0}
         except BlockingIOError:
@@ -644,7 +655,11 @@ class Owner:
         progress = False
         try:
             self._heartbeat(self._state)
-            progress = self._sweep()
+            now = self.clock.monotonic()
+            if now >= self._sweep_at:
+                # Include unsuccessful/busy sweeps in the rate limit.
+                self._sweep_at = now + SWEEP_INTERVAL
+                progress = self._sweep()
             if self.clock.monotonic() >= self._retry_at:
                 if self._state == "degraded":
                     if self.clock.monotonic() < self._reconnect_at:
@@ -757,6 +772,10 @@ class Owner:
             raise client._Error("QUEUE_FULL")
         with self.store.lock(self.root / "quota.lock"):
             self.store.atomic_write(self.root / "status" / f"{st['request_id']}.json", data)
+            if state in TERMINAL_STATES:
+                self._terminal_ids.add(st["request_id"])
+            else:
+                self._terminal_ids.discard(st["request_id"])
             # A terminal status occupies its actual bytes; no future copies
             # need reservation. Retained bodies remain charged by _usage.
             if state not in ("queued", "sending"):
@@ -809,6 +828,7 @@ class Owner:
                                 client._private(self.store, package, "dir")
                                 self.store.remove(package)
                             self.store.remove(path)
+                            self._terminal_ids.discard(path.stem)
                         progress = True
                     except BlockingIOError:
                         continue
@@ -822,10 +842,20 @@ class Owner:
         import telegram_owner_client as client
 
         directory = self.root / "outbox"
-        if self._optional_inspect(directory) is None:
+        info = self._optional_inspect(directory)
+        if info is None:
+            self._outbox_stamp = None
+            self._outbox_paths = ()
+            self._terminal_ids.clear()
             return None
-        paths = sorted(p for p in self.store.list(directory)
-                       if p.parent == directory and client._uuid(p.name))
+        stamp = (info["dev"], info["ino"], info["mtime"])
+        if stamp != self._outbox_stamp:
+            paths = sorted(p for p in self.store.list(directory)
+                           if p.parent == directory and client._uuid(p.name))
+            self._terminal_ids.intersection_update(p.name for p in paths)
+            self._outbox_paths = paths
+            self._outbox_stamp = stamp
+        paths = [p for p in self._outbox_paths if p.name not in self._terminal_ids]
         paths = ([p for p in paths if p.name > self._queue_cursor]
                  + [p for p in paths if p.name <= self._queue_cursor])
         for path in paths:
@@ -833,6 +863,10 @@ class Owner:
             if st is None or st.get("state") in ("queued", "sending"):
                 self._queue_cursor = path.name
                 return path, st
+            # Only the owner writes statuses. Protocol clients never revive a
+            # terminal UUID; a new send is published as a new outbox entry.
+            if st.get("state") in TERMINAL_STATES:
+                self._terminal_ids.add(path.name)
         return None
 
     def _installation(self):

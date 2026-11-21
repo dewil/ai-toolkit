@@ -300,7 +300,7 @@ class Timeouts(Base):
         with patch.object(self.mod, "WATCHDOG_TIMEOUT", 0.05):
             run(scenario())
 
-    def test_serve_waits_after_repeated_early_step_errors(self):
+    def test_serve_waits_after_sweep_error_without_repeating_sweep_each_step(self):
         owner = self.env.make_owner("a")
         stop = asyncio.Event()
         waits = []
@@ -319,7 +319,7 @@ class Timeouts(Base):
         with patch.object(owner, "_sweep", side_effect=OSError("private-disk-error")) as sweep:
             with patch.object(asyncio, "wait_for", timed_wait):
                 self.assertEqual(run(self.mod._serve(owner, stop, Mock())), 0)
-        self.assertEqual(sweep.call_count, 5)
+        self.assertEqual(sweep.call_count, 1)  # ошибка тоже ограничена интервалом 30 с
         self.assertEqual(waits, [0.1] * 5)
         self.assertEqual(owner.fake.tg.names(), ["connect", "disconnect"])
 
