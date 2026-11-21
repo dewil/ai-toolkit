@@ -634,7 +634,7 @@ class Crash(MirrorCase):
         d1 = self.env.destination("d1", 1001, "c1")
         d2 = self.env.destination("d2", 2002, "c2")
         store = FakeStore()
-        store.fail_on[("atomic_write", "c2")] = ("before", OSError("disk"))
+        store.fail_on[("atomic_write", "/c2/")] = ("before", OSError("disk"))
         tg = FakeTelegram("a")
         tg.history_data = [rec(1)]
         o = self.env.make_owner("a", destinations=[d1, d2], store=store, tg=tg)

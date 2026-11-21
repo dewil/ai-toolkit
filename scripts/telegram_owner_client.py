@@ -17,7 +17,7 @@ import time
 import uuid
 from zoneinfo import ZoneInfo
 
-from telegram_session_owner import Store, _session
+from telegram_session_owner import Store, TERMINAL_STATES, _session
 
 JSON_LIMIT = 64 * 1024
 FILE_LIMIT = 64 * 1024 * 1024
@@ -345,7 +345,7 @@ def _quota_lock(store, root, clock, deadline):
 
 
 def _usage(store, root):
-    packages, used, pending_ids = [], 0, set()
+    packages, used, pending_ids = set(), 0, set()
     for name in ("tmp", "outbox"):
         directory = root / name
         if _inspect(store, directory) is None:
@@ -360,7 +360,7 @@ def _usage(store, root):
                 raise _Error("UNSAFE_PATH")
             package = directory / p.relative_to(directory).parts[0]
             if p.parent == directory and info["kind"] == "dir":
-                packages.append(p)
+                packages.add(p)
             elif info["kind"] == "file":
                 sizes[package] = sizes.get(package, 0) + info["size"]
         for p in paths:
@@ -387,14 +387,34 @@ def _usage(store, root):
                     used += store.inspect(p)["size"]
     # Published legacy packages also reserve their future status slot.
     pending_ids.update(p.name.split(".")[0] for p in packages)
-    return len(packages), used, len(status_ids | pending_ids)
+    return packages, used, len(status_ids | pending_ids)
+
+
+def _queue_full(store, root, packages, *, limit=PACKAGE_LIMIT):
+    # Most submissions need no status reads at all. Above the threshold, stop
+    # as soon as excluding terminal packages leaves room. Do not cache states
+    # across clients: only the owner's durable statuses determine the outcome.
+    remaining = len(packages)
+    if remaining < limit:
+        return False
+    for package in packages:
+        rid = package.name.split(".")[0]
+        if not _uuid(rid):
+            continue
+        st = _status(store, root, rid)
+        if st is not None and st.get("state") in TERMINAL_STATES:
+            remaining -= 1
+            if remaining < limit:
+                return False
+    return True
 
 
 def _quota(store, root, request, data, files):
     packages, used, statuses = _usage(store, root)
     # Reserve JSON, immutable copies, maximum status and reservation metadata.
     size = len(data) + sum(f["size"] for f in files) + JSON_LIMIT + 1024
-    if packages >= PACKAGE_LIMIT or used + size > SPOOL_LIMIT or statuses >= STATUS_LIMIT:
+    if (used + size > SPOOL_LIMIT or statuses >= STATUS_LIMIT
+            or _queue_full(store, root, packages)):
         raise _Error("QUEUE_FULL")
     return size
 

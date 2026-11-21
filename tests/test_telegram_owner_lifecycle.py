@@ -48,6 +48,11 @@ class Reconnect(Base):
         root = self.env.root("a")
         for name in ("tmp", "status", "outbox"):
             mkdirs(root / name)
+        # A directory must outlive the two-second timestamp settling window
+        # before unchanged metadata can prove that its listing is cached.
+        outbox = root / "outbox"
+        old = outbox.stat().st_mtime - 3
+        os.utime(outbox, (old, old))
         store = owner.fake.store
         with patch.object(store, "list", wraps=store.list) as listing:
             run(owner.step())  # первый проход уборки без ожидания

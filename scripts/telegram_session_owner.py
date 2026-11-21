@@ -21,6 +21,7 @@ import re
 import shutil
 import stat
 import threading
+import time
 import uuid
 
 from telegram_mirror import Mirror
@@ -35,6 +36,7 @@ RPC_TIMEOUTS = {"connect": 240, "disconnect": 15, "resolve": 30,
 WATCHDOG_TIMEOUT = 300
 MIN_FAILURE_UPTIME = 60  # With RestartSec=15: at most 4 starts per 300s.
 SWEEP_INTERVAL = 30
+OUTBOX_SETTLE_SECONDS = 2
 TERMINAL_STATES = frozenset(("sent", "scheduled", "refreshed", "rejected", "unknown"))
 
 
@@ -182,7 +184,8 @@ class Store:
         return {"realpath": str(path.resolve()), "uid": st.st_uid,
                 "mode": stat.S_IMODE(st.st_mode), "acl_safe": acl_safe,
                 "kind": kind, "size": st.st_size, "dev": st.st_dev,
-                "ino": st.st_ino, "mtime": st.st_mtime}
+                "ino": st.st_ino, "mtime": st.st_mtime,
+                "mtime_ns": st.st_mtime_ns, "nlink": st.st_nlink}
 
     def list(self, path: Path) -> list[Path]:
         result = []
@@ -848,13 +851,20 @@ class Owner:
             self._outbox_paths = ()
             self._terminal_ids.clear()
             return None
-        stamp = (info["dev"], info["ino"], info["mtime"])
-        if stamp != self._outbox_stamp:
+        stamp = (info["dev"], info["ino"], info["mtime"],
+                 info.get("mtime_ns"), info.get("nlink"))
+        # ext4 can publish another package within the same directory timestamp
+        # tick. Compare with real wall time: injected Clock UTC is unrelated to
+        # filesystem mtimes. A young (or future) stamp is not yet a cache key.
+        young = time.time() - info["mtime"] < OUTBOX_SETTLE_SECONDS
+        if stamp != self._outbox_stamp or young:
             paths = sorted(p for p in self.store.list(directory)
                            if p.parent == directory and client._uuid(p.name))
             self._terminal_ids.intersection_update(p.name for p in paths)
             self._outbox_paths = paths
-            self._outbox_stamp = stamp
+            # Recheck once more even if the next step runs after the settling
+            # window: a young snapshot cannot establish a durable cache key.
+            self._outbox_stamp = None if young else stamp
         paths = [p for p in self._outbox_paths if p.name not in self._terminal_ids]
         paths = ([p for p in paths if p.name > self._queue_cursor]
                  + [p for p in paths if p.name <= self._queue_cursor])
@@ -897,8 +907,9 @@ class Owner:
         if self._optional_inspect(reserve) is not None:
             own_size = max(own_size, client._read_json(self.store, reserve)["bytes"])
         required = len(client._json(request)) + sum(f["size"] for f in files) + client.JSON_LIMIT + 1024
-        if (packages > client.PACKAGE_LIMIT or statuses > client.STATUS_LIMIT
-                or used - own_size + required > client.SPOOL_LIMIT):
+        if (statuses > client.STATUS_LIMIT or used - own_size + required > client.SPOOL_LIMIT
+                or client._queue_full(self.store, self.root, packages,
+                                      limit=client.PACKAGE_LIMIT + 1)):
             raise client._Error("QUEUE_FULL")
         self.store.atomic_write(reserve, client._json({"request_id": request["request_id"], "bytes": required}))
         copies = package / "files"

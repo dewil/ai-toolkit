@@ -323,6 +323,38 @@ class Timeouts(Base):
         self.assertEqual(waits, [0.1] * 5)
         self.assertEqual(owner.fake.tg.names(), ["connect", "disconnect"])
 
+    def test_serve_waits_after_repeated_early_step_errors(self):
+        owner = self.env.make_owner("a")
+        stop = asyncio.Event()
+        waits, errors = [], []
+        original_wait_for = asyncio.wait_for
+        original_heartbeat = owner._heartbeat
+
+        def failing_step_heartbeat(state):
+            # Fail the first heartbeat of each step; allow the degraded
+            # heartbeat and the start/close lifecycle to run normally.
+            if owner._stepping and len(errors) == len(waits):
+                errors.append(state)
+                raise OSError("private-disk-error")
+            return original_heartbeat(state)
+
+        async def timed_wait(awaitable, timeout):
+            if timeout == 0.1:
+                awaitable.close()
+                waits.append(timeout)
+                owner.fake.clock.advance(timeout)
+                if len(waits) == 5:
+                    stop.set()
+                raise asyncio.TimeoutError
+            return await original_wait_for(awaitable, timeout=timeout)
+
+        with patch.object(owner, "_heartbeat", side_effect=failing_step_heartbeat):
+            with patch.object(asyncio, "wait_for", timed_wait):
+                self.assertEqual(run(self.mod._serve(owner, stop, Mock())), 0)
+        self.assertEqual(len(errors), 5)
+        self.assertEqual(waits, [0.1] * 5)
+        self.assertEqual(owner.fake.tg.names(), ["connect", "disconnect"])
+
 
 class TransportDeadlines(unittest.TestCase):
     def test_transport_and_authorization_have_short_deadlines(self):
