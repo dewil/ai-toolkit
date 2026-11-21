@@ -8,6 +8,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
+import asyncio
 import ctypes
 import errno
 import fcntl
@@ -19,9 +20,62 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import threading
 import uuid
 
 from telegram_mirror import Mirror
+
+
+# Public adapter budgets include conversion/media work. Connect includes dialog
+# pagination and its bounded FloodWait sleeps; transport/auth have a shorter
+# deadline inside Telethon. The watchdog also bounds the complete startup/step.
+RPC_TIMEOUTS = {"connect": 240, "disconnect": 15, "resolve": 30,
+                "history": 240, "recent": 60, "events": 60,
+                "upload": 120, "send": 60, "scheduled": 30}
+WATCHDOG_TIMEOUT = 300
+MIN_FAILURE_UPTIME = 60  # With RestartSec=15: at most 4 starts per 300s.
+
+
+class HeartbeatWatchdog:
+    """Exit even if the asyncio loop or cancellation of an RPC gets stuck."""
+
+    def __init__(self, clock, *, terminate=None, interval=1):
+        self.clock = clock
+        self.terminate = os._exit if terminate is None else terminate
+        self.interval = interval
+        self._completed_at = clock.monotonic()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True,
+                                       name="owner-heartbeat-watchdog")
+
+    def completed(self):
+        with self._lock:
+            self._completed_at = self.clock.monotonic()
+
+    def check(self):
+        with self._lock:
+            elapsed = self.clock.monotonic() - self._completed_at
+        if elapsed >= WATCHDOG_TIMEOUT:
+            try:
+                logging.getLogger(__name__).error(
+                    "OWNER_WATCHDOG_TIMEOUT stalled_for=%.1f exit_code=1", elapsed)
+            finally:
+                # Do not await cleanup: it may be the stalled operation. The OS
+                # releases locks; durable sending is recovered as unknown.
+                self.terminate(1)
+
+    def _run(self):
+        while not self._stop.wait(self.interval):
+            self.check()
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self.thread.join(timeout=2)
 
 
 class FloodWait(Exception):
@@ -272,6 +326,8 @@ class Owner:
         self._state = None
         self._heartbeat_at = None
         self._retry_at = 0
+        self._retry_delay = 15
+        self._reconnect_at = 0
         self._instance = str(uuid.uuid4())
         self._pace = {}
         self._stepping = False
@@ -411,6 +467,21 @@ class Owner:
         if before is not None and (before["dev"], before["ino"]) != (after["dev"], after["ino"]):
             raise _StartError("UNSAFE_PATH")
 
+    async def _rpc(self, operation, *args, **kwargs):
+        timeout = RPC_TIMEOUTS[operation]
+        try:
+            return await asyncio.wait_for(
+                getattr(self._telegram, operation)(*args, **kwargs), timeout=timeout)
+        except asyncio.TimeoutError:
+            # Only fixed operation names and budgets: no peers, paths, request
+            # bodies or adapter exception text belong in the journal.
+            logging.getLogger(__name__).warning(
+                "OWNER_RPC_TIMEOUT operation=%s timeout=%s", operation, timeout)
+            if operation == "send":
+                self._network_failure(Disconnected())
+                raise SendUncertain() from None
+            raise Disconnected() from None
+
     async def _catch_up(self):
         """Drain history before merging queued events, once per canonical peer."""
         if not self._mirrors:
@@ -418,7 +489,7 @@ class Owner:
             for destination in self._destinations:
                 target = destination["peer"]
                 if target not in resolved:
-                    peer = await self._telegram.resolve(self.account, target)
+                    peer = await self._rpc("resolve", self.account, target)
                     if (peer.get("account") != self.account or peer.get("kind") not in ("User", "Chat", "Channel")
                             or type(peer.get("id")) is not int or peer["id"] <= 0):
                         raise _StartError("INVALID_CONFIG")
@@ -442,8 +513,8 @@ class Owner:
                 with mirror.locked():
                     data, _ = mirror.load()
                     cursors.append(mirror.cursor(data))
-            history = await self._telegram.history(group[0].peer, after_id=min(cursors), limit=None)
-            recent = await self._telegram.recent(group[0].peer, limit=50)
+            history = await self._rpc("history", group[0].peer, after_id=min(cursors), limit=None)
+            recent = await self._rpc("recent", group[0].peer, limit=50)
             for mirror, cursor in zip(group, cursors):
                 with mirror.locked():
                     data, state = mirror.load()
@@ -505,6 +576,13 @@ class Owner:
             mirror.load()
         self._write_status(request, st, "refreshed", "REFRESHED", result=result)
 
+    def _set_state(self, state):
+        if state != self._state:
+            logger = logging.getLogger(__name__)
+            log = logger.warning if state == "degraded" else logger.info
+            log("OWNER_STATE previous=%s state=%s", self._state, state)
+            self._state = state
+
     def _heartbeat(self, state):
         now = self.clock.monotonic()
         if state != self._state or self._heartbeat_at is None or now - self._heartbeat_at >= 5:
@@ -512,7 +590,8 @@ class Owner:
                     "pid": os.getpid(), "state": state}
             self.store.atomic_write(self.root / "heartbeat.json",
                                     json.dumps(data).encode("utf-8"))
-            self._state, self._heartbeat_at = state, now
+            self._set_state(state)
+            self._heartbeat_at = now
 
     async def start(self) -> dict:
         if self._started:
@@ -532,7 +611,7 @@ class Owner:
                 self._heartbeat("degraded")
             self._load_pace()
             self._telegram = self.telegram_factory()
-            await self._telegram.connect()
+            await self._rpc("connect")
             await self._catch_up()
             self._heartbeat("ready")
             self._started = True
@@ -562,11 +641,20 @@ class Owner:
             progress = self._sweep()
             if self.clock.monotonic() >= self._retry_at:
                 if self._state == "degraded":
-                    await self._telegram.connect()
+                    if self.clock.monotonic() < self._reconnect_at:
+                        return await self._step_send(allow_rpc=False) or progress
+                    # Sweep/overflow may mark degraded without network backoff.
+                    self._reconnect_at = self.clock.monotonic() + 15
+                    # A stale transport may still report connected. Explicitly
+                    # reset it; connect also verifies authorization. No send RPC
+                    # is retried here, and ready follows durable mirror catch-up.
+                    logging.getLogger(__name__).info("OWNER_RECONNECT")
+                    await self._rpc("disconnect")
+                    await self._rpc("connect")
                     await self._catch_up()
                     self._heartbeat("ready")
                     progress = True
-                events = await self._telegram.events()
+                events = await self._rpc("events")
                 if events:
                     self._pending_events.extend(deepcopy(events))
                     progress = True
@@ -575,6 +663,8 @@ class Owner:
                 else:
                     progress = await self._step_send() or progress
                 self._heartbeat(self._state)
+                if self._state == "ready":
+                    self._retry_delay = 15
             else:
                 # Local recovery/expiry must continue during account backoff.
                 progress = await self._step_send(allow_rpc=False) or progress
@@ -595,9 +685,16 @@ class Owner:
 
     def _network_failure(self, error):
         seconds = self._flood_seconds(error)
-        self._retry_at = self.clock.monotonic() + (15 if seconds is None else seconds)
+        delay = self._retry_delay if seconds is None else seconds
+        self._retry_at = self.clock.monotonic() + delay
         if seconds is None:
+            self._retry_delay = min(300, self._retry_delay * 2)
             self._degraded()
+        reason = ("FLOOD_WAIT" if seconds is not None else
+                  "DISCONNECTED" if isinstance(error, Disconnected) else "LOCAL_ERROR")
+        # Never log exception text: adapter/IO diagnostics may contain secrets.
+        logging.getLogger(__name__).warning(
+            "OWNER_RECOVERY_WAIT reason=%s retry_in=%s", reason, delay)
 
     def _load_pace(self):
         import telegram_owner_client as client
@@ -885,7 +982,7 @@ class Owner:
             if request["schedule"]["remind"]:
                 # This must be durable before upload, including on retry.
                 st = self._write_status(request, st, "queued", "QUEUED")
-            peer = await self._telegram.resolve(self.account, request["target"]["peer"])
+            peer = await self._rpc("resolve", self.account, request["target"]["peer"])
             if (peer.get("account") != self.account or peer.get("kind") not in ("User", "Chat", "Channel")
                     or type(peer.get("id")) is not int or peer["id"] <= 0):
                 raise client._Error("INVALID_REQUEST")
@@ -898,7 +995,7 @@ class Owner:
                 if wait > 0:
                     self._write_status(request, st, "rejected", "PACE_TOO_EARLY", 3, retry_after=wait)
                     return True
-            uploads = [await self._telegram.upload(path) for path in copies]
+            uploads = [await self._rpc("upload", path) for path in copies]
             if self.clock.utc() >= request["expires_at"]:
                 raise client._Error("REQUEST_EXPIRED")
             if at is not None and not 120 <= at - self.clock.utc() <= 366 * 86400:
@@ -911,7 +1008,7 @@ class Owner:
             self._save_pace()
             possible_send = True
             sent_at = self.clock.utc()
-            ack = await self._telegram.send(outgoing, peer, uploads)
+            ack = await self._rpc("send", outgoing, peer, uploads)
             result = {"message_ids": ack.get("message_ids", []),
                       "scheduled_ids": ack.get("scheduled_ids", []), "at": at, "verification": "api_ack"}
             st["result"] = result
@@ -975,7 +1072,7 @@ class Owner:
     async def _verify_schedule(self, request, peer, result):
         unavailable = False
         try:
-            scheduled = await self._telegram.scheduled(peer)
+            scheduled = await self._rpc("scheduled", peer)
         except Exception as error:
             if isinstance(error, Disconnected) or self._flood_seconds(error) is not None:
                 self._network_failure(error)
@@ -997,7 +1094,7 @@ class Owner:
         try:
             self._heartbeat("degraded")
         except OSError:
-            self._state = "degraded"
+            self._set_state("degraded")
             self._heartbeat_at = None
             logging.getLogger(__name__).error("OWNER_HEARTBEAT_FAILED")
 
@@ -1008,9 +1105,9 @@ class Owner:
                     self._heartbeat("stopping")
                 finally:
                     if self._telegram is not None:
-                        await self._telegram.disconnect()
+                        await self._rpc("disconnect")
             elif self._telegram is not None:
-                await self._telegram.disconnect()
+                await self._rpc("disconnect")
         finally:
             self._telegram = None
             self._started = False
@@ -1026,10 +1123,44 @@ class Owner:
                 raise unlock_error
 
 
+async def _serve(owner, stop, watchdog):
+    started_at = owner.clock.monotonic()
+    try:
+        reply = await owner.start()
+        watchdog.completed()
+        if reply["exit_code"]:
+            import sys
+            print(reply["code"], file=sys.stderr)
+            if reply["code"] == "OWNER_UNAVAILABLE":
+                # A long outage must not exhaust StartLimitBurst=5/300.
+                # Watchdog exits already take >=300s; fast startup failures
+                # need this floor before systemd's additional RestartSec=15.
+                delay = max(0, MIN_FAILURE_UPTIME - (owner.clock.monotonic() - started_at))
+                if delay:
+                    logging.getLogger(__name__).warning("OWNER_RESTART_WAIT retry_in=%.1f", delay)
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=delay)
+                    except asyncio.TimeoutError:
+                        pass
+                if stop.is_set():
+                    return 0
+            return reply["exit_code"]
+        while not stop.is_set():
+            await owner.step()
+            watchdog.completed()
+            # Bounded idle wait; signals wake it immediately.
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=0.1)
+            except asyncio.TimeoutError:
+                pass
+        return 0
+    finally:
+        await owner.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run one configured instance; the factory is reached only after locks."""
     import argparse
-    import asyncio
     import random
     import signal
     import sys
@@ -1039,6 +1170,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--instance", required=True)
     parser.add_argument("--config", required=True, type=Path)
     args = parser.parse_args(argv)
+    logging.basicConfig(format="%(levelname)s %(name)s %(message)s")
+    logging.getLogger(__name__).setLevel(logging.INFO)
     os.umask(0o077)
     try:
         store = Store()
@@ -1061,20 +1194,9 @@ def main(argv: list[str] | None = None) -> int:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop.set)
         try:
-            reply = await owner.start()
-            if reply["exit_code"]:
-                print(reply["code"], file=sys.stderr)
-                return reply["exit_code"]
-            while not stop.is_set():
-                await owner.step()
-                # Bounded idle wait; signals wake it immediately.
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=0.1)
-                except asyncio.TimeoutError:
-                    pass
-            return 0
+            with HeartbeatWatchdog(clock) as watchdog:
+                return await _serve(owner, stop, watchdog)
         finally:
-            await owner.close()
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(sig)
 
