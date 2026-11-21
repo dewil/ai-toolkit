@@ -202,7 +202,7 @@ def _schedule(request, clock):
         raise _Error("INVALID_REQUEST") from None
     if dt.minute % 15 == 0 and not schedule["exact_minute"]:
         raise _Error("ROUND_MINUTE", 6)
-    return dt.timestamp()
+    return math.floor(dt.timestamp())
 
 
 def _validate(request, clock):

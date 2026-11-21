@@ -61,6 +61,17 @@ class OwnerCase(Base):
         return req, st
 
 
+class SecondsTelegram(FakeTelegram):
+    """Telegram stores schedule dates with whole-second precision."""
+
+    async def send(self, request, peer, uploads):
+        self.send_results = [{"message_ids": [], "scheduled_ids": [900],
+                              "at": int(request["schedule"]["at"])}]
+        ack = await super().send(request, peer, uploads)
+        self.scheduled_data = [{"id": 900, "at": ack["at"], "text": request["text"]}]
+        return ack
+
+
 class Basics(OwnerCase):
     def test_send_me_one_id_sent_status(self):  # F25/F12
         o = self.make()
@@ -346,6 +357,19 @@ class Schedule(OwnerCase):
         s.update(sch)
         return s
 
+    def test_fractional_schedule_matches_whole_second_telegram_ack(self):
+        at = AT_OK + 0.2078
+        o = self.make(clock=FakeClock(NOW + 0.2078), tg=SecondsTelegram())
+        for peer, value in enumerate((at, dt.datetime.fromtimestamp(at, dt.timezone.utc).isoformat()), 77):
+            with self.subTest(at=value):
+                st = self.deliver(o, send_request("a", peer=peer, schedule=self.sched(value)))
+                self.assertEqual((st["code"], st["exit_code"]), ("SCHEDULED", 0))
+                sent_at = o.fake.tg.sends()[-1][1]["schedule"]["at"]
+                self.assertIs(type(sent_at), int)
+                self.assertEqual(sent_at, AT_OK)
+                self.assertEqual(st["result"]["at"], AT_OK)
+                self.assertEqual(st["result"]["verification"], "scheduled_verified")
+
     def test_lead_boundaries_and_round_minute(self):  # F16
         o = self.make()
         o.fake.clock.advance(0)
@@ -501,6 +525,18 @@ class Remind(OwnerCase):
     def scheduled_at(self, o):
         (_, request, _peer, _up), = o.fake.tg.sends()
         return to_unix(request["schedule"]["at"])
+
+    def test_fractional_clock_matches_whole_second_telegram_ack(self):
+        o = self.make(clock=FakeClock(NOW + 0.2078), tg=SecondsTelegram(),
+                      rng=FakeRNG(randint=1))
+        st = self.deliver(o, self.remind_req())
+        self.assertEqual((st["code"], st["exit_code"]), ("SCHEDULED", 0))
+        sent_at = o.fake.tg.sends()[0][1]["schedule"]["at"]
+        self.assertIs(type(sent_at), int)
+        self.assertEqual(sent_at, NOW + 181)
+        self.assertEqual(st["result"]["at"], NOW + 181)
+        self.assertEqual(st["result"]["scheduled_ids"], [900])
+        self.assertEqual(st["result"]["verification"], "api_ack")
 
     def test_rng_1_and_59_give_181_and_239_once(self):  # F18
         for r, expected in ((1, 181), (59, 239)):
