@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import deque
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
+import asyncio
 import importlib.util
 import io
 import logging
@@ -21,6 +22,7 @@ from telegram_session_owner import Disconnected, FloodWait, SendUncertain
 
 DIALOG_FLOOD_SLEEP_THRESHOLD = 120
 DIALOG_REQUEST_RETRIES = 3
+CONNECT_TIMEOUT = 30
 
 
 def _snapshot():
@@ -63,9 +65,17 @@ class Telegram:
         self._media_errors = {}
         self.client.add_event_handler(self._enqueue, events.Raw())
 
-    async def _call(self, awaitable, *, sending=False):
+    async def _call(self, awaitable, *, sending=False, timeout=None, operation=None):
         try:
+            if timeout is not None:
+                return await asyncio.wait_for(awaitable, timeout=timeout)
             return await awaitable
+        except asyncio.TimeoutError:
+            logging.getLogger(__name__).warning(
+                "OWNER_RPC_TIMEOUT operation=%s timeout=%s", operation, timeout)
+            if sending:
+                raise SendUncertain() from None
+            raise Disconnected() from None
         except self.errors.FloodWaitError as exc:
             raise FloodWait(exc.seconds) from None
         except Exception:
@@ -81,8 +91,9 @@ class Telegram:
         self._updates.append(update)
 
     async def connect(self):
-        await self._call(self.client.connect())
-        if not await self._call(self.client.is_user_authorized()):
+        await self._call(self.client.connect(), timeout=CONNECT_TIMEOUT, operation="transport_connect")
+        if not await self._call(self.client.is_user_authorized(), timeout=CONNECT_TIMEOUT,
+                                operation="is_user_authorized"):
             raise Disconnected()
         # Dialog loading is the only place that may sleep on FloodWait: a large
         # account always hits it on GetDialogs. Telethon sleeps only when a retry
