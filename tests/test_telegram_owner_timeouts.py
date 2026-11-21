@@ -58,7 +58,7 @@ class Timeouts(Base):
 
     def test_hung_recovery_calls_remain_degraded_then_recover(self):
         owner = self.started()
-        for operation in ("disconnect", "connect", "history", "recent"):
+        for operation in ("connect", "history", "recent"):
             with self.subTest(operation=operation):
                 owner.fake.tg.raises["events"] = self.mod.Disconnected()
                 self.step(owner)
@@ -69,6 +69,37 @@ class Timeouts(Base):
                 owner.fake.clock.advance(30)
                 self.step(owner)
                 self.assertEqual(self.state(), "ready")
+
+    def check_reconnect_after_failed_disconnect(self, *, hung):
+        owner = self.started()
+        tg, clock = owner.fake.tg, owner.fake.clock
+        tg.raises["events"] = self.mod.Disconnected()
+        self.step(owner)
+        clock.advance(15)
+        tg.calls.clear()
+        for operation in ("connect", "history", "recent"):
+            tg.hooks[operation] = lambda: self.assertEqual(self.state(), "degraded")
+        if hung:
+            failure = self.hung(tg, "disconnect")
+        else:
+            async def raising():
+                tg._log("disconnect")
+                raise OSError("private-disconnect-diagnostic")
+            failure = patch.object(tg, "disconnect", raising)
+        with failure, self.assertLogs("telegram_session_owner", level="WARNING") as logs:
+            self.step(owner)
+        self.assertEqual(tg.names()[:4], ["disconnect", "connect", "history", "recent"])
+        self.assertEqual(self.state(), "ready")
+        self.assertTrue(any(s.endswith("OWNER_RECONNECT_DISCONNECT_FAILED") for s in logs.output))
+        self.assertNotIn("private-disconnect-diagnostic", "\n".join(logs.output))
+        if hung:
+            self.assertTrue(any("OWNER_RPC_TIMEOUT operation=disconnect" in s for s in logs.output))
+
+    def test_raising_disconnect_does_not_block_reconnect(self):
+        self.check_reconnect_after_failed_disconnect(hung=False)
+
+    def test_hung_disconnect_does_not_block_reconnect(self):
+        self.check_reconnect_after_failed_disconnect(hung=True)
 
     def test_hung_refresh_is_queued_and_cannot_publish_partial_checkpoint(self):
         owner = self.started()
@@ -191,6 +222,106 @@ class Timeouts(Base):
         with self.assertLogs("telegram_session_owner", level="ERROR"):
             self.assertEqual(run(self.mod._serve(owner, stop, watchdog)), 0)
         self.assertEqual(exits, [1])
+
+    def test_long_reconnect_step_resets_watchdog_after_each_rpc(self):
+        owner = self.started()
+        tg, clock = owner.fake.tg, owner.fake.clock
+        tg.raises["events"] = self.mod.Disconnected()
+        self.step(owner)
+        clock.advance(15)
+        exits, completed_rpcs = [], []
+        watchdog = self.mod.HeartbeatWatchdog(clock, terminate=exits.append)
+        stop = asyncio.Event()
+        began = clock.monotonic()
+
+        def rpc(operation):
+            clock.advance(0.03)
+            watchdog.check()
+            completed_rpcs.append(operation)
+            if operation == "events":
+                stop.set()
+
+        for operation in ("disconnect", "connect", "history", "recent", "events"):
+            tg.hooks[operation] = lambda op=operation: rpc(op)
+        with patch.object(self.mod, "WATCHDOG_TIMEOUT", 0.05), patch.dict(
+                self.mod.RPC_TIMEOUTS, dict.fromkeys(self.mod.RPC_TIMEOUTS, 0.04)):
+            self.assertEqual(run(self.mod._serve(owner, stop, watchdog)), 0)
+        self.assertEqual(completed_rpcs[:5], ["disconnect", "connect", "history", "recent", "events"])
+        self.assertGreater(clock.monotonic() - began, 0.05)
+        self.assertEqual(exits, [])
+
+    def test_rpc_exception_and_timeout_reset_watchdog(self):
+        owner = self.started()
+        clock, tg = owner.fake.clock, owner.fake.tg
+        for hung in (False, True):
+            with self.subTest(hung=hung):
+                exits = []
+                watchdog = self.mod.HeartbeatWatchdog(clock, terminate=exits.append)
+                owner._watchdog = watchdog
+
+                async def failed():
+                    clock.advance(0.03)
+                    if hung:
+                        await asyncio.Future()
+                    raise self.mod.Disconnected()
+
+                with patch.object(tg, "events", failed), patch.object(self.mod, "WATCHDOG_TIMEOUT", 0.05):
+                    with self.assertRaises(self.mod.Disconnected):
+                        run(owner._rpc("events"))
+                    clock.advance(0.03)
+                    watchdog.check()
+                self.assertEqual(exits, [])
+
+    def test_single_hung_rpc_still_triggers_watchdog(self):
+        owner = self.env.make_owner("a")
+        clock, exits = owner.fake.clock, []
+        watchdog = self.mod.HeartbeatWatchdog(clock, terminate=exits.append)
+
+        async def scenario():
+            entered, stop = asyncio.Event(), asyncio.Event()
+
+            async def never():
+                entered.set()
+                await asyncio.Future()
+
+            with patch.object(owner.fake.tg, "events", never):
+                serving = asyncio.create_task(self.mod._serve(owner, stop, watchdog))
+                try:
+                    await asyncio.wait_for(entered.wait(), timeout=0.5)
+                    clock.advance(0.06)
+                    with self.assertLogs("telegram_session_owner", level="ERROR"):
+                        watchdog.check()
+                    self.assertEqual(exits, [1])
+                finally:
+                    serving.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await serving
+
+        with patch.object(self.mod, "WATCHDOG_TIMEOUT", 0.05):
+            run(scenario())
+
+    def test_serve_waits_after_repeated_early_step_errors(self):
+        owner = self.env.make_owner("a")
+        stop = asyncio.Event()
+        waits = []
+        original_wait_for = asyncio.wait_for
+
+        async def timed_wait(awaitable, timeout):
+            if timeout == 0.1:
+                awaitable.close()
+                waits.append(timeout)
+                owner.fake.clock.advance(timeout)
+                if len(waits) == 5:
+                    stop.set()
+                raise asyncio.TimeoutError
+            return await original_wait_for(awaitable, timeout=timeout)
+
+        with patch.object(owner, "_sweep", side_effect=OSError("private-disk-error")) as sweep:
+            with patch.object(asyncio, "wait_for", timed_wait):
+                self.assertEqual(run(self.mod._serve(owner, stop, Mock())), 0)
+        self.assertEqual(sweep.call_count, 5)
+        self.assertEqual(waits, [0.1] * 5)
+        self.assertEqual(owner.fake.tg.names(), ["connect", "disconnect"])
 
 
 class TransportDeadlines(unittest.TestCase):

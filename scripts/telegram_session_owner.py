@@ -28,7 +28,7 @@ from telegram_mirror import Mirror
 
 # Public adapter budgets include conversion/media work. Connect includes dialog
 # pagination and its bounded FloodWait sleeps; transport/auth have a shorter
-# deadline inside Telethon. The watchdog also bounds the complete startup/step.
+# deadline inside Telethon. RPC completions also reset the progress watchdog.
 RPC_TIMEOUTS = {"connect": 240, "disconnect": 15, "resolve": 30,
                 "history": 240, "recent": 60, "events": 60,
                 "upload": 120, "send": 60, "scheduled": 30}
@@ -336,6 +336,7 @@ class Owner:
         self._destinations = []
         self._mirrors = []
         self._pending_events = []
+        self._watchdog = None
 
     def _optional_inspect(self, path):
         try:
@@ -481,6 +482,11 @@ class Owner:
                 self._network_failure(Disconnected())
                 raise SendUncertain() from None
             raise Disconnected() from None
+        finally:
+            # A step can contain many bounded RPCs. Only a stalled RPC (including
+            # cancellation) or work without RPC/step completion should time out.
+            if self._watchdog is not None:
+                self._watchdog.completed()
 
     async def _catch_up(self):
         """Drain history before merging queued events, once per canonical peer."""
@@ -649,7 +655,12 @@ class Owner:
                     # reset it; connect also verifies authorization. No send RPC
                     # is retried here, and ready follows durable mirror catch-up.
                     logging.getLogger(__name__).info("OWNER_RECONNECT")
-                    await self._rpc("disconnect")
+                    try:
+                        await self._rpc("disconnect")
+                    except Exception:
+                        # Best effort: a broken old transport must not prevent
+                        # connect. The RPC deadline bounds cooperative cleanup.
+                        logging.getLogger(__name__).warning("OWNER_RECONNECT_DISCONNECT_FAILED")
                     await self._rpc("connect")
                     await self._catch_up()
                     self._heartbeat("ready")
@@ -1124,6 +1135,7 @@ class Owner:
 
 
 async def _serve(owner, stop, watchdog):
+    owner._watchdog = watchdog
     started_at = owner.clock.monotonic()
     try:
         reply = await owner.start()
@@ -1170,8 +1182,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--instance", required=True)
     parser.add_argument("--config", required=True, type=Path)
     args = parser.parse_args(argv)
-    logging.basicConfig(format="%(levelname)s %(name)s %(message)s")
-    logging.getLogger(__name__).setLevel(logging.INFO)
+    logger = logging.getLogger(__name__)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+        logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
     os.umask(0o077)
     try:
         store = Store()
