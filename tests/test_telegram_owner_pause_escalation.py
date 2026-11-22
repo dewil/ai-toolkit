@@ -50,6 +50,16 @@ class PauseEscalation(Base):
             run(owner.step())
             clock.advance(0.1)
 
+    def drive_window(self, owner, first, seconds, limit=60):
+        """Step until the first real failure is recorded in first[0], then `seconds` more."""
+        clock = owner.fake.clock
+        for _ in range(int(limit / 0.1)):
+            if first and clock.monotonic() >= first[0] + seconds:
+                return
+            run(owner.step())
+            clock.advance(0.1)
+        self.fail("no failure observed or window not reached")
+
     def recover_time(self, owner, t0, limit=60):
         """Step until ready; return monotonic seconds since t0 (or None)."""
         clock = owner.fake.clock
@@ -68,15 +78,18 @@ class PauseEscalation(Base):
         tg.raises["send"] = RuntimeError("private")
         original = store.atomic_write
 
+        first = []
+
         def fail_unknown(path, data):
             if path.parent.name == "status" and json.loads(data)["state"] == "unknown":
+                first or first.append(clock.monotonic())
                 raise OSError("private")
             return original(path, data)
 
         logs = self.capture()
-        t0 = clock.monotonic()
         with patch.object(store, "atomic_write", side_effect=fail_unknown):
-            self.drive(owner, 10)
+            self.drive_window(owner, first, 10)
+            t0 = first[0]
             waits = self.waits(logs)
             self.assertLessEqual(len(waits), 1, waits)
             self.assertTrue(waits and waits[0].endswith("retry_in=15"), waits)
@@ -92,15 +105,18 @@ class PauseEscalation(Base):
         clock, store = owner.fake.clock, owner.fake.store
         original = store.atomic_write
 
+        first = []
+
         def fail_heartbeat(path, data):
             if path.name == "heartbeat.json":
+                first or first.append(clock.monotonic())
                 raise OSError("private")
             return original(path, data)
 
         logs = self.capture()
-        t0 = clock.monotonic()
         with patch.object(store, "atomic_write", side_effect=fail_heartbeat):
-            self.drive(owner, 10)
+            self.drive_window(owner, first, 10)
+            t0 = first[0]
             waits = self.waits(logs)
             self.assertLessEqual(len(waits), 1, waits)
         elapsed = self.recover_time(owner, t0)
