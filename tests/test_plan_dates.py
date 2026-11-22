@@ -313,7 +313,10 @@ class RecalcTests(Base):
         after = self.plan_bytes().decode("utf-8")
         before_other = text[: text.index("## Держатели")]
         self.assertTrue(after.startswith(before_other))
-        self.assertTrue(after.endswith("| Устарел | 7 |"))
+        tail = text[text.index("После таблицы."):]  # хвост после таблицы: вторая таблица и словарь
+        self.assertTrue(tail.endswith("- термин - слово."))
+        self.assertFalse(after.endswith("\n"), "финального перевода строки не было - не должно появиться")
+        self.assertTrue(after.endswith(tail))
 
     def test_without_write_file_unchanged_and_reports(self):
         self.put_plan(plan_text(holders_lines=STALE_HOLDERS))
@@ -726,7 +729,9 @@ class WriteTests(Base):
         self.assertEqual(sorted(p.name for p in plans.iterdir()), before_names)
         text = self.plan_bytes().decode("utf-8")  # корректный UTF-8, целый файл
         self.assertTrue(text.startswith("# План работ Тест\n"))
-        self.assertTrue(text.rstrip("\n").endswith("| Устарел | 7 |"))
+        tail = plan_text(holders_lines=STALE_HOLDERS)
+        tail = tail[tail.index("После таблицы."):]
+        self.assertTrue(text.endswith(tail), "хвост после таблицы (вторая таблица, словарь) цел")
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root обходит права каталога")
     def test_unwritable_directory_exit_2_original_intact(self):
