@@ -339,11 +339,18 @@ class Owner:
         self._telegram = None
         self._started = False
         self._state = None
+        self._degraded_reason = ("local", None)
         self._heartbeat_at = None
         self._retry_at = 0
         self._retry_delay = 15
+        self._local_retry_delay = 15
+        self._local_pause_until = 0
+        self._step_recovering = False
+        self._step_local_failed = False
+        self._step_local_paused = False
         self._outage_since = None
         self._reconnect_at = 0
+        self._reconnect_needed = False
         self._instance = str(uuid.uuid4())
         self._pace = {}
         self._stepping = False
@@ -356,6 +363,8 @@ class Owner:
         self._destinations = []
         self._mirrors = []
         self._pending_events = []
+        self._overflow_pending = False
+        self._overflow_catchup_at = 0
         self._watchdog = None
 
     def _optional_inspect(self, path):
@@ -586,7 +595,9 @@ class Owner:
                     mirror.commit(data, state)
 
     def _apply_events(self):
-        needs_catchup = any(e["kind"] == "overflow" for e in self._pending_events)
+        if any(e["kind"] == "overflow" for e in self._pending_events):
+            self._overflow_pending = True
+        needs_catchup = False
         orphans = []
         for mirror in self._mirrors:
             batch = [e for e in self._pending_events if e.get("peer") is not None
@@ -639,8 +650,16 @@ class Owner:
     def _set_state(self, state):
         if state != self._state:
             logger = logging.getLogger(__name__)
-            log = logger.warning if state == "degraded" else logger.info
-            log("OWNER_STATE previous=%s state=%s", self._state, state)
+            if state == "degraded":
+                reason, subtype = self._degraded_reason
+                if subtype is None:
+                    logger.warning("OWNER_STATE previous=%s state=%s reason=%s",
+                                   self._state, state, reason)
+                else:
+                    logger.warning("OWNER_STATE previous=%s state=%s reason=%s subtype=%s",
+                                   self._state, state, reason, subtype)
+            else:
+                logger.info("OWNER_STATE previous=%s state=%s", self._state, state)
             self._state = state
 
     def _heartbeat(self, state):
@@ -668,12 +687,14 @@ class Owner:
                 key: str(self.config[key]) for key in
                 ("auth_path", "session_path", "owner_root")}).encode("utf-8"))
             if self._optional_inspect(self.root / "heartbeat.json") is not None:
+                self._degraded_reason = ("local", None)
                 self._heartbeat("degraded")
             self._load_pace()
             self._telegram = self.telegram_factory()
             await self._rpc("connect")
             await self._catch_up()
             self._heartbeat("ready")
+            self._reconnect_needed = False
             # A new ownership interval always recovers from durable statuses.
             self._terminal_ids.clear()
             self._outbox_stamp = None
@@ -701,6 +722,9 @@ class Owner:
             return False
         self._stepping = True
         self._step_network_failed = False
+        self._step_recovering = self._state == "degraded"
+        self._step_local_failed = False
+        self._step_local_paused = False
         progress = False
         try:
             self._heartbeat(self._state)
@@ -711,38 +735,50 @@ class Owner:
                 progress = self._sweep()
             if self.clock.monotonic() >= self._retry_at:
                 if self._state == "degraded":
-                    if self.clock.monotonic() < self._reconnect_at:
+                    self._step_recovering = True
+                    if (self._overflow_pending
+                            and self.clock.monotonic() < self._overflow_catchup_at):
                         return await self._step_send(allow_rpc=False) or progress
-                    # Sweep/overflow may mark degraded without network backoff.
-                    self._reconnect_at = self.clock.monotonic() + 15
-                    # A stale transport may still report connected. Explicitly
-                    # reset it; connect also verifies authorization. No send RPC
-                    # is retried here, and ready follows durable mirror catch-up.
-                    logging.getLogger(__name__).info("OWNER_RECONNECT")
-                    try:
-                        await self._rpc("disconnect")
-                    except Exception:
-                        # Best effort: a broken old transport must not prevent
-                        # connect. The RPC deadline bounds cooperative cleanup.
-                        logging.getLogger(__name__).warning("OWNER_RECONNECT_DISCONNECT_FAILED")
-                    await self._rpc("connect")
+                    if self._reconnect_needed:
+                        if self.clock.monotonic() < self._reconnect_at:
+                            return await self._step_send(allow_rpc=False) or progress
+                        self._reconnect_at = self.clock.monotonic() + 15
+                        # A stale transport may still report connected. Reset it
+                        # only after a network failure, never for overflow/local IO.
+                        logging.getLogger(__name__).info("OWNER_RECONNECT")
+                        try:
+                            await self._rpc("disconnect")
+                        except Exception:
+                            # Best effort: a broken old transport must not prevent
+                            # connect. The RPC deadline bounds cooperative cleanup.
+                            logging.getLogger(__name__).warning("OWNER_RECONNECT_DISCONNECT_FAILED")
+                        await self._rpc("connect")
+                        self._reconnect_needed = False
+                    if self._overflow_pending:
+                        self._overflow_catchup_at = self.clock.monotonic() + 5
                     await self._catch_up()
+                    self._overflow_pending = False
                     self._heartbeat("ready")
                     progress = True
                 events = await self._rpc("events")
                 if events:
                     self._pending_events.extend(deepcopy(events))
                     progress = True
-                if self._apply_events():
-                    self._heartbeat("degraded")
+                needs_catchup = self._apply_events()
+                if (needs_catchup or self._overflow_pending
+                        and self.clock.monotonic() >= self._overflow_catchup_at):
+                    self._degraded("overflow" if self._overflow_pending else "local")
                 else:
                     progress = await self._step_send() or progress
                 self._heartbeat(self._state)
                 # Sending can handle a network failure without raising here.
                 # Only a complete working step ends the current outage.
-                if self._state == "ready" and not self._step_network_failed:
+                if (self._state == "ready" and not self._step_network_failed
+                        and not self._step_local_failed):
                     self._outage_since = None
                     self._retry_delay = 15
+                    self._local_retry_delay = 15
+                    self._local_pause_until = 0
             else:
                 # Local recovery/expiry must continue during account backoff.
                 progress = await self._step_send(allow_rpc=False) or progress
@@ -762,8 +798,12 @@ class Owner:
         return None
 
     def _network_failure(self, error):
-        self._step_network_failed = True
         seconds = self._flood_seconds(error)
+        if seconds is None and not isinstance(error, Disconnected):
+            # Local mirror/spool errors need catch-up on the live transport.
+            self._local_failure()
+            return
+        self._step_network_failed = True
         now = self.clock.monotonic()
         if seconds is None:
             if self._outage_since is None:
@@ -775,14 +815,33 @@ class Owner:
                 self._retry_delay = min(300, delay * 2)
         else:
             delay = seconds
-        self._retry_at = now + delay
+        self._retry_at = max(self._retry_at, now + delay)
         if seconds is None:
-            self._degraded()
-        reason = ("FLOOD_WAIT" if seconds is not None else
-                  "DISCONNECTED" if isinstance(error, Disconnected) else "LOCAL_ERROR")
+            self._reconnect_needed = True
+            self._degraded("network", subtype="DISCONNECTED")
+        reason = "FLOOD_WAIT" if seconds is not None else "DISCONNECTED"
         # Never log exception text: adapter/IO diagnostics may contain secrets.
         logging.getLogger(__name__).warning(
             "OWNER_RECOVERY_WAIT reason=%s retry_in=%s", reason, delay)
+
+    def _local_failure(self, *, pause=False):
+        self._step_local_failed = True
+        now = self.clock.monotonic()
+        # Maintenance can fail on every tick while RPCs are paused. Only a
+        # failure after the local deadline starts and logs the next pause.
+        if now < self._local_pause_until:
+            return
+        # A failed operation and its failed status write belong to one step.
+        if (not self._step_local_paused
+                and (pause or self._state == "degraded" or self._step_recovering)):
+            delay = self._local_retry_delay
+            self._local_retry_delay = min(300, delay * 2)
+            self._local_pause_until = now + delay
+            self._retry_at = max(self._retry_at, self._local_pause_until)
+            self._step_local_paused = True
+            logging.getLogger(__name__).warning(
+                "OWNER_RECOVERY_WAIT reason=LOCAL retry_in=%g", self._retry_at - now)
+        self._degraded()
 
     def _load_pace(self):
         import telegram_owner_client as client
@@ -897,7 +956,7 @@ class Owner:
                     except (OSError, client._Error, ValueError, KeyError, TypeError):
                         # Status stays authoritative until outbox deletion and
                         # fsync succeed. Terminal entries can never be resent.
-                        self._degraded()
+                        self._local_failure()
         return progress
 
     def _next_package(self):
@@ -1060,8 +1119,12 @@ class Owner:
             # Recovery precedes expiry/schema checks. The durable sending
             # marker reserves the outcome even if request.json was damaged.
             if previous and previous["state"] == "sending":
-                self._recover_pace(previous.get("pace", {}))
-                self._write_status(request, st, "unknown", "SEND_UNCERTAIN", 4)
+                try:
+                    self._recover_pace(previous.get("pace", {}))
+                except Exception:
+                    self._local_failure(pause=True)
+                else:
+                    self._uncertain(request, st)
                 return True
             with self.store.lock(self.root / "quota.lock"):
                 client._private(self.store, package, "dir")
@@ -1158,7 +1221,10 @@ class Owner:
                   or request.get("operation") == "refresh" and not isinstance(error, client._Error)):
                 self._network_failure(error)
                 if request.get("operation") == "refresh":
-                    self._degraded()
+                    if seconds is not None:
+                        self._degraded("network", subtype="FLOOD_WAIT")
+                    else:
+                        self._degraded()
                 if pace_before is not None:
                     self._pace = pace_before
                     self._save_pace()
@@ -1181,8 +1247,7 @@ class Owner:
             self._write_status(request, st, "unknown", "SEND_UNCERTAIN", 4)
         except Exception:
             # The prior sending marker is sufficient to prevent another RPC.
-            self._retry_at = self.clock.monotonic() + 15
-            self._degraded()
+            self._local_failure(pause=True)
 
     async def _verify_schedule(self, request, peer, result):
         unavailable = False
@@ -1205,7 +1270,8 @@ class Owner:
             return "unavailable_saved_near"
         raise SendUncertain(result["message_ids"])
 
-    def _degraded(self):
+    def _degraded(self, reason="local", *, subtype=None):
+        self._degraded_reason = (reason, subtype)
         try:
             self._heartbeat("degraded")
         except OSError:
