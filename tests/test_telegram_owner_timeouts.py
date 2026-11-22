@@ -321,7 +321,8 @@ class Timeouts(Base):
                 self.assertEqual(run(self.mod._serve(owner, stop, Mock())), 0)
         self.assertEqual(sweep.call_count, 1)  # ошибка тоже ограничена интервалом 30 с
         self.assertEqual(waits, [0.1] * 5)
-        self.assertEqual(owner.fake.tg.names(), ["connect", "disconnect"])
+        # Local cleanup errors catch up on the next step without network backoff.
+        self.assertEqual(owner.fake.tg.names(), ["connect"] + ["events"] * 4 + ["disconnect"])
 
     def test_serve_waits_after_repeated_early_step_errors(self):
         owner = self.env.make_owner("a")

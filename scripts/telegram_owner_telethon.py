@@ -283,9 +283,15 @@ class Telegram:
                 except Exception:
                     # A conversion failure loses no durable cursor: force catch-up.
                     result.append({"kind": "overflow"})
-            elif isinstance(update, (self.types.UpdatesTooLong, self.types.UpdateChannelTooLong,
-                                       self.types.UpdateShortMessage, self.types.UpdateShortChatMessage)):
+            elif isinstance(update, (self.types.UpdatesTooLong, self.types.UpdateChannelTooLong)):
                 result.append({"kind": "overflow"})
+            elif isinstance(update, (self.types.UpdateShortMessage, self.types.UpdateShortChatMessage)):
+                # Short updates lack the full message context. Catch up only
+                # mirrored destinations, using their resolved kind/id (including
+                # basic Chat groups configured with a positive numeric peer).
+                peer = self._update_peer(update)
+                if peer is not None and any(self._media_configs(peer)):
+                    result.append({"kind": "overflow"})
         return result
 
     async def upload(self, path):

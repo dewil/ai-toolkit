@@ -151,23 +151,26 @@ class Reconnect(Base):
         run(owner.step())
         self.assertEqual(self.state(), "ready")
 
-    def test_persistent_sweep_error_cannot_reconnect_on_every_step(self):
-        owner = self.started()
+    def test_persistent_sweep_error_catches_up_without_reconnect(self):
+        owner = self.started(destinations=[self.env.destination()])
         status = self.env.root("a") / "status" / f"{uuid.uuid4()}.json"
         mkdirs(status.parent)
         write_file(status, "{broken")
         for _ in range(20):
             run(owner.step())
-        self.assertEqual(owner.fake.tg.names().count("connect"), 2)
+        self.assertEqual(owner.fake.tg.names().count("connect"), 1)
+        self.assertEqual(owner.fake.tg.names().count("history"), 2)
         owner.fake.clock.advance(14)
         run(owner.step())
-        self.assertEqual(owner.fake.tg.names().count("connect"), 2)
+        self.assertEqual(owner.fake.tg.names().count("connect"), 1)
         owner.fake.clock.advance(1)
         run(owner.step())
-        self.assertEqual(owner.fake.tg.names().count("connect"), 2)
+        self.assertEqual(owner.fake.tg.names().count("connect"), 1)
         owner.fake.clock.advance(15)  # новый проход уборки: не чаще одного в 30 с
         run(owner.step())
-        self.assertEqual(owner.fake.tg.names().count("connect"), 3)
+        self.assertEqual(owner.fake.tg.names().count("connect"), 1)
+        self.assertEqual(owner.fake.tg.names().count("history"), 3)
+        self.assertNotIn("disconnect", owner.fake.tg.names())
 
     def check_uncertain_after_reconnect(self, fail_unknown):
         owner = self.started(tg=StaleTransport())
