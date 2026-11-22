@@ -376,6 +376,22 @@ class PruneTests(Base):
         fresh = "- сделано (оценка 1-2, факт 1; 23.11 09:00)"
         self.expect([old, fresh], [fresh])
 
+    # Уточнение 13: отметка в скобках, после скобки - точка (шаблон ранбука)
+    RB_OLD = "- Этап сделан (работа 1-2, факт 1, ожидания 0 дн; 20.11 10:00)."
+    RB_FRESH = "- Этап сделан (работа 1-2, факт 1, ожидания 0 дн; 23.11 10:00)."
+
+    def test_trailing_stamp_with_dot_old_removed_fresh_kept(self):
+        self.expect([self.RB_OLD, self.RB_FRESH], [self.RB_FRESH])
+
+    def test_trailing_stamp_with_dot_exactly_24h_stays(self):
+        edge = "- Этап (факт 1; 22.11 12:00)."
+        self.expect([edge], [edge])
+
+    def test_trailing_stamp_with_dot_and_trailing_spaces(self):
+        old = self.RB_OLD + "  "
+        fresh = self.RB_FRESH + "  "
+        self.expect([old, fresh], [fresh])
+
     def test_last_parenthesised_stamp_wins(self):
         item = "- что (заметка 20.11 10:00) итог (факт; 23.11 09:00)"
         self.expect([item], [item])
@@ -612,6 +628,33 @@ class LintTests(Base):
         self.assertIn("горит", proc.stdout)
         data = self.wait_data(big, NOW_DT - timedelta(days=1))
         self.assertClean(self.lint(text, data=data))
+
+    # Уточнение 13 (lint)
+    def test_trailing_stamp_with_dot_is_readable_fresh_clean(self):
+        item = "- Этап сделан (работа 1-2, факт 1, ожидания 0 дн; 23.11 10:00)."
+        self.assertClean(self.lint(plan_text(done_items=[item])))
+
+    def test_trailing_stamp_with_dot_and_spaces_is_readable(self):
+        item = "- Этап сделан (работа 1-2, факт 1, ожидания 0 дн; 23.11 10:00).  "
+        self.assertClean(self.lint(plan_text(done_items=[item])))
+
+    def test_trailing_stamp_with_dot_old_is_warn_not_error(self):
+        item = "- Этап сделан (работа 1-2, факт 1, ожидания 0 дн; 20.11 10:00)."
+        self.assertOneWarn(self.lint(plan_text(done_items=[item])))
+
+    def test_burning_boundary_exactly_zatyazhno_not_burning(self):
+        # норма "затяжно" по умолчанию = 3 дн; возраст ровно 3 дн - не горит (строго больше)
+        data = self.wait_data({"samples": []}, NOW_DT - timedelta(days=3))
+        proc = self.lint(data=data)
+        self.assertClean(proc)
+        self.assertNotIn("горит", proc.stdout)
+
+    def test_burning_boundary_just_over_zatyazhno_burns(self):
+        data = self.wait_data({"samples": []}, NOW_DT - timedelta(days=3, minutes=1))
+        proc = self.lint(data=data)
+        self.assertOneWarn(proc)
+        self.assertIn("горит", proc.stdout)
+        self.assertIn("w1", proc.stdout)
 
     def test_warn_more_than_7_risks(self):
         rows = [f"| Claude2 | средний | Риск {i} | грозит | признак | мера | 20.11 |" for i in range(8)]
