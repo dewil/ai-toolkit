@@ -638,9 +638,6 @@ class Owner:
 
     def _set_state(self, state):
         if state != self._state:
-            if state == "ready":
-                self._outage_since = None
-                self._retry_delay = 15
             logger = logging.getLogger(__name__)
             log = logger.warning if state == "degraded" else logger.info
             log("OWNER_STATE previous=%s state=%s", self._state, state)
@@ -703,6 +700,7 @@ class Owner:
         if not self._started or self._stepping:
             return False
         self._stepping = True
+        self._step_network_failed = False
         progress = False
         try:
             self._heartbeat(self._state)
@@ -740,6 +738,11 @@ class Owner:
                 else:
                     progress = await self._step_send() or progress
                 self._heartbeat(self._state)
+                # Sending can handle a network failure without raising here.
+                # Only a complete working step ends the current outage.
+                if self._state == "ready" and not self._step_network_failed:
+                    self._outage_since = None
+                    self._retry_delay = 15
             else:
                 # Local recovery/expiry must continue during account backoff.
                 progress = await self._step_send(allow_rpc=False) or progress
@@ -759,6 +762,7 @@ class Owner:
         return None
 
     def _network_failure(self, error):
+        self._step_network_failed = True
         seconds = self._flood_seconds(error)
         now = self.clock.monotonic()
         if seconds is None:

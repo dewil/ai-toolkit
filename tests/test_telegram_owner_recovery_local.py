@@ -93,21 +93,21 @@ class Recovery(Base):
             run(owner.step())
         self.assertTrue(any(s.endswith("retry_in=30") for s in logs.output), logs.output)
 
-    def test_ready_resets_outage_even_if_events_fail_in_same_step(self):
+    def test_ready_without_successful_step_preserves_outage_and_backoff(self):
         owner = self.started()
         tg, clock = owner.fake.tg, owner.fake.clock
         tg.raises["events"] = import_owner().Disconnected()
         run(owner.step())
         clock.advance(120)
-        # connect/catch-up return to ready before this second outage starts.
+        # connect/catch-up reach ready, but failed work continues the outage.
         tg.raises["events"] = import_owner().Disconnected()
         run(owner.step())
-        for _ in range(3):
+        for delay in (30, 60, 120, 240, 300, 300):
             connects = tg.names().count("connect")
-            clock.advance(14)
+            clock.advance(delay - 1)
             run(owner.step())
             self.assertEqual(tg.names().count("connect"), connects)
-            tg.raises["connect"] = import_owner().Disconnected()
+            tg.raises["events"] = import_owner().Disconnected()
             clock.advance(1)
             run(owner.step())
             self.assertEqual(tg.names().count("connect"), connects + 1)
