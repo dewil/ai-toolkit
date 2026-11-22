@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import deque
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
+import asyncio
 import importlib.util
 import io
 import logging
@@ -16,11 +17,12 @@ from pathlib import Path
 import time
 import uuid
 
-from telegram_session_owner import Disconnected, FloodWait, SendUncertain
+from telegram_session_owner import Disconnected, FloodWait, HistoryPage, SendUncertain
 
 
 DIALOG_FLOOD_SLEEP_THRESHOLD = 120
 DIALOG_REQUEST_RETRIES = 3
+CONNECT_TIMEOUT = 30
 
 
 def _snapshot():
@@ -63,9 +65,17 @@ class Telegram:
         self._media_errors = {}
         self.client.add_event_handler(self._enqueue, events.Raw())
 
-    async def _call(self, awaitable, *, sending=False):
+    async def _call(self, awaitable, *, sending=False, timeout=None, operation=None):
         try:
+            if timeout is not None:
+                return await asyncio.wait_for(awaitable, timeout=timeout)
             return await awaitable
+        except asyncio.TimeoutError:
+            logging.getLogger(__name__).warning(
+                "OWNER_RPC_TIMEOUT operation=%s timeout=%s", operation, timeout)
+            if sending:
+                raise SendUncertain() from None
+            raise Disconnected() from None
         except self.errors.FloodWaitError as exc:
             raise FloodWait(exc.seconds) from None
         except Exception:
@@ -81,8 +91,9 @@ class Telegram:
         self._updates.append(update)
 
     async def connect(self):
-        await self._call(self.client.connect())
-        if not await self._call(self.client.is_user_authorized()):
+        await self._call(self.client.connect(), timeout=CONNECT_TIMEOUT, operation="transport_connect")
+        if not await self._call(self.client.is_user_authorized(), timeout=CONNECT_TIMEOUT,
+                                operation="is_user_authorized"):
             raise Disconnected()
         # Dialog loading is the only place that may sleep on FloodWait: a large
         # account always hits it on GetDialogs. Telethon sleeps only when a retry
@@ -193,15 +204,21 @@ class Telegram:
             done.add(cache)
             await self.snapshot.download_message_media(self.client, msg, cache, safe_errors=True)
 
-    async def _read(self, peer, *, download_media=True, **kwargs):
+    async def _read(self, peer, *, download_media=True, history_page=False, **kwargs):
         records = []
+        scanned, next_id = 0, kwargs.get("min_id", 0)
         try:
             async for msg in self.client.iter_messages(self._entity(peer), **kwargs):
+                if history_page:
+                    scanned += 1
+                    next_id = max(next_id, msg.id)
                 record = await self._record(msg)
                 if record is not None:
                     records.append(record)
                 if download_media and msg.action is None:
                     await self._media(peer, msg)
+            if history_page:
+                return HistoryPage(records, next_id=next_id, complete=scanned < kwargs["limit"])
             return records
         except self.errors.FloodWaitError as exc:
             raise FloodWait(exc.seconds) from None
@@ -209,7 +226,9 @@ class Telegram:
             raise Disconnected() from None
 
     async def history(self, peer, *, after_id, limit):
-        return await self._read(peer, min_id=after_id, reverse=True, limit=limit, wait_time=0)
+        # Export filtering and topic-root ids cannot determine raw page progress.
+        return await self._read(peer, min_id=after_id, reverse=True, limit=limit,
+                                history_page=limit is not None, wait_time=0)
 
     async def recent(self, peer, *, limit):
         return await self._read(peer, limit=limit, wait_time=0, download_media=False)
