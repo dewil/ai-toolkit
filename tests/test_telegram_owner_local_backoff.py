@@ -128,7 +128,24 @@ class LocalBackoff(Base):
                 logged.update(int(n) for n in re.findall(r"\b\d+\b", s))
         self.assertTrue({15, 30} <= logged, logs.lines)
 
-    def test_single_local_failure_returns_to_ready_without_15s_pause(self):
+    def test_control_first_catchup_after_overflow_is_immediate(self):
+        owner, store = self.started()
+        tg, clock = owner.fake.tg, owner.fake.clock
+        tg.history_data = [rec(1)]
+        tg.event_batches = [[{"kind": "overflow"}]]
+        run(owner.step())
+        self.assertEqual(self.state(), "degraded")
+        start = clock.monotonic()
+        for _ in range(3):
+            clock.advance(0.1)
+            run(owner.step())
+            if self.state() == "ready":
+                break
+        self.assertEqual(self.state(), "ready")
+        self.assertLessEqual(clock.monotonic() - start, 0.3 + 1e-6)
+        self.assertNotIn("disconnect", tg.names())
+
+    def test_one_local_failure_during_catchup_pauses_15s_then_recovers(self):
         owner, store = self.started()
         tg, clock = owner.fake.tg, owner.fake.clock
         tg.history_data = [rec(1)]
@@ -136,14 +153,21 @@ class LocalBackoff(Base):
         run(owner.step())
         self.assertEqual(self.state(), "degraded")
         store.fail_on[("atomic_write", "result.json")] = ("before", OSError("x"))
-        run(owner.step())  # catch-up hits the one-shot local failure
+        run(owner.step())  # immediate catch-up hits the one-shot local failure
         self.assertEqual(self.state(), "degraded")
-        start = clock.monotonic()
-        for _ in range(3):
+        mark = tg.names().count("history")
+        self.assertGreaterEqual(mark, 1)
+        for _ in range(140):  # ~14 s in 0.1 s steps
             clock.advance(0.1)
             run(owner.step())
+        self.assertEqual(tg.names().count("history"), mark, "retry before the 15 s pause")
+        self.assertEqual(self.state(), "degraded")
+        clock.advance(1.5)
+        for _ in range(3):
+            run(owner.step())
+            clock.advance(0.1)
+        self.assertGreater(tg.names().count("history"), mark)
         self.assertEqual(self.state(), "ready")
-        self.assertLess(clock.monotonic() - start, 15)
         self.assertNotIn("disconnect", tg.names())
 
     def overflow_every_step(self, peer):
