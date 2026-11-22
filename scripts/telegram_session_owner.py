@@ -344,6 +344,7 @@ class Owner:
         self._retry_at = 0
         self._retry_delay = 15
         self._local_retry_delay = 15
+        self._local_pause_until = 0
         self._step_recovering = False
         self._step_local_failed = False
         self._step_local_paused = False
@@ -777,6 +778,7 @@ class Owner:
                     self._outage_since = None
                     self._retry_delay = 15
                     self._local_retry_delay = 15
+                    self._local_pause_until = 0
             else:
                 # Local recovery/expiry must continue during account backoff.
                 progress = await self._step_send(allow_rpc=False) or progress
@@ -824,13 +826,18 @@ class Owner:
 
     def _local_failure(self, *, pause=False):
         self._step_local_failed = True
+        now = self.clock.monotonic()
+        # Maintenance can fail on every tick while RPCs are paused. Only a
+        # failure after the local deadline starts and logs the next pause.
+        if now < self._local_pause_until:
+            return
         # A failed operation and its failed status write belong to one step.
         if (not self._step_local_paused
                 and (pause or self._state == "degraded" or self._step_recovering)):
-            now = self.clock.monotonic()
             delay = self._local_retry_delay
             self._local_retry_delay = min(300, delay * 2)
-            self._retry_at = max(self._retry_at, now + delay)
+            self._local_pause_until = now + delay
+            self._retry_at = max(self._retry_at, self._local_pause_until)
             self._step_local_paused = True
             logging.getLogger(__name__).warning(
                 "OWNER_RECOVERY_WAIT reason=LOCAL retry_in=%g", self._retry_at - now)
