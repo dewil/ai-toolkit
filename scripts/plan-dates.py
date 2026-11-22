@@ -206,7 +206,7 @@ def done_time(line, now):
     leading = re.match(r'^- ' + STAMP + r'(?![0-9])', line)
     if leading:
         return plan_time(leading, now)
-    trailing = re.search(r'\([^()]*\)\s*$', line)
+    trailing = re.search(r'\([^()]*\)[.\s]*$', line)
     matches = list(re.finditer(STAMP + r'(?![0-9])', trailing.group())) if trailing else []
     return plan_time(matches[-1] if matches else None, now)
 
