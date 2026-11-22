@@ -104,7 +104,7 @@ class Catchup(Base):
             self.overflow(owner)
             run(owner.step())
             self.assertEqual(self.state(), "ready")
-            owner.fake.clock.advance(0.1)
+            owner.fake.clock.advance(5)
         names = tg.names()[mark:]
         self.assertEqual(names.count("history"), 3)
         self.assertNotIn("connect", names)
@@ -126,13 +126,21 @@ class Catchup(Base):
         self.assertEqual(tg.names().count("connect"), 1)
         self.assertNotIn("disconnect", tg.names())
 
-    def test_local_catchup_error_retries_without_reconnect_or_15_second_pause(self):
+    def test_local_catchup_error_pauses_15_seconds_without_reconnect(self):
         owner = self.started()
-        tg = owner.fake.tg
+        tg, clock = owner.fake.tg, owner.fake.clock
         self.overflow(owner)
         tg.raises["history"] = OSError("PRIVATE-MIRROR-DETAIL")
-        run(owner.step())
+        with self.assertLogs("telegram_session_owner", level="WARNING") as logs:
+            run(owner.step())
         self.assertEqual(self.state(), "degraded")
+        self.assertTrue(any(s.endswith("reason=LOCAL retry_in=15") for s in logs.output), logs.output)
+        mark = len(tg.calls)
+        clock.advance(14)
+        run(owner.step())
+        self.assertEqual(len(tg.calls), mark)
+        self.assertEqual(self.state(), "degraded")
+        clock.advance(1)
         run(owner.step())
         self.assertEqual(self.state(), "ready")
         self.assertEqual(tg.names().count("connect"), 1)
