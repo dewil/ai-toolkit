@@ -35,6 +35,7 @@ RPC_TIMEOUTS = {"connect": 240, "disconnect": 15, "resolve": 30,
                 "history": 240, "recent": 60, "events": 60,
                 "upload": 120, "send": 60, "scheduled": 30}
 WATCHDOG_TIMEOUT = 300
+HISTORY_PAGE_SIZE = 100
 MIN_FAILURE_UPTIME = 60  # With RestartSec=15: at most 4 starts per 300s.
 SWEEP_INTERVAL = 30
 OUTBOX_SETTLE_SECONDS = 2
@@ -93,6 +94,14 @@ class FloodWait(Exception):
 
 class Disconnected(Exception):
     pass
+
+
+class HistoryPage(list):
+    """Export rows plus progress through raw Telegram service-message ids."""
+
+    def __init__(self, rows, *, next_id, complete):
+        super().__init__(rows)
+        self.next_id, self.complete = next_id, complete
 
 
 class SendUncertain(Exception):
@@ -333,6 +342,7 @@ class Owner:
         self._heartbeat_at = None
         self._retry_at = 0
         self._retry_delay = 15
+        self._outage_since = None
         self._reconnect_at = 0
         self._instance = str(uuid.uuid4())
         self._pace = {}
@@ -525,20 +535,54 @@ class Owner:
             groups.setdefault(key, []).append(mirror)
         for group in groups.values():
             cursors = []
+            boundaries = []
             for mirror in group:
                 with mirror.locked():
-                    data, _ = mirror.load()
-                    cursors.append(mirror.cursor(data))
-            history = await self._rpc("history", group[0].peer, after_id=min(cursors), limit=None)
+                    data, state = mirror.load()
+                    cursor = mirror.cursor(data)
+                    catchup = state.get("catchup", {})
+                    cursors.append(catchup.get("after_id", cursor))
+                    boundaries.append(catchup.get("from_id", cursor))
+            after_id = min(cursors)
+            while True:
+                history = await self._rpc("history", group[0].peer,
+                                          after_id=after_id, limit=HISTORY_PAGE_SIZE)
+                complete = getattr(history, "complete", len(history) < HISTORY_PAGE_SIZE)
+                next_id = getattr(history, "next_id", None)
+                cursors = []
+                for mirror, boundary in zip(group, boundaries):
+                    with mirror.locked():
+                        data, state = mirror.load()
+                        if self._optional_inspect(mirror.result) is None:
+                            state["bootstrapping"] = True
+                        if mirror.merge_history(data, state, history, [], boundary):
+                            raise ValueError("MIRROR_TOPIC_ROOT_MISSING")
+                        cursor = next_id if next_id is not None else mirror.cursor(data)
+                        # Raw service ids can exceed exported topic/root ids.
+                        # Keep scanning progress and the original merge boundary
+                        # durable without changing the export's cursor semantics.
+                        state["catchup"] = {"after_id": cursor, "from_id": boundary}
+                        # Every completed page survives a later history/recent
+                        # timeout, including initial population from cursor 0.
+                        mirror.commit(data, state)
+                        cursors.append(cursor)
+                if complete:
+                    break
+                cursor = min(cursors)
+                if cursor <= after_id:
+                    raise ValueError("MIRROR_HISTORY_NO_PROGRESS")
+                after_id = cursor
             recent = await self._rpc("recent", group[0].peer, limit=50)
-            for mirror, cursor in zip(group, cursors):
+            for mirror in group:
                 with mirror.locked():
                     data, state = mirror.load()
-                    bootstrap = self._optional_inspect(mirror.result) is None
-                    if mirror.merge_history(data, state, history, recent, cursor):
+                    if mirror.merge_history(data, state, [], recent, mirror.cursor(data)):
                         raise ValueError("MIRROR_TOPIC_ROOT_MISSING")
-                    if bootstrap:
+                    # Keep the original full-bootstrap checkpoint boundary,
+                    # even if initial history spanned several process starts.
+                    if state.pop("bootstrapping", False):
                         state["boundary"] = deepcopy(data)
+                    state.pop("catchup", None)
                     mirror.commit(data, state)
 
     def _apply_events(self):
@@ -594,6 +638,9 @@ class Owner:
 
     def _set_state(self, state):
         if state != self._state:
+            if state == "ready":
+                self._outage_since = None
+                self._retry_delay = 15
             logger = logging.getLogger(__name__)
             log = logger.warning if state == "degraded" else logger.info
             log("OWNER_STATE previous=%s state=%s", self._state, state)
@@ -693,8 +740,6 @@ class Owner:
                 else:
                     progress = await self._step_send() or progress
                 self._heartbeat(self._state)
-                if self._state == "ready":
-                    self._retry_delay = 15
             else:
                 # Local recovery/expiry must continue during account backoff.
                 progress = await self._step_send(allow_rpc=False) or progress
@@ -715,10 +760,19 @@ class Owner:
 
     def _network_failure(self, error):
         seconds = self._flood_seconds(error)
-        delay = self._retry_delay if seconds is None else seconds
-        self._retry_at = self.clock.monotonic() + delay
+        now = self.clock.monotonic()
         if seconds is None:
-            self._retry_delay = min(300, self._retry_delay * 2)
+            if self._outage_since is None:
+                self._outage_since = now
+            if now - self._outage_since < 120:
+                delay = 15
+            else:
+                delay = max(30, self._retry_delay)
+                self._retry_delay = min(300, delay * 2)
+        else:
+            delay = seconds
+        self._retry_at = now + delay
+        if seconds is None:
             self._degraded()
         reason = ("FLOOD_WAIT" if seconds is not None else
                   "DISCONNECTED" if isinstance(error, Disconnected) else "LOCAL_ERROR")

@@ -111,7 +111,7 @@ class Reconnect(Base):
         tg, clock = owner.fake.tg, owner.fake.clock
         tg.raises["events"] = import_owner().Disconnected()
         run(owner.step())
-        for delay in (15, 30, 60, 120, 240, 300, 300):
+        for delay in (15,) * 8 + (30, 60, 120, 240, 300, 300):
             count = len(tg.calls)
             clock.advance(delay - 1)
             for _ in range(5):

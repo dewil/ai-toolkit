@@ -17,7 +17,7 @@ from pathlib import Path
 import time
 import uuid
 
-from telegram_session_owner import Disconnected, FloodWait, SendUncertain
+from telegram_session_owner import Disconnected, FloodWait, HistoryPage, SendUncertain
 
 
 DIALOG_FLOOD_SLEEP_THRESHOLD = 120
@@ -204,15 +204,21 @@ class Telegram:
             done.add(cache)
             await self.snapshot.download_message_media(self.client, msg, cache, safe_errors=True)
 
-    async def _read(self, peer, *, download_media=True, **kwargs):
+    async def _read(self, peer, *, download_media=True, history_page=False, **kwargs):
         records = []
+        scanned, next_id = 0, kwargs.get("min_id", 0)
         try:
             async for msg in self.client.iter_messages(self._entity(peer), **kwargs):
+                if history_page:
+                    scanned += 1
+                    next_id = max(next_id, msg.id)
                 record = await self._record(msg)
                 if record is not None:
                     records.append(record)
                 if download_media and msg.action is None:
                     await self._media(peer, msg)
+            if history_page:
+                return HistoryPage(records, next_id=next_id, complete=scanned < kwargs["limit"])
             return records
         except self.errors.FloodWaitError as exc:
             raise FloodWait(exc.seconds) from None
@@ -220,7 +226,9 @@ class Telegram:
             raise Disconnected() from None
 
     async def history(self, peer, *, after_id, limit):
-        return await self._read(peer, min_id=after_id, reverse=True, limit=limit, wait_time=0)
+        # Export filtering and topic-root ids cannot determine raw page progress.
+        return await self._read(peer, min_id=after_id, reverse=True, limit=limit,
+                                history_page=limit is not None, wait_time=0)
 
     async def recent(self, peer, *, limit):
         return await self._read(peer, limit=limit, wait_time=0, download_media=False)
