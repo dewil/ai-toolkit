@@ -378,6 +378,53 @@ class Scheduled(StopCase):
         self.assertEqual(rep.fake.tg.sends(), [])
 
 
+class RemindAndBudget(StopCase):
+    def test_p5_10_remind_ack_in_window_stays_scheduled_when_stop_follows_ack(self):
+        """remind: at - sent_at в 120..239 с, verification по контракту не нужна."""
+        owner = self.owner()
+        req = send_request("a", now=owner.fake.clock.utc(),
+                           schedule={"at": None, "timezone": None, "exact_minute": False,
+                                     "remind": True})
+        write_package(self.env.root("a"), req)
+        at = owner.fake.clock.utc() + 181
+        owner.fake.tg.send_results = [{"message_ids": [], "scheduled_ids": [902], "at": at}]
+        stop = asyncio.Event()
+        owner.fake.tg.hooks["send"] = lambda: stop.set()
+        code, _ = self.serve(owner, stop, limit=10.0)
+        self.assertEqual(code, 0)
+        st = self.status(req)
+        self.assertEqual((st["state"], st["code"]), ("scheduled", "SCHEDULED"), st)
+        self.assertEqual(st["result"]["scheduled_ids"], [902])
+        self.assertEqual(st["result"]["at"], at)
+        self.assertEqual(st["result"]["verification"], "api_ack")
+        self.assertEqual(len(owner.fake.tg.sends()), 1)
+
+    def test_p5_8_exhausted_budget_fast_disconnect_still_exit_zero(self):
+        """Бюджет stop исчерпан (монотонные часы owner сдвинуты), disconnect быстрый."""
+        owner = self.owner()
+        req = self.request(now=owner.fake.clock.utc())
+        tg, entered, stop = owner.fake.tg, asyncio.Event(), asyncio.Event()
+        hang(tg, "send", entered)
+
+        async def disconnect():
+            tg._log("disconnect")
+            await asyncio.sleep(0.05)
+            tg.connected = False
+        tg.disconnect = disconnect
+
+        async def trigger():
+            await asyncio.wait_for(entered.wait(), 5)
+            stop.set()
+            owner.fake.clock.advance(19.99)  # доли send grace и отмены израсходованы
+        code, _ = self.serve(owner, stop, trigger, limit=10.0)
+        self.assertEqual(code, 0)
+        st = self.status(req)
+        self.assertEqual((st["state"], st["code"]), ("unknown", "SEND_UNCERTAIN"))
+        self.assertEqual(len(tg.sends()), 1)
+        self.assertIn("disconnect", tg.names())
+        self.assert_locks_free()
+
+
 class CleanupAndExit(StopCase):
     def test_p5_13_failing_disconnect_is_best_effort_exit_zero(self):
         owner = self.owner()
