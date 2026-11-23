@@ -395,6 +395,63 @@ class NewUpdatesAndOverflow(unittest.IsolatedAsyncioTestCase):
         self.assertIn({"kind": "overflow"}, await a.events())
 
 
+# ================================================================== У-7: sequence = pts, fallback - счетчик
+
+def with_pts(u, pts):
+    u.pts = pts
+    return u
+
+
+class PtsSequence(unittest.IsolatedAsyncioTestCase):
+    def build(self, a):
+        return [with_pts(u_new(a, 101), 5001), with_pts(u_delete(a, [7]), 5002),
+                with_pts(u_edit(a, 8, "правка 8"), 5003), u_new(a, 102),  # без pts - счетчик (4-й элемент)
+                with_pts(u_edit(a, 8, "правка 8б"), 5004)]
+
+    async def test_sequence_is_pts_when_present_and_counter_otherwise_u7(self):
+        a = make_adapter()
+        for u in self.build(a):
+            await a._enqueue(u)
+        got = await drain(a)
+        seq = {}
+        for e in got:
+            key = ("delete", tuple(e["ids"])) if e["kind"] == "delete" else (e["kind"], e["record"]["id"],
+                                                                         e["record"].get("text"))
+            seq[key] = e["revision"][1]
+        self.assertEqual(seq[("new", 101, "msg 101")], 5001)
+        self.assertEqual(seq[("delete", (7,))], 5002)
+        self.assertEqual(seq[("edit", 8, "правка 8")], 5003)
+        self.assertEqual(seq[("edit", 8, "правка 8б")], 5004)
+        self.assertEqual(seq[("new", 102, "msg 102")], 4, "без pts sequence - счетчик поступления")
+
+    async def test_cancel_and_redelivery_keep_pts_and_counter_u7(self):
+        expected = await expected_for(self.build)
+        self.assertIn(("new", 101, "msg 101", (BASE + 101, 5001)), expected)
+        for where, mid in (("record", 8), ("media", 102), ("record", 101)):
+            with self.subTest(where=where, element=mid):
+                a = make_adapter()
+                for u in self.build(a):
+                    await a._enqueue(u)
+                gate = a.gates.add(where, by_id(mid))
+                await cancelled_events(self, a, gate)
+                got = await drain(a)
+                self.assertEqual(set(map(norm, got)), set(expected),
+                                 "sequence пересчитан при повторной выдаче (pts или счетчик)")
+
+    async def test_counter_without_pts_is_not_shifted_by_retry_u7(self):
+        def build(a):
+            return [u_new(a, 101), u_edit(a, 8, "x"), u_new(a, 102)]
+        expected = await expected_for(build)
+        a = make_adapter()
+        for u in build(a):
+            await a._enqueue(u)
+        gate = a.gates.add("record", by_id(8))
+        await cancelled_events(self, a, gate)
+        got = await drain(a)
+        self.assertEqual(set(map(norm, got)), set(expected))
+        self.assertEqual(sorted(e["revision"][1] for e in got), [1, 2, 3])
+
+
 # ================================================================== P2-7: media=false и реальный конвертер
 
 class MediaOffConversion(unittest.IsolatedAsyncioTestCase):
@@ -410,7 +467,7 @@ class MediaOffConversion(unittest.IsolatedAsyncioTestCase):
 
         when = datetime.fromtimestamp(BASE + 8, timezone.utc)
         m = types.SimpleNamespace(
-            id=8, action=None, message="текст правки", entities=None, sender_id=5, get_sender=get_sender,
+            id=8, action=None, message="текст правки", entities=None, sender_id=5, from_id=None, get_sender=get_sender,
             peer_id=types.SimpleNamespace(channel_id=CHAN), date=when, edit_date=when, reply_to=None,
             media=object(), photo=None, document=None, web_preview=None,
             file=types.SimpleNamespace(name="a.bin", size=4, mime_type="application/octet-stream", ext=".bin"))
@@ -471,8 +528,16 @@ class OwnerBoundary(Base):
         p.start()
         self.addCleanup(p.stop)
 
-    def start(self, mirror_ids, topics=()):
+    def start(self, mirror_ids, topics=(), old_dates=False):
         write_mirror(self.mirror, mirror_ids, chat_id=CHAN, topics=list(topics))
+        if old_dates:  # записи зеркала старше времени обработки delete (оно берется при обработке)
+            import json
+            d = load(self.mirror)
+            for m in d["messages"]:
+                m["date_unixtime"] = str(1_700_000_000 + m["id"])
+            for t in d["topics"]:
+                t["date_unixtime"] = "1700000000"
+            self.mirror.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
         fake = FakeTelegram("a")
         fake.peer_map[CHAN] = {"kind": "Channel", "id": CHAN}
         self.gates = Gates()
@@ -559,8 +624,26 @@ class OwnerBoundary(Base):
         ok = self.settle(owner, lambda: ids_of(self.mirror) == [100, 101, 102])
         self.assertTrue(ok, f"после внешних отмен события не дошли: {ids_of(self.mirror)}")
 
+    def test_edit_after_restart_in_same_second_with_larger_pts_is_applied_u7(self):
+        owner = self.start([100])
+        a = self.adapter
+        self.feed([with_pts(u_edit(a, 100, "v1", ts=BASE + 10), 5000)])
+        self.assertTrue(self.settle(owner, lambda: load(self.mirror)["messages"][0]["text"] == "v1"))
+        run(owner.close())
+        fake = FakeTelegram("a")
+        fake.peer_map[CHAN] = {"kind": "Channel", "id": CHAN}
+        a2 = make_adapter(gates=Gates())
+        a2.__class__ = OwnerTelegram
+        a2.fake = fake
+        owner2 = self.env.make_owner("a", tg=a2, destinations=[self.env.destination("d1", CHAN, "chat1")])
+        self.assertEqual(run(owner2.start())["code"], "READY")
+        self.addCleanup(lambda: run(owner2.close()))
+        run(a2._enqueue(with_pts(u_edit(a2, 100, "v2", ts=BASE + 10), 5001)))  # та же секунда, pts больше
+        ok = self.settle(owner2, lambda: load(self.mirror)["messages"][0]["text"] == "v2")
+        self.assertTrue(ok, "правка той же секунды с большим pts после рестарта отброшена")
+
     def test_old_edit_delete_topic_below_recent_window_p2_3(self):
-        owner = self.start(list(range(1, 81)), topics=[topic_rec(77, "Старое")])
+        owner = self.start(list(range(1, 81)), topics=[topic_rec(77, "Старое")], old_dates=True)
         a = self.adapter
         self.feed([u_edit(a, 5, "старая правка"), u_delete(a, [6]), u_topic(a, 77, "Новое")])
         gate = self.gates.add("record", by_id(5))
@@ -855,6 +938,53 @@ class MediaSuccess(MediaBase):
         self.assertEqual(await self.dl(client), "1_sample.bin")
         self.assertTrue(seen["alive"], "TTL-уборка удалила файл активной попытки")
         self.assertEqual(self.final.read_bytes(), b"DATA")
+
+
+class TempBoundaries(MediaBase):
+    def outside(self, name="outside"):
+        d = Path(self._tmp.name + "-" + name)
+        d.mkdir()
+        self.addCleanup(shutil.rmtree, d, True)
+        return d
+
+    async def test_symlinked_temp_root_is_refused_without_writes_u7(self):
+        out_a, out_b = self.outside("a"), self.outside("b")
+        self.chat.mkdir(parents=True)
+        os.symlink(out_a, self.chat / ".telegram-media-tmp")        # temp-корень внутри каталога чата
+        os.symlink(out_b, self.cache_root / ".telegram-media-tmp")  # и в корне кэша
+        client = FakeClient(ok_behavior)
+        result = await self.dl(client)
+        self.assertIsNone(result, "загрузка опубликована через симлинк temp-корня")
+        self.assertFalse(self.final.exists())
+        self.assertEqual(list(out_a.rglob("*")) + list(out_b.rglob("*")), [], "запись вышла наружу по симлинку")
+
+    async def test_cleanup_does_not_follow_symlinked_temp_root_u7(self):
+        out = self.outside()
+        victim = out / "victim.bin"
+        victim.write_bytes(b"KEEP")
+        old = time.time() - 100 * 3600
+        os.utime(victim, (old, old))
+        self.chat.mkdir(parents=True)
+        os.symlink(out, self.chat / ".telegram-media-tmp")
+        os.symlink(out, self.cache_root / ".telegram-media-tmp")
+        self.snap.MEDIA_CACHE = self.cache_root
+        self.snap.MEDIA_TTL_HOURS = 1
+        self.snap.cleanup_old_media()
+        self.assertEqual(victim.read_bytes(), b"KEEP", "уборка удалила файл вне каталога через симлинк")
+        self.assertTrue(victim.exists())
+
+    async def test_returned_path_outside_attempt_dir_is_not_published_or_moved_u7(self):
+        out = self.outside()
+        foreign = out / "foreign.bin"
+        foreign.write_bytes(b"DATA")  # существующий файл снаружи, корректного размера
+
+        async def returns_foreign(client, file):
+            return str(foreign)
+        client = FakeClient(returns_foreign)
+        self.assertIsNone(await self.dl(client), "опубликован файл, возвращенный из-за пределов попытки")
+        self.assertFalse(self.final.exists())
+        self.assertEqual(foreign.read_bytes(), b"DATA", "внешний файл перемещен или изменен")
+        self.assertEqual(self.files(), [])
 
 
 class LegacyCache(MediaBase):
