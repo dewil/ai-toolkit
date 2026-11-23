@@ -17,7 +17,8 @@ from pathlib import Path
 import time
 import uuid
 
-from telegram_session_owner import Disconnected, FloodWait, HistoryPage, SendUncertain
+from telegram_session_owner import (Disconnected, FloodWait, HistoryPage,
+                                    PreparationRejected, SendUncertain)
 
 
 DIALOG_FLOOD_SLEEP_THRESHOLD = 120
@@ -78,9 +79,15 @@ class Telegram:
             raise Disconnected() from None
         except self.errors.FloodWaitError as exc:
             raise FloodWait(exc.seconds) from None
-        except Exception:
+        except Exception as error:
             if sending:
                 raise SendUncertain() from None
+            names = {"resolve": ("UsernameInvalidError", "UsernameNotOccupiedError"),
+                     "upload": ("FilePartsInvalidError", "FilePartSizeInvalidError")}
+            permanent = tuple(cls for name in names.get(operation, ())
+                              if (cls := getattr(self.errors, name, None)) is not None)
+            if isinstance(error, permanent):
+                raise PreparationRejected(operation) from None
             raise Disconnected() from None
 
     async def _enqueue(self, update):
@@ -141,12 +148,20 @@ class Telegram:
         # Tokens from an abandoned upload batch are not reused across requests.
         self._uploads.clear()
         if peer == "me":
-            entity = await self._call(self.client.get_me())
+            entity = await self._call(self.client.get_me(), operation="get_me")
         elif peer in self._dialogs:
             # Preserve the dialog's peer kind, but refresh mutable username.
-            entity = await self._call(self.client.get_entity(self._dialogs[peer]))
+            entity = await self._call(self.client.get_entity(self._dialogs[peer]), operation="resolve")
         else:
-            entity = await self._call(self.snapshot.resolve_entity(self.client, peer, self._dialogs))
+            entity = await self._call(self.snapshot.resolve_entity(self.client, peer, self._dialogs),
+                                      operation="resolve")
+            if entity is None:
+                # Only an empty lookup after a successful fallback proves a
+                # local miss. An exception (including ValueError) is no proof.
+                known = [value for (_, ident), value in self._entities.items() if ident == peer]
+                if not known and peer not in self._dialogs:
+                    raise PreparationRejected("resolve")
+                raise Disconnected()
         self._aliases[peer] = self._peer(entity)
         return dict(self._aliases[peer])
 
@@ -303,7 +318,13 @@ class Telegram:
         return result
 
     async def upload(self, path):
-        handle = await self._call(self.client.upload_file(str(path)))
+        try:
+            handle = await self._call(self.client.upload_file(str(path)), operation="upload")
+        except BaseException:
+            # No handle from an abandoned batch may survive into another
+            # attempt, including cancellation or a later file's refusal.
+            self._uploads.clear()
+            raise
         token = str(uuid.uuid4())
         self._uploads[token] = (handle, Path(path))
         return token
