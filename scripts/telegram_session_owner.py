@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import asyncio
 import ctypes
@@ -37,6 +38,7 @@ RPC_TIMEOUTS = {"connect": 240, "disconnect": 15, "resolve": 30,
 WATCHDOG_TIMEOUT = 300
 HISTORY_PAGE_SIZE = 100
 MIN_FAILURE_UPTIME = 60  # With RestartSec=15: at most 4 starts per 300s.
+STARTUP_WAIT_STEP = 10
 SWEEP_INTERVAL = 30
 OUTBOX_SETTLE_SECONDS = 2
 TERMINAL_STATES = frozenset(("sent", "scheduled", "refreshed", "rejected", "unknown"))
@@ -87,9 +89,10 @@ class HeartbeatWatchdog:
 class FloodWait(Exception):
     """The failed RPC had no effect."""
 
-    def __init__(self, seconds):
+    def __init__(self, seconds, *, received_at=None):
         super().__init__(seconds)
         self.seconds = seconds
+        self.received_at = received_at
 
 
 class Disconnected(Exception):
@@ -318,6 +321,64 @@ class _StartError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class StartupFailure:
+    """Safe cause and monotonic server deadline, independent of cleanup."""
+
+    reason: str
+    source: str
+    operation: str
+    retry_at: float = 0
+    received_at: float | None = None
+
+
+class StartResult(dict):
+    """Keep the public reply keys while carrying typed in-process metadata."""
+
+    def __init__(self, code, exit_code, *, failure: StartupFailure | None = None):
+        super().__init__(code=code, exit_code=exit_code)
+        self.failure = failure
+
+
+class _TemporaryStartError(Exception):
+    def __init__(self, failure: StartupFailure):
+        super().__init__("OWNER_UNAVAILABLE")
+        self.failure = failure
+
+
+class _StartupStore:
+    """Classify confirmed local errors before validation can erase their errno.
+
+    Installed only for startup; the original port is restored before cleanup
+    and runtime. Network/factory exceptions never pass through this boundary.
+    """
+
+    def __init__(self, store, *, source="config"):
+        self.store, self.source = store, source
+
+    def __getattr__(self, operation):
+        method = getattr(self.store, operation)
+        if operation not in ("inspect", "read", "read_bounded", "list",
+                             "atomic_write", "lock", "remove"):
+            return method
+
+        def call(*args, **kwargs):
+            try:
+                return method(*args, **kwargs)
+            except OSError as error:
+                if error.errno in (errno.ENOSPC, errno.EIO):
+                    reason = "ENOSPC" if error.errno == errno.ENOSPC else "EIO"
+                elif (isinstance(error, BlockingIOError) and operation == "lock"
+                      and self.source == "mirror"):
+                    reason = "MIRROR_BUSY"
+                else:
+                    raise
+                raise _TemporaryStartError(StartupFailure(
+                    reason, self.source, operation)) from None
+
+        return call
+
+
 def _absolute(value) -> Path:
     if not isinstance(value, (str, Path)) or not str(value):
         raise _StartError("INVALID_CONFIG")
@@ -366,6 +427,7 @@ class Owner:
         self._overflow_pending = False
         self._overflow_catchup_at = 0
         self._watchdog = None
+        self._startup_retry_at = 0
 
     def _optional_inspect(self, path):
         try:
@@ -490,7 +552,7 @@ class Owner:
             lock = self.store.lock(path)
         except OSError as error:
             if isinstance(error, BlockingIOError):
-                raise
+                raise _StartError("OWNER_ALREADY_RUNNING") from None
             raise _StartError("UNSAFE_PATH") from None
         self._locks.append(lock)
         after = self._safe(path, "file")
@@ -502,6 +564,10 @@ class Owner:
         try:
             return await asyncio.wait_for(
                 getattr(self._telegram, operation)(*args, **kwargs), timeout=timeout)
+        except FloodWait as error:
+            if error.received_at is None:
+                error.received_at = self.clock.monotonic()
+            raise
         except asyncio.TimeoutError:
             # Only fixed operation names and budgets: no peers, paths, request
             # bodies or adapter exception text belong in the journal.
@@ -672,13 +738,20 @@ class Owner:
             self._set_state(state)
             self._heartbeat_at = now
 
-    async def start(self) -> dict:
+    async def start(self) -> StartResult:
         if self._started:
-            return {"code": "READY", "exit_code": 0}
+            return StartResult("READY", 0)
+        failure = None
+        store = self.store
+        startup_store = _StartupStore(store, source="validation")
+        self.store = startup_store
         try:
             self._validate()
+            startup_store.source = "owner_lock"
             self._acquire(self.root / "owner.lock")
+            startup_store.source = "session_lock"
             self._acquire(self.session_path)
+            startup_store.source = "publication"
             # 5d: publish a non-secret registry for local clients before ready.
             registry = self._installation()
             self.store.atomic_write(self.root / "installation.json",
@@ -689,10 +762,13 @@ class Owner:
             if self._optional_inspect(self.root / "heartbeat.json") is not None:
                 self._degraded_reason = ("local", None)
                 self._heartbeat("degraded")
+            startup_store.source = "pace"
             self._load_pace()
             self._telegram = self.telegram_factory()
             await self._rpc("connect")
+            startup_store.source = "mirror"
             await self._catch_up()
+            startup_store.source = "heartbeat"
             self._heartbeat("ready")
             self._reconnect_needed = False
             # A new ownership interval always recovers from durable statuses.
@@ -701,20 +777,38 @@ class Owner:
             self._outbox_paths = ()
             self._sweep_at = self.clock.monotonic()
             self._started = True
-            return {"code": "READY", "exit_code": 0}
-        except BlockingIOError:
-            code = "OWNER_ALREADY_RUNNING"
+            return StartResult("READY", 0)
+        except _TemporaryStartError as error:
+            code = "OWNER_UNAVAILABLE"
+            failure = replace(error.failure, retry_at=self._startup_retry_at)
         except _StartError as error:
             code = str(error)
-        except (Disconnected, FloodWait):
+        except FloodWait as error:
+            received_at = (self.clock.monotonic() if error.received_at is None
+                           else error.received_at)
+            self._startup_retry_at = max(self._startup_retry_at, received_at + error.seconds)
+            failure = StartupFailure("FLOOD_WAIT", "telegram", "rpc",
+                                     self._startup_retry_at, received_at)
+            code = "OWNER_UNAVAILABLE"
+        except Disconnected:
+            failure = StartupFailure("DISCONNECTED", "telegram", "rpc",
+                                     self._startup_retry_at)
             code = "OWNER_UNAVAILABLE"
         except Exception:
             code = "INVALID_CONFIG"
+        finally:
+            self.store = store
+            for mirror in self._mirrors:
+                mirror.store = store
+        if failure is not None:
+            logging.getLogger(__name__).warning(
+                "OWNER_START_FAILED reason=%s source=%s operation=%s",
+                failure.reason, failure.source, failure.operation)
         try:
             await self.close()
         except Exception:
             logging.getLogger(__name__).error("OWNER_START_CLEANUP_FAILED")
-        return {"code": code, "exit_code": 7 if code == "OWNER_UNAVAILABLE" else 2}
+        return StartResult(code, 7 if code == "OWNER_UNAVAILABLE" else 2, failure=failure)
 
     async def step(self) -> bool:
         """Do bounded maintenance and at most one send, without sleeping."""
@@ -1304,9 +1398,30 @@ class Owner:
                 raise unlock_error
 
 
-async def _serve(owner, stop, watchdog):
+async def _startup_wait(clock, started_at, failure, stop, watchdog):
+    deadline = max(started_at + MIN_FAILURE_UPTIME,
+                   failure.retry_at if failure is not None else 0)
+    delay = max(0, deadline - clock.monotonic())
+    if delay and not stop.is_set():
+        logging.getLogger(__name__).warning("OWNER_RESTART_WAIT retry_in=%.1f", delay)
+    while not stop.is_set():
+        remaining = deadline - clock.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=min(STARTUP_WAIT_STEP, remaining))
+        except asyncio.TimeoutError:
+            pass
+        # A real wake-up proves loop liveness. A hung wait still lets the
+        # independent watchdog expire; no heartbeat/ready is published here.
+        watchdog.completed()
+    return 0 if stop.is_set() else 7
+
+
+async def _serve(owner, stop, watchdog, *, started_at=None):
     owner._watchdog = watchdog
-    started_at = owner.clock.monotonic()
+    if started_at is None:
+        started_at = owner.clock.monotonic()
     try:
         reply = await owner.start()
         watchdog.completed()
@@ -1314,18 +1429,8 @@ async def _serve(owner, stop, watchdog):
             import sys
             print(reply["code"], file=sys.stderr)
             if reply["code"] == "OWNER_UNAVAILABLE":
-                # A long outage must not exhaust StartLimitBurst=5/300.
-                # Watchdog exits already take >=300s; fast startup failures
-                # need this floor before systemd's additional RestartSec=15.
-                delay = max(0, MIN_FAILURE_UPTIME - (owner.clock.monotonic() - started_at))
-                if delay:
-                    logging.getLogger(__name__).warning("OWNER_RESTART_WAIT retry_in=%.1f", delay)
-                    try:
-                        await asyncio.wait_for(stop.wait(), timeout=delay)
-                    except asyncio.TimeoutError:
-                        pass
-                if stop.is_set():
-                    return 0
+                return await _startup_wait(owner.clock, started_at,
+                                           getattr(reply, "failure", None), stop, watchdog)
             return reply["exit_code"]
         while not stop.is_set():
             await owner.step()
@@ -1360,29 +1465,37 @@ def main(argv: list[str] | None = None) -> int:
     logger.setLevel(logging.INFO)
     logger.propagate = False
     os.umask(0o077)
-    try:
-        store = Store()
-        # Config is private infrastructure too; bound reads before decoding.
-        import telegram_owner_client as client
-        client._private(store, args.config.absolute(), "file")
-        config = client._read_json(store, args.config.absolute())
-        config["instance"] = args.instance
-    except (OSError, ValueError, KeyError, TypeError, client._Error):
-        print("INVALID_CONFIG", file=sys.stderr)
-        return 2
-
     async def run():
-        from telegram_owner_telethon import Telegram
         clock = Clock()
-        owner = Owner(config, telegram_factory=lambda: Telegram(config),
-                      clock=clock, rng=random.Random(), store=store)
+        started_at = clock.monotonic()
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop.set)
         try:
             with HeartbeatWatchdog(clock) as watchdog:
-                return await _serve(owner, stop, watchdog)
+                store = Store()
+                # Preserve local errno before shared client validation can
+                # flatten it. Signals/watchdog also cover this early failure.
+                import telegram_owner_client as client
+                startup_store = _StartupStore(store)
+                try:
+                    client._private(startup_store, args.config.absolute(), "file")
+                    config = client._read_json(startup_store, args.config.absolute())
+                    config["instance"] = args.instance
+                except _TemporaryStartError as error:
+                    logger.warning("OWNER_START_FAILED reason=%s source=%s operation=%s",
+                                   error.failure.reason, error.failure.source, error.failure.operation)
+                    print("OWNER_UNAVAILABLE", file=sys.stderr)
+                    watchdog.completed()
+                    return await _startup_wait(clock, started_at, error.failure, stop, watchdog)
+                except (OSError, ValueError, KeyError, TypeError, client._Error):
+                    print("INVALID_CONFIG", file=sys.stderr)
+                    return 2
+                from telegram_owner_telethon import Telegram
+                owner = Owner(config, telegram_factory=lambda: Telegram(config, clock=clock),
+                              clock=clock, rng=random.Random(), store=store)
+                return await _serve(owner, stop, watchdog, started_at=started_at)
         finally:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(sig)
