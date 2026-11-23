@@ -410,7 +410,7 @@ class MediaOffConversion(unittest.IsolatedAsyncioTestCase):
 
         when = datetime.fromtimestamp(BASE + 8, timezone.utc)
         m = types.SimpleNamespace(
-            id=8, action=None, message="текст правки", entities=None, sender_id=5, get_sender=get_sender,
+            id=8, action=None, message="текст правки", entities=None, sender_id=5, from_id=None, get_sender=get_sender,
             peer_id=types.SimpleNamespace(channel_id=CHAN), date=when, edit_date=when, reply_to=None,
             media=object(), photo=None, document=None, web_preview=None,
             file=types.SimpleNamespace(name="a.bin", size=4, mime_type="application/octet-stream", ext=".bin"))
@@ -471,8 +471,16 @@ class OwnerBoundary(Base):
         p.start()
         self.addCleanup(p.stop)
 
-    def start(self, mirror_ids, topics=()):
+    def start(self, mirror_ids, topics=(), old_dates=False):
         write_mirror(self.mirror, mirror_ids, chat_id=CHAN, topics=list(topics))
+        if old_dates:  # записи зеркала старше времени обработки delete (оно берется при обработке)
+            import json
+            d = load(self.mirror)
+            for m in d["messages"]:
+                m["date_unixtime"] = str(1_700_000_000 + m["id"])
+            for t in d["topics"]:
+                t["date_unixtime"] = "1700000000"
+            self.mirror.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
         fake = FakeTelegram("a")
         fake.peer_map[CHAN] = {"kind": "Channel", "id": CHAN}
         self.gates = Gates()
@@ -560,7 +568,7 @@ class OwnerBoundary(Base):
         self.assertTrue(ok, f"после внешних отмен события не дошли: {ids_of(self.mirror)}")
 
     def test_old_edit_delete_topic_below_recent_window_p2_3(self):
-        owner = self.start(list(range(1, 81)), topics=[topic_rec(77, "Старое")])
+        owner = self.start(list(range(1, 81)), topics=[topic_rec(77, "Старое")], old_dates=True)
         a = self.adapter
         self.feed([u_edit(a, 5, "старая правка"), u_delete(a, [6]), u_topic(a, 77, "Новое")])
         gate = self.gates.add("record", by_id(5))
