@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_telegram_session_owner_fakes import (  # noqa: E402
-    Base, NOW, import_owner, read_status, refresh_request, run, send_request, write_package,
+    Base, FakeClock, FakeTelegram, NOW, import_client, import_owner, read_status, refresh_request, run, send_request, write_package,
 )
 from test_telegram_session_owner_mirror import ev, ids_of, load, rec, topic_rec, write_mirror  # noqa: E402
 
@@ -347,6 +348,151 @@ class LocalReasonOverDeferredOverflow(OrphanBase):
         self.assertEqual(self.sstate(root, rid), "sent", tg.names())
         self.assertEqual(tg.names().count("connect"), 1)
         self.assertNotIn("disconnect", tg.names())
+
+
+class GapsFromReview(OrphanBase):
+    def history_peers(self, tg, mark=0):
+        return [c[1]["id"] for c in tg.calls[mark:] if c[0] == "history"]
+
+    def two_dests(self, same_peer=False):
+        write_mirror(self.path, [100])
+        p2 = 1001 if same_peer else 2002
+        write_mirror(self.env.projects / "chat2" / "result.json", [200], chat_id=p2)
+        return self.start([self.env.destination("d1", 1001, "chat1"),
+                           self.env.destination("d2", p2, "chat2")])
+
+    def test_public_submit_between_syncs_is_accepted_and_sent(self):  # P4-2, В3
+        write_mirror(self.path, [100])
+        # mtime heartbeat - реальное время ФС, поэтому часы owner и клиента близки к реальным
+        clock = FakeClock(utc=time.time())
+        o = self.env.make_owner("a", destinations=[self.env.destination("d1", 1001, "chat1")],
+                                clock=clock)
+        self.assertEqual(run(o.start())["code"], "READY")
+        self.addCleanup(lambda: run(o.close()))
+        client, root = import_client(), self.env.root("a")
+        replies = {}
+        for n in range(40):
+            o.fake.tg.event_batches = [[orphan(n)]]
+            run(o.step())
+            if n == 20:
+                for peer in (1001, "me"):
+                    req = send_request("a", peer=peer, text="Привет", now=clock.utc())
+                    req["options"]["no_pace_check"] = True
+                    replies[peer] = (req, client.submit(root, req, clock=clock, timeout=0))
+            clock.advance(TICK)
+        for peer, (req, reply) in replies.items():
+            self.assertNotEqual(reply.get("code"), "OWNER_UNAVAILABLE", (peer, reply))
+            self.assertEqual(self.sstate(root, req["request_id"]), "sent", (peer, reply))
+        self.assertEqual(len(o.fake.tg.sends()), 2)
+
+    def test_heartbeat_ready_after_explicit_refresh_with_pending_orphan(self):  # В3, У-4
+        write_mirror(self.path, [100])
+        o = self.start()
+        root = self.env.root("a")
+        o.fake.tg.event_batches = [[orphan(0)]]
+        run(o.step())
+        req = refresh_request("a", "d1", now=o.fake.clock.utc())
+        write_package(root, req)
+        for n in range(3):
+            o.fake.tg.event_batches = [[orphan(n + 1)]]
+            run(o.step())
+            o.fake.clock.advance(TICK)
+        self.assertEqual(self.sstate(root, req["request_id"]), "refreshed")
+        self.assertEqual(self.state(), "ready")
+
+    def test_refresh_shifts_background_interval(self):  # У-4
+        write_mirror(self.path, [100])
+        o = self.start()
+        tg, clock, root = o.fake.tg, o.fake.clock, self.env.root("a")
+        times = self.spy_history(o)
+        tg.event_batches = [[dict(OVERFLOW)]]
+        run(o.step())
+        run(o.step())
+        clock.advance(3)
+        req = refresh_request("a", "d1", now=clock.utc())
+        write_package(root, req)
+        for _ in range(3):
+            run(o.step())
+        self.assertEqual(self.sstate(root, req["request_id"]), "refreshed")
+        r = times[-1]
+        mark = len(times)
+        clock.advance(0.5)
+        tg.event_batches = [[dict(OVERFLOW)]]
+        while clock.monotonic() < r + DELTA - 0.3:
+            run(o.step())
+            clock.advance(TICK)
+        self.assertEqual(len(times), mark, f"фоновый догон раньше r+Δ: {times}, r={r}")
+        while clock.monotonic() < r + DELTA + 1:
+            run(o.step())
+            clock.advance(TICK)
+        self.assertGreater(len(times), mark, "отложенный overflow не обслужен после Δ")
+        self.assertGreaterEqual(times[mark] - r, DELTA - EPS)
+
+    def test_refresh_of_one_peer_keeps_overflow_for_other_peer(self):  # У-4
+        o = self.two_dests()
+        tg, clock, root = o.fake.tg, o.fake.clock, self.env.root("a")
+        tg.event_batches = [[dict(OVERFLOW)]]
+        run(o.step())
+        run(o.step())
+        clock.advance(1)
+        tg.event_batches = [[dict(OVERFLOW)]]
+        run(o.step())
+        req = refresh_request("a", "d1", now=clock.utc())
+        write_package(root, req)
+        run(o.step())
+        self.assertEqual(self.sstate(root, req["request_id"]), "refreshed")
+        mark = len(tg.calls)
+        for _ in range(int(2 * DELTA / TICK)):
+            clock.advance(TICK)
+            run(o.step())
+        self.assertIn(2002, self.history_peers(tg, mark), "overflow второго peer погашен refresh первого")
+
+    def test_same_peer_destinations_get_pending_and_orphan_does_not_block_send(self):  # P4-10
+        o = self.two_dests(same_peer=True)
+        tg, root = o.fake.tg, self.env.root("a")
+        tg.recent_data = [{"kind": "topic", "record": topic_rec(77), "revision": [NOW - 1, 0]}]
+        rid = self.queue_send(o, 1001)
+        rme = self.queue_send(o, "me")
+        tg.event_batches = [[ev("topic", {"id": 77, "title": "Renamed"})]]
+        for _ in range(int(2 * DELTA / TICK)):
+            run(o.step())
+            o.fake.clock.advance(TICK)
+        self.assertEqual(self.sstate(root, rid), "sent")
+        self.assertEqual(self.sstate(root, rme), "sent")
+        for path in (self.path, self.env.projects / "chat2" / "result.json"):
+            self.assertEqual(load(path)["topics"], [topic_rec(77, "Renamed")], path)
+
+    def test_floodwait_on_events_at_interval_boundary_blocks_rpc(self):  # P4-9
+        for seconds in (1, 10):
+            with self.subTest(seconds=seconds):
+                self.setUp()
+                write_mirror(self.path, [100])
+                o = self.start()
+                tg, clock = o.fake.tg, o.fake.clock
+                times = self.spy_history(o)
+                tg.event_batches = [[dict(OVERFLOW)]]
+                run(o.step())
+                run(o.step())
+                t = times[0]
+                while clock.monotonic() < t + DELTA - 0.75:
+                    clock.advance(TICK)
+                tg.event_batches = [[dict(OVERFLOW)]]
+                run(o.step())          # overflow отложен до t+Δ
+                tg.raises["events"] = import_owner().FloodWait(seconds)
+                clock.advance(0.75)
+                run(o.step())          # FloodWait ровно на границе Δ
+                start = clock.monotonic()
+                n = len(tg.calls)
+                while clock.monotonic() < start + seconds - 0.2:
+                    clock.advance(0.1)
+                    run(o.step())
+                self.assertEqual(tg.calls[n:], [], "RPC раньше срока FloodWait")
+                for _ in range(100):
+                    clock.advance(0.1)
+                    run(o.step())
+                self.assertGreater(len(times), 1, "overflow не обслужен после срока")
+                self.assertNotIn("disconnect", tg.names())
+                run(o.close())
 
 
 if __name__ == "__main__":
