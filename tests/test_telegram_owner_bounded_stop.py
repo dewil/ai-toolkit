@@ -275,6 +275,7 @@ class SendInFlight(StopCase):
         rep = self.restart()
         self.assertEqual(rep.fake.tg.sends(), [], "повторная отправка после restart")
         self.assertEqual(self.status(req)["state"], "unknown")
+        run(rep.close())  # владелец один: третий owner возможен после выхода второго
         self.assert_locks_free()
 
     def test_p5_8_ack_arriving_within_grace_after_stop_is_recorded_as_sent(self):
