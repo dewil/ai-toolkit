@@ -91,6 +91,14 @@ class Telegram:
         self._updates.append(update)
 
     async def connect(self):
+        sender = getattr(self.client, "_sender", None)
+        if hasattr(sender, "_ping"):
+            stale_ping = sender._ping is not None
+            sender._ping = None
+            if stale_ping:
+                logging.getLogger(__name__).info("stale keepalive reset")
+        else:
+            logging.getLogger(__name__).debug("keepalive reset skipped: sender or ping field missing")
         await self._call(self.client.connect(), timeout=CONNECT_TIMEOUT, operation="transport_connect")
         if not await self._call(self.client.is_user_authorized(), timeout=CONNECT_TIMEOUT,
                                 operation="is_user_authorized"):
