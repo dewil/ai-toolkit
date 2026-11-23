@@ -417,12 +417,18 @@ class Owner:
     def _stop_remaining(self, reserve=0):
         return max(0, self._stop_deadline - time.monotonic() - reserve)
 
+    def _stop_cleanup_budget(self, limit):
+        # Borrow a small slice of the reserve so cooperative cleanup can run
+        # across event-loop turns even when its normal share is exhausted.
+        return min(self._stop_remaining(),
+                   max(0.5, min(limit, self._stop_remaining(STOP_RESERVE))))
+
     async def _cancel_rpc(self, task):
         task.cancel()
         if self._stopping():
             began = time.monotonic()
-            budget = min(max(0, STOP_CANCEL_TIMEOUT - self._cancel_spent),
-                         self._stop_remaining(STOP_RESERVE))
+            budget = self._stop_cleanup_budget(
+                max(0, STOP_CANCEL_TIMEOUT - self._cancel_spent))
             done, _ = await asyncio.wait({task}, timeout=budget)
             self._cancel_spent += time.monotonic() - began
             if not done:
@@ -571,7 +577,7 @@ class Owner:
         timeout = RPC_TIMEOUTS[operation]
         if self._closing and self._stopping():
             timeout = min(timeout, STOP_DISCONNECT_TIMEOUT,
-                          self._stop_remaining(STOP_RESERVE))
+                          self._stop_cleanup_budget(STOP_DISCONNECT_TIMEOUT))
 
         async def invoke():
             # The task may first run after the signal callback, even though it
@@ -594,7 +600,7 @@ class Owner:
             self._begin_stop()
             if self._closing:
                 timeout = min(timeout, STOP_DISCONNECT_TIMEOUT,
-                              self._stop_remaining(STOP_RESERVE))
+                              self._stop_cleanup_budget(STOP_DISCONNECT_TIMEOUT))
                 done, _ = await asyncio.wait({task}, timeout=timeout)
                 if task in done:
                     return task.result()
@@ -1324,10 +1330,10 @@ class Owner:
             if at is not None:
                 if ack.get("at", at) != at:
                     raise SendUncertain(result["message_ids"])
-                self._check_stop()
                 # Remind's +181..239s may be absent from Saved Messages' queue.
                 # Allow processing down to the existing 120s minimum send lead.
                 if not (request["schedule"]["remind"] and 120 <= at - sent_at <= 239):
+                    self._check_stop()
                     verification_request = deepcopy(request)
                     verification_request["text"] = ack.get("text", request["text"])
                     result["verification"] = await self._verify_schedule(verification_request, peer, result)
