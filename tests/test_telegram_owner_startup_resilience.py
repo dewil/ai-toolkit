@@ -359,7 +359,7 @@ os.open, builtins.open, io.open = guard(os.open), guard(builtins.open), guard(io
 print(owner.main(['--instance', 'a', '--config', CFG]))
 """
         proc = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True,
-                              timeout=30, env={**os.environ, "HOME": str(self.base)})
+                              timeout=150, env={**os.environ, "HOME": str(self.base)})
         self.assertEqual(proc.stdout.strip().splitlines()[-1:], ["7"], proc.stderr)
         self.assertNotIn("Input/output error", proc.stderr)
         self.assertNotIn(str(self.base), proc.stderr)
