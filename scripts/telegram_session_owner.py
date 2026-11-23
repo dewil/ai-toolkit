@@ -35,6 +35,11 @@ RPC_TIMEOUTS = {"connect": 240, "disconnect": 15, "resolve": 30,
                 "history": 240, "recent": 60, "events": 60,
                 "upload": 120, "send": 60, "scheduled": 30}
 WATCHDOG_TIMEOUT = 300
+STOP_TIMEOUT = 20
+STOP_SEND_GRACE = 5
+STOP_CANCEL_TIMEOUT = 5
+STOP_DISCONNECT_TIMEOUT = 5
+STOP_RESERVE = 5
 HISTORY_PAGE_SIZE = 100
 MIN_FAILURE_UPTIME = 60  # With RestartSec=15: at most 4 starts per 300s.
 SWEEP_INTERVAL = 30
@@ -50,6 +55,7 @@ class HeartbeatWatchdog:
         self.terminate = os._exit if terminate is None else terminate
         self.interval = interval
         self._completed_at = clock.monotonic()
+        self._stop_deadline = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True,
@@ -59,9 +65,22 @@ class HeartbeatWatchdog:
         with self._lock:
             self._completed_at = self.clock.monotonic()
 
+    def stopping(self, deadline):
+        with self._lock:
+            if self._stop_deadline is None:
+                self._stop_deadline = deadline
+
     def check(self):
         with self._lock:
             elapsed = self.clock.monotonic() - self._completed_at
+            stop_expired = (self._stop_deadline is not None
+                            and time.monotonic() >= self._stop_deadline)
+        if stop_expired:
+            try:
+                logging.getLogger(__name__).error("OWNER_STOP_TIMEOUT exit_code=1")
+            finally:
+                self.terminate(1)
+            return
         if elapsed >= WATCHDOG_TIMEOUT:
             try:
                 logging.getLogger(__name__).error(
@@ -366,6 +385,55 @@ class Owner:
         self._overflow_pending = False
         self._overflow_catchup_at = 0
         self._watchdog = None
+        self._stop_event = None
+        self._stop_waiter = None
+        self._stop_deadline = None
+        self._stop_cleanup_failed = False
+        self._cancel_spent = 0
+        self._closing = False
+
+    def _stopping(self):
+        if self._stop_event is not None and self._stop_event.is_set():
+            self._begin_stop()
+        return self._stop_deadline is not None
+
+    def _begin_stop(self):
+        if self._stop_deadline is not None:
+            return
+        self._stop_deadline = time.monotonic() + STOP_TIMEOUT
+        if self._watchdog is not None:
+            self._watchdog.stopping(self._stop_deadline)
+        logging.getLogger(__name__).info("OWNER_STOP_REQUESTED timeout=%s", STOP_TIMEOUT)
+        if self._locks:
+            try:
+                self._heartbeat("stopping")
+            except Exception:
+                logging.getLogger(__name__).warning("OWNER_STOP_HEARTBEAT_FAILED")
+
+    def _check_stop(self):
+        if self._stopping():
+            raise asyncio.CancelledError
+
+    def _stop_remaining(self, reserve=0):
+        return max(0, self._stop_deadline - time.monotonic() - reserve)
+
+    async def _cancel_rpc(self, task):
+        task.cancel()
+        if self._stopping():
+            began = time.monotonic()
+            budget = min(max(0, STOP_CANCEL_TIMEOUT - self._cancel_spent),
+                         self._stop_remaining(STOP_RESERVE))
+            done, _ = await asyncio.wait({task}, timeout=budget)
+            self._cancel_spent += time.monotonic() - began
+            if not done:
+                # A live RPC must never outlive ownership. Exit the process
+                # instead of unlocking underneath a cancellation-resistant send.
+                logging.getLogger(__name__).error("OWNER_STOP_CANCEL_STALLED exit_code=1")
+                os._exit(1)
+        try:
+            await task
+        except (Exception, asyncio.CancelledError):
+            pass
 
     def _optional_inspect(self, path):
         try:
@@ -498,11 +566,54 @@ class Owner:
             raise _StartError("UNSAFE_PATH")
 
     async def _rpc(self, operation, *args, **kwargs):
+        if not self._closing:
+            self._check_stop()
         timeout = RPC_TIMEOUTS[operation]
+        if self._closing and self._stopping():
+            timeout = min(timeout, STOP_DISCONNECT_TIMEOUT,
+                          self._stop_remaining(STOP_RESERVE))
+
+        async def invoke():
+            # The task may first run after the signal callback, even though it
+            # was created before stop. Check at the actual adapter boundary.
+            if not self._closing:
+                self._check_stop()
+            return await getattr(self._telegram, operation)(*args, **kwargs)
+
+        rpc = asyncio.create_task(invoke())
+        # Keep the adapter task itself: wait_for may otherwise wait forever for
+        # its cancellation, or cancel it twice while it is joining children.
+        task = asyncio.ensure_future(asyncio.wait_for(asyncio.shield(rpc), timeout=timeout))
         try:
-            return await asyncio.wait_for(
-                getattr(self._telegram, operation)(*args, **kwargs), timeout=timeout)
+            if self._stop_waiter is None:
+                return await task
+            done, _ = await asyncio.wait({task, self._stop_waiter},
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                return task.result()
+            self._begin_stop()
+            if self._closing:
+                timeout = min(timeout, STOP_DISCONNECT_TIMEOUT,
+                              self._stop_remaining(STOP_RESERVE))
+                done, _ = await asyncio.wait({task}, timeout=timeout)
+                if task in done:
+                    return task.result()
+                await self._cancel_rpc(rpc)
+                raise asyncio.TimeoutError
+            elif operation == "send":
+                # Only an already started send may continue after stop. Keep
+                # the cancellation, disconnect and reserve shares available.
+                grace = min(STOP_SEND_GRACE, self._stop_remaining(
+                    STOP_CANCEL_TIMEOUT + STOP_DISCONNECT_TIMEOUT + STOP_RESERVE))
+                done, _ = await asyncio.wait({task}, timeout=grace)
+                if task in done:
+                    return task.result()
+            raise asyncio.CancelledError
+        except asyncio.CancelledError:
+            await self._cancel_rpc(rpc)
+            raise
         except asyncio.TimeoutError:
+            await self._cancel_rpc(rpc)
             # Only fixed operation names and budgets: no peers, paths, request
             # bodies or adapter exception text belong in the journal.
             logging.getLogger(__name__).warning(
@@ -512,6 +623,11 @@ class Owner:
                 raise SendUncertain() from None
             raise Disconnected() from None
         finally:
+            task.cancel()
+            try:
+                await task
+            except (Exception, asyncio.CancelledError):
+                pass
             # A step can contain many bounded RPCs. Only a stalled RPC (including
             # cancellation) or work without RPC/step completion should time out.
             if self._watchdog is not None:
@@ -543,9 +659,11 @@ class Owner:
             key = (mirror.peer["kind"], mirror.peer["id"])
             groups.setdefault(key, []).append(mirror)
         for group in groups.values():
+            self._check_stop()
             cursors = []
             boundaries = []
             for mirror in group:
+                self._check_stop()
                 with mirror.locked():
                     data, state = mirror.load()
                     cursor = mirror.cursor(data)
@@ -600,6 +718,7 @@ class Owner:
         needs_catchup = False
         orphans = []
         for mirror in self._mirrors:
+            self._check_stop()
             batch = [e for e in self._pending_events if e.get("peer") is not None
                      and all(e["peer"].get(k) == mirror.peer[k] for k in ("account", "kind", "id"))
                      and e["kind"] in ("new", "edit", "delete", "topic")]
@@ -640,6 +759,7 @@ class Owner:
             self._write_status(request, st, "refreshed", "REFRESHED", result=saved)
             return
         await self._sync_mirrors(matches)
+        self._check_stop()
         with mirror.locked():
             data, state = mirror.load()
             result = mirror.checkpoint(data, state, request["request_id"], self.clock.utc())
@@ -663,6 +783,8 @@ class Owner:
             self._state = state
 
     def _heartbeat(self, state):
+        if state != "stopping":
+            self._check_stop()
         now = self.clock.monotonic()
         if state != self._state or self._heartbeat_at is None or now - self._heartbeat_at >= 5:
             data = {"schema_version": 1, "instance": self._instance,
@@ -673,6 +795,7 @@ class Owner:
             self._heartbeat_at = now
 
     async def start(self) -> dict:
+        self._check_stop()
         if self._started:
             return {"code": "READY", "exit_code": 0}
         try:
@@ -720,6 +843,7 @@ class Owner:
         """Do bounded maintenance and at most one send, without sleeping."""
         if not self._started or self._stepping:
             return False
+        self._check_stop()
         self._stepping = True
         self._step_network_failed = False
         self._step_recovering = self._state == "degraded"
@@ -1105,6 +1229,7 @@ class Owner:
     async def _step_send(self, *, allow_rpc=True):
         import telegram_owner_client as client
 
+        self._check_stop()
         selected = self._next_package()
         if selected is None:
             return False
@@ -1161,6 +1286,7 @@ class Owner:
                 # This must be durable before upload, including on retry.
                 st = self._write_status(request, st, "queued", "QUEUED")
             peer = await self._rpc("resolve", self.account, request["target"]["peer"])
+            self._check_stop()
             if (peer.get("account") != self.account or peer.get("kind") not in ("User", "Chat", "Channel")
                     or type(peer.get("id")) is not int or peer["id"] <= 0):
                 raise client._Error("INVALID_REQUEST")
@@ -1174,6 +1300,7 @@ class Owner:
                     self._write_status(request, st, "rejected", "PACE_TOO_EARLY", 3, retry_after=wait)
                     return True
             uploads = [await self._rpc("upload", path) for path in copies]
+            self._check_stop()
             if self.clock.utc() >= request["expires_at"]:
                 raise client._Error("REQUEST_EXPIRED")
             if at is not None and not 120 <= at - self.clock.utc() <= 366 * 86400:
@@ -1183,8 +1310,8 @@ class Owner:
             pace_before = deepcopy(self._pace)
             self._reserve_pace(request, peer, st)
             st = self._write_status(request, st, "sending", "SENDING")
-            self._save_pace()
             possible_send = True
+            self._save_pace()
             sent_at = self.clock.utc()
             ack = await self._rpc("send", outgoing, peer, uploads)
             result = {"message_ids": ack.get("message_ids", []),
@@ -1197,6 +1324,7 @@ class Owner:
             if at is not None:
                 if ack.get("at", at) != at:
                     raise SendUncertain(result["message_ids"])
+                self._check_stop()
                 # Remind's +181..239s may be absent from Saved Messages' queue.
                 # Allow processing down to the existing 120s minimum send lead.
                 if not (request["schedule"]["remind"] and 120 <= at - sent_at <= 239):
@@ -1205,6 +1333,10 @@ class Owner:
                     result["verification"] = await self._verify_schedule(verification_request, peer, result)
             self._write_status(request, st, "scheduled" if at is not None else "sent",
                                "SCHEDULED" if at is not None else "SENT", result=result)
+        except asyncio.CancelledError:
+            if possible_send:
+                self._uncertain(request, st)
+            raise
         except BlockingIOError:
             if possible_send:
                 self._uncertain(request, st)
@@ -1247,6 +1379,9 @@ class Owner:
             self._write_status(request, st, "unknown", "SEND_UNCERTAIN", 4)
         except Exception:
             # The prior sending marker is sufficient to prevent another RPC.
+            if self._stopping():
+                self._stop_cleanup_failed = True
+                logging.getLogger(__name__).error("OWNER_STOP_STATUS_FAILED")
             self._local_failure(pause=True)
 
     async def _verify_schedule(self, request, peer, result):
@@ -1271,6 +1406,8 @@ class Owner:
         raise SendUncertain(result["message_ids"])
 
     def _degraded(self, reason="local", *, subtype=None):
+        if self._stopping():
+            return
         self._degraded_reason = (reason, subtype)
         try:
             self._heartbeat("degraded")
@@ -1280,15 +1417,23 @@ class Owner:
             logging.getLogger(__name__).error("OWNER_HEARTBEAT_FAILED")
 
     async def close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
         try:
             if self._locks:
                 try:
-                    self._heartbeat("stopping")
+                    if not self._stopping():
+                        self._heartbeat("stopping")
+                except Exception:
+                    if not self._stopping():
+                        raise
+                    logging.getLogger(__name__).warning("OWNER_STOP_HEARTBEAT_FAILED")
                 finally:
                     if self._telegram is not None:
-                        await self._rpc("disconnect")
+                        await self._close_transport()
             elif self._telegram is not None:
-                await self._rpc("disconnect")
+                await self._close_transport()
         finally:
             self._telegram = None
             self._started = False
@@ -1298,16 +1443,34 @@ class Owner:
                 try:
                     self._locks.pop().__exit__(None, None, None)
                 except Exception as error:
+                    self._stop_cleanup_failed = True
                     if unlock_error is None:
                         unlock_error = error
+            self._closing = False
             if unlock_error is not None:
                 raise unlock_error
+
+    async def _close_transport(self):
+        try:
+            await self._rpc("disconnect")
+        except (Exception, asyncio.CancelledError):
+            if not self._stopping():
+                raise
+            logging.getLogger(__name__).warning("OWNER_STOP_DISCONNECT_FAILED")
 
 
 async def _serve(owner, stop, watchdog):
     owner._watchdog = watchdog
+    owner._stop_event = stop
     started_at = owner.clock.monotonic()
+
+    async def stopping():
+        await stop.wait()
+        owner._begin_stop()
+
+    owner._stop_waiter = asyncio.create_task(stopping())
     try:
+        owner._check_stop()
         reply = await owner.start()
         watchdog.completed()
         if reply["exit_code"]:
@@ -1336,8 +1499,27 @@ async def _serve(owner, stop, watchdog):
             except asyncio.TimeoutError:
                 pass
         return 0
+    except asyncio.CancelledError:
+        if not owner._stopping():
+            raise
     finally:
-        await owner.close()
+        try:
+            await owner.close()
+        except Exception:
+            if not owner._stopping():
+                raise
+            owner._stop_cleanup_failed = True
+            logging.getLogger(__name__).error("OWNER_STOP_CLEANUP_FAILED")
+        finally:
+            owner._stop_waiter.cancel()
+            try:
+                await owner._stop_waiter
+            except asyncio.CancelledError:
+                pass
+            owner._stop_waiter = None
+        if owner._stopping() and owner._stop_cleanup_failed:
+            return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1378,8 +1560,13 @@ def main(argv: list[str] | None = None) -> int:
                       clock=clock, rng=random.Random(), store=store)
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
+
+        def request_stop():
+            stop.set()
+            owner._begin_stop()
+
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop.set)
+            loop.add_signal_handler(sig, request_stop)
         try:
             with HeartbeatWatchdog(clock) as watchdog:
                 return await _serve(owner, stop, watchdog)
