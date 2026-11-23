@@ -89,7 +89,7 @@ def is_bad(path) -> bool:
         return False
 
 
-def build_adapter(*, resolve_exc=None, me_exc=None, known_exc=None, upload_exc=None,
+def build_adapter(*, resolve_none=False, resolve_exc=None, me_exc=None, known_exc=None, upload_exc=None,
                   send_exc=None):
     a = Telegram.__new__(Telegram)
     a.account = "a"
@@ -117,7 +117,8 @@ def build_adapter(*, resolve_exc=None, me_exc=None, known_exc=None, upload_exc=N
         send_file=AsyncMock(side_effect=send_exc) if send_exc is not None else AsyncMock(
             return_value=types.SimpleNamespace(id=9)))
     a.snapshot = types.SimpleNamespace(
-        resolve_entity=AsyncMock(side_effect=resolve_exc) if resolve_exc is not None else AsyncMock(
+        resolve_entity=AsyncMock(return_value=None) if resolve_none else
+        AsyncMock(side_effect=resolve_exc) if resolve_exc is not None else AsyncMock(
             return_value=types.SimpleNamespace(id=BAD_PEER, username=None)))
     a._peer = lambda entity: {"account": "a", "kind": "User", "id": entity.id,
                               "username": getattr(entity, "username", None)}
@@ -339,6 +340,36 @@ class ResolveRejected(PrepCase):
 
 
 # --- P3-1 (me), P3-9: что НЕ постоянно ------------------------------------------------
+
+class LocalMiss(PrepCase):
+    """У-6: fallback вернул None без исключения; peer нет в _dialogs и _entities."""
+
+    def test_none_without_exception_is_peer_unresolvable(self):
+        for kind in ("text", "file"):
+            with self.subTest(kind=kind):
+                self.setUp()
+                ad = build_adapter(resolve_none=True)
+                self.assertNotIn(BAD_PEER, ad._dialogs)
+                self.assertFalse([k for k in ad._entities if BAD_PEER in k])
+                tg = HybridTelegram(ad, bad_peers={BAD_PEER})
+                o = self.owner(tg)
+                bad = send_request("a", peer=BAD_PEER)
+                st = self.deliver(o, bad)
+                self.assert_rejected(st, bad, "PEER_UNRESOLVABLE")
+                self.assertEqual(tg.sends(), [])
+                self.assert_no_reconnect(tg)
+                self.assert_healthy_goes_next(o, tg, kind, bad["request_id"])
+
+    def test_network_error_from_fallback_is_not_permanent(self):
+        for exc in (ConnectionError("down"), asyncio.TimeoutError()):
+            with self.subTest(exc=type(exc).__name__):
+                self.setUp()
+                ad = build_adapter(resolve_exc=exc)
+                tg = HybridTelegram(ad, bad_peers={BAD_PEER})
+                o = self.owner(tg)
+                st = self.deliver(o, send_request("a", peer=BAD_PEER))
+                self.assertEqual((st["state"], st["code"]), ("queued", "QUEUED"))
+
 
 class NotPermanent(PrepCase):
     def assert_not_rejected_prep(self, st):
