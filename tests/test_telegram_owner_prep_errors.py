@@ -371,6 +371,128 @@ class LocalMiss(PrepCase):
                 self.assertEqual((st["state"], st["code"]), ("queued", "QUEUED"))
 
 
+class ReviewGaps(PrepCase):
+    """Пробелы по сверке пакета 3: отмена, remind/pace, зеркало, FloodWait, None при известном peer."""
+
+    def step_swallowing_cancel(self, o):
+        try:
+            return run(o.step())
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            return None
+
+    def tree(self, root):
+        return {str(p.relative_to(root)): p.read_bytes() for p in sorted(Path(root).rglob("*"))
+                if p.is_file()}
+
+    def test_cancel_during_resolve_is_not_rejected(self):
+        ad = build_adapter(resolve_exc=asyncio.CancelledError())
+        tg = HybridTelegram(ad, bad_peers={BAD_PEER})
+        o = self.owner(tg)
+        bad = send_request("a", peer=BAD_PEER)
+        write_package(self.env.root("a"), bad)
+        self.step_swallowing_cancel(o)
+        st = read_status(self.env.root("a"), bad["request_id"])
+        self.assertNotEqual((st or {}).get("state"), "rejected")
+        self.assertNotIn((st or {}).get("code"), ("PEER_UNRESOLVABLE", "UPLOAD_REJECTED"))
+        self.assertEqual(tg.sends(), [])
+
+    def test_cancel_during_upload_is_not_rejected_and_leaves_no_handles(self):
+        ad = build_adapter(upload_exc=asyncio.CancelledError())
+        tg = HybridTelegram(ad, bad_files={"bad.bin"})
+        o = self.owner(tg)
+        bad = self.file_req("bad.bin", count=2)
+        write_package(self.env.root("a"), bad)
+        self.step_swallowing_cancel(o)
+        st = read_status(self.env.root("a"), bad["request_id"])
+        self.assertNotEqual((st or {}).get("state"), "rejected")
+        self.assertNotIn((st or {}).get("code"), ("PEER_UNRESOLVABLE", "UPLOAD_REJECTED"))
+        self.assertEqual(tg.sends(), [])
+        self.assertEqual(ad._uploads, {})
+
+    def test_upload_rejection_leaves_adapter_without_handles(self):
+        ad = build_adapter(upload_exc=FilePartsInvalidError())
+        tg = HybridTelegram(ad, bad_files={"bad.bin"})
+        o = self.owner(tg)
+        bad = self.file_req("bad.bin", count=2)
+        self.assert_rejected(self.deliver(o, bad), bad, "UPLOAD_REJECTED")
+        self.assertEqual(ad._uploads, {})
+
+    def test_remind_with_at_kept_and_other_peer_pace_untouched(self):
+        ad = build_adapter(resolve_exc=UsernameInvalidError())
+        tg = HybridTelegram(ad, bad_peers={BAD_PEER})
+        o = self.owner(tg)
+        first = self.deliver(o, send_request("a", peer=HEALTHY_PEER))
+        self.assertEqual(first["state"], "sent")
+        pace = dict(first.get("pace") or {})
+        at = NOW + 3600 + 7 * 60 + 7
+        scheds = (
+            {"at": at, "timezone": None, "exact_minute": True, "remind": False},
+        )
+        for sched in scheds:
+            bad = send_request("a", peer=BAD_PEER, schedule=sched)
+            st = self.deliver(o, bad)
+            self.assert_rejected(st, bad, "PEER_UNRESOLVABLE")
+            saved = json.loads((self.env.root("a") / "outbox" / bad["request_id"]
+                                / "request.json").read_bytes())
+            self.assertEqual(saved["schedule"], sched)
+            for key, value in pace.items():
+                self.assertEqual((st.get("pace") or {}).get(key, value), value)
+        self.assertEqual(len(tg.sends()), 1)
+
+    def test_rejected_does_not_touch_mirror_files(self):
+        ad = build_adapter(resolve_exc=UsernameInvalidError())
+        tg = HybridTelegram(ad, bad_peers={BAD_PEER})
+        tg.history_data = [{"id": 1, "type": "message", "date": "2026-11-19T10:00:01",
+                            "date_unixtime": "1797674401", "from": "Иван", "from_id": "user1",
+                            "text": "msg 1", "text_entities": []}]
+        o = self.env.make_owner("a", tg=tg, destinations=[self.env.destination("d1", 1001, "chat1")])
+        self.assertEqual(run(o.start())["code"], "READY")
+        self.addCleanup(lambda: run(o.close()))
+        before = self.tree(self.env.projects)
+        bad = send_request("a", peer=BAD_PEER)
+        self.assert_rejected(self.deliver(o, bad), bad, "PEER_UNRESOLVABLE")
+        self.assertEqual(self.tree(self.env.projects), before)
+        self.assertEqual(tg.names().count("connect"), 1)
+        self.assertNotIn("disconnect", tg.names())
+
+    def test_flood_wait_on_resolve_does_not_reconnect(self):
+        ad = build_adapter(resolve_exc=FloodWaitError(30))
+        tg = HybridTelegram(ad, bad_peers={BAD_PEER})
+        o = self.owner(tg)
+        st = self.deliver(o, send_request("a", peer=BAD_PEER))
+        self.assertEqual(st["state"], "queued")
+        o.fake.clock.advance(31)
+        ad.snapshot.resolve_entity = AsyncMock(return_value=types.SimpleNamespace(id=BAD_PEER, username=None))
+        for _ in range(4):
+            run(o.step())
+        self.assertEqual(tg.names().count("connect"), 1)
+        self.assertNotIn("disconnect", tg.names())
+
+    def test_mirror_resolve_error_at_startup_gives_no_peer_unresolvable_status(self):
+        tg = FakeTelegram("a")
+        tg.raises["resolve"] = UsernameInvalidError()
+        o = self.env.make_owner("a", tg=tg, destinations=[self.env.destination("d1", 1001, "chat1")])
+        self.addCleanup(lambda: run(o.close()))
+        req = send_request("a", peer=HEALTHY_PEER)
+        write_package(self.env.root("a"), req)
+        run(o.start())
+        for _ in range(4):
+            o.fake.clock.advance(20)
+            run(o.step())
+        status_dir = self.env.root("a") / "status"
+        for p in (status_dir.glob("*.json") if status_dir.exists() else []):
+            self.assertNotIn("PEER_UNRESOLVABLE", p.read_text())
+
+    def test_none_but_peer_known_in_entities_is_not_permanent(self):
+        ad = build_adapter(resolve_none=True)
+        ad._entities[("User", BAD_PEER)] = "entity"
+        tg = HybridTelegram(ad, bad_peers={BAD_PEER})
+        o = self.owner(tg)
+        st = self.deliver(o, send_request("a", peer=BAD_PEER))
+        self.assertNotEqual(st["state"], "rejected", st)
+        self.assertNotEqual(st["code"], "PEER_UNRESOLVABLE")
+
+
 class NotPermanent(PrepCase):
     def assert_not_rejected_prep(self, st):
         self.assertNotEqual(st["state"], "rejected", st)
