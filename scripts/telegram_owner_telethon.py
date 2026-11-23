@@ -278,6 +278,9 @@ class Telegram:
             batch = deque()
             for _ in range(min(100, len(self._updates))):
                 update, sequence = self._updates.popleft(), sequences.popleft()
+                # Freeze Telegram's pts (or the arrival fallback) before any
+                # await; retries must retain the same revision sequence.
+                sequence = getattr(update, "pts", None) or sequence
                 batch.append([update, sequence, None])
             self._event_batch = pending = (batch, result)
         batch, result = pending

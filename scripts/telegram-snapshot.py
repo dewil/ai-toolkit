@@ -744,6 +744,8 @@ def _cleanup_media_temps(root: Path) -> int:
     removed = 0
     cutoff = time.time() - MEDIA_TEMP_TTL
     try:
+        if root.is_symlink():
+            return 0
         with os.scandir(root) as entries:
             for entry in islice(entries, MEDIA_TEMP_SCAN_LIMIT):
                 fd = None
@@ -787,18 +789,23 @@ async def download_message_media(client: TelegramClient, msg, chat_media_dir: Pa
     if type(size) is not int or size < 0:
         size = None
     attempt, lock_fd = None, None
+    temp_root = chat_media_dir / MEDIA_TEMP_DIR
     reason = "MEDIA_DOWNLOAD_FAILED"
     try:
+        # Refuse before mkdir, cache invalidation or scanning the namespace.
+        if temp_root.is_symlink():
+            raise ValueError(reason)
         if dest.is_file():
             if size is None or dest.stat().st_size == size:
                 return dest.name
             # A proven size mismatch is not ready media (legacy PART cache).
             # Invalidate only this entry before starting a fresh attempt.
             dest.unlink()
-        temp_root = chat_media_dir / MEDIA_TEMP_DIR
         temp_root.mkdir(parents=True, exist_ok=True)
         _cleanup_media_temps(temp_root)
         attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=temp_root))
+        if attempt.is_symlink():
+            raise ValueError(reason)
         lock_fd = os.open(attempt, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         requested = attempt / ("payload" + dest.suffix)
@@ -806,7 +813,17 @@ async def download_message_media(client: TelegramClient, msg, chat_media_dir: Pa
         reason = "MEDIA_DOWNLOAD_INVALID_RESULT"
         if not returned:
             raise ValueError(reason)
-        actual = Path(returned)
+        # Compare lexical absolute paths without resolving symlinks. Reject
+        # traversal and symlinks before inspecting or moving returned bytes.
+        actual = Path(returned).absolute()
+        relative = actual.relative_to(attempt.absolute())
+        if ".." in relative.parts or temp_root.is_symlink() or attempt.is_symlink():
+            raise ValueError(reason)
+        candidate = attempt
+        for part in relative.parts:
+            candidate = candidate / part
+            if candidate.is_symlink():
+                raise ValueError(reason)
         if not actual.is_file() or (size is not None and actual.stat().st_size != size):
             raise ValueError(reason)
         reason = "MEDIA_PUBLISH_FAILED"
@@ -819,7 +836,7 @@ async def download_message_media(client: TelegramClient, msg, chat_media_dir: Pa
     finally:
         # No await/shield: bounded local cleanup cannot swallow cancellation.
         try:
-            if attempt is not None:
+            if attempt is not None and not temp_root.is_symlink() and not attempt.is_symlink():
                 shutil.rmtree(attempt)
         except OSError:
             logging.getLogger(__name__).warning("MEDIA_TEMP_CLEANUP_FAILED")
