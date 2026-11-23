@@ -50,13 +50,17 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
+import logging
 import hashlib
 import os
 import shutil
 import sqlite3
 import sys
 import time
+import tempfile
+from itertools import islice
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -729,14 +733,45 @@ def topic_id_from_reply(reply_to) -> int | None:
     return getattr(reply_to, "reply_to_top_id", None) or getattr(reply_to, "reply_to_msg_id", None)
 
 
+# This hidden namespace contains attempts, never ready attachments. Directory
+# locks protect active attempts across module instances and cooperating processes.
+MEDIA_TEMP_DIR = ".telegram-media-tmp"
+MEDIA_TEMP_TTL = 2 * 3600
+MEDIA_TEMP_SCAN_LIMIT = 64
+
+
+def _cleanup_media_temps(root: Path) -> int:
+    removed = 0
+    cutoff = time.time() - MEDIA_TEMP_TTL
+    try:
+        with os.scandir(root) as entries:
+            for entry in islice(entries, MEDIA_TEMP_SCAN_LIMIT):
+                fd = None
+                try:
+                    if not entry.name.startswith("attempt-") or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    fd = os.open(entry.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    if os.fstat(fd).st_mtime < cutoff:
+                        shutil.rmtree(entry.path)
+                        removed += 1
+                except OSError:
+                    pass
+                finally:
+                    if fd is not None:
+                        os.close(fd)
+    except OSError:
+        pass
+    return removed
+
+
 async def download_message_media(client: TelegramClient, msg, chat_media_dir: Path, *,
                                  safe_errors: bool = False) -> str | None:
-    """Скачивает вложение сообщения в несинкаемый кэш. Возвращает имя файла или None.
+    """Download bytes into a private attempt, atomically publish a verified file.
 
-    result.json НЕ трогаем - метаданные (file_name/mime) уже пишет
-    message_to_record, здесь только байты на диск, чтобы их мог прочитать агент
-    (скрин - через Read визуально, файл - сканером). Превью ссылок (webpage)
-    вложением не считаем. Имя файла несет <msg_id> для корреляции с сообщением.
+    Direct fetch_new and owner share this contract and retain their cache names.
+    Unknown sizes trust a successful downloader (and existing legacy files).
+    Only the final name may enter downloaded_media; cancellation propagates.
     """
     load_telethon()
     media = getattr(msg, "media", None)
@@ -748,18 +783,52 @@ async def download_message_media(client: TelegramClient, msg, chat_media_dir: Pa
     ext = (msg.file.ext if msg.file else "") or ".bin"
     fname = f"{msg.id}_{base}" if base else f"{msg.id}{ext}"
     dest = chat_media_dir / fname
-    if dest.exists():
-        return dest.name
-    chat_media_dir.mkdir(parents=True, exist_ok=True)
+    size = getattr(msg.file, "size", None)
+    if type(size) is not int or size < 0:
+        size = None
+    attempt, lock_fd = None, None
+    reason = "MEDIA_DOWNLOAD_FAILED"
     try:
-        await client.download_media(msg, file=str(dest))
+        if dest.is_file():
+            if size is None or dest.stat().st_size == size:
+                return dest.name
+            # A proven size mismatch is not ready media (legacy PART cache).
+            # Invalidate only this entry before starting a fresh attempt.
+            dest.unlink()
+        temp_root = chat_media_dir / MEDIA_TEMP_DIR
+        temp_root.mkdir(parents=True, exist_ok=True)
+        _cleanup_media_temps(temp_root)
+        attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=temp_root))
+        lock_fd = os.open(attempt, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        requested = attempt / ("payload" + dest.suffix)
+        returned = await client.download_media(msg, file=str(requested))
+        reason = "MEDIA_DOWNLOAD_INVALID_RESULT"
+        if not returned:
+            raise ValueError(reason)
+        actual = Path(returned)
+        if not actual.is_file() or (size is not None and actual.stat().st_size != size):
+            raise ValueError(reason)
+        reason = "MEDIA_PUBLISH_FAILED"
+        os.replace(actual, dest)
         return dest.name
-    except Exception as exc:  # noqa: BLE001 - best-effort, не роняем pull из-за одного файла
-        if safe_errors:
-            sys.stderr.write("MEDIA_DOWNLOAD_FAILED\n")
-        else:
-            sys.stderr.write(f"медиа msg {msg.id}: не скачалось ({exc})\n")
+    except Exception:
+        # Fixed reasons only, including direct calls: no remote text or paths.
+        logging.getLogger(__name__).warning("%s", reason)
         return None
+    finally:
+        # No await/shield: bounded local cleanup cannot swallow cancellation.
+        try:
+            if attempt is not None:
+                shutil.rmtree(attempt)
+        except OSError:
+            logging.getLogger(__name__).warning("MEDIA_TEMP_CLEANUP_FAILED")
+        finally:
+            if lock_fd is not None:
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    logging.getLogger(__name__).warning("MEDIA_TEMP_CLEANUP_FAILED")
 
 
 def cleanup_old_media(ttl_hours: int | None = None) -> int:
@@ -781,11 +850,16 @@ def cleanup_old_media(ttl_hours: int | None = None) -> int:
         return 0
     cutoff = time.time() - ttl_hours * 3600
     removed = 0
-    for f in MEDIA_CACHE.rglob("*"):
-        if f.is_file() and f.stat().st_mtime < cutoff:
+    for directory, subdirs, files in os.walk(MEDIA_CACHE):
+        if MEDIA_TEMP_DIR in subdirs:
+            subdirs.remove(MEDIA_TEMP_DIR)
+            removed += _cleanup_media_temps(Path(directory) / MEDIA_TEMP_DIR)
+        for name in files:
+            f = Path(directory) / name
             try:
-                f.unlink()
-                removed += 1
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    removed += 1
             except OSError:
                 pass
     return removed
