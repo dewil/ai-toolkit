@@ -38,6 +38,7 @@ WATCHDOG_TIMEOUT = 300
 HISTORY_PAGE_SIZE = 100
 MIN_FAILURE_UPTIME = 60  # With RestartSec=15: at most 4 starts per 300s.
 SWEEP_INTERVAL = 30
+MIRROR_CATCHUP_INTERVAL = 5
 OUTBOX_SETTLE_SECONDS = 2
 TERMINAL_STATES = frozenset(("sent", "scheduled", "refreshed", "rejected", "unknown"))
 
@@ -363,8 +364,10 @@ class Owner:
         self._destinations = []
         self._mirrors = []
         self._pending_events = []
-        self._overflow_pending = False
-        self._overflow_catchup_at = 0
+        # Destination ids still owed an overflow scan (None if none registered).
+        self._overflow_pending = set()
+        self._background_catchup_at = 0
+        self._recovery_required = False
         self._watchdog = None
 
     def _optional_inspect(self, path):
@@ -531,11 +534,26 @@ class Owner:
                     resolved[target] = peer
                 self._mirrors.append(Mirror(destination, resolved[target], self.store))
         await self._sync_mirrors(self._mirrors)
-        if self._pending_events:
-            self._apply_events()
-            # An orphan still absent from a completed history/recent check
-            # cannot be synthesized. All other buffered events were merged.
-            self._pending_events.clear()
+        self._finish_catchup(self._mirrors)
+
+    @staticmethod
+    def _peer_key(peer):
+        return tuple(peer[k] for k in ("account", "kind", "id"))
+
+    def _finish_catchup(self, mirrors):
+        self._apply_events()
+        checked = {self._peer_key(m.peer) for m in mirrors}
+        # У-2: drop unresolved patches only after their peer was fully checked.
+        self._pending_events = [e for e in self._pending_events
+                                if self._peer_key(e["peer"]) not in checked]
+        self._overflow_pending.difference_update(
+            m.destination["destination_id"] for m in mirrors)
+        if not self._mirrors:
+            self._overflow_pending.clear()
+
+    def _background_due(self):
+        return (bool(self._pending_events or self._overflow_pending)
+                and self.clock.monotonic() >= self._background_catchup_at)
 
     async def _sync_mirrors(self, mirrors):
         groups = {}
@@ -596,7 +614,8 @@ class Owner:
 
     def _apply_events(self):
         if any(e["kind"] == "overflow" for e in self._pending_events):
-            self._overflow_pending = True
+            self._overflow_pending.update(
+                [m.destination["destination_id"] for m in self._mirrors] or [None])
         needs_catchup = False
         orphans = []
         for mirror in self._mirrors:
@@ -639,13 +658,24 @@ class Owner:
         if saved is not None:
             self._write_status(request, st, "refreshed", "REFRESHED", result=saved)
             return
+        # Reconcile every destination of this canonical peer from one RPC scan.
+        matches = [m for m in self._mirrors
+                   if self._peer_key(m.peer) == self._peer_key(mirror.peer)]
+        started_at = self.clock.monotonic()
         await self._sync_mirrors(matches)
+        self._finish_catchup(matches)
+        self._background_catchup_at = max(
+            self._background_catchup_at, started_at + MIRROR_CATCHUP_INTERVAL)
         with mirror.locked():
             data, state = mirror.load()
             result = mirror.checkpoint(data, state, request["request_id"], self.clock.utc())
             # Confirm the complete durable pair before publishing its Reply.
             mirror.load()
         self._write_status(request, st, "refreshed", "REFRESHED", result=result)
+        if self._state == "degraded" and not self._recovery_required:
+            # A refresh can finish background recovery before Δ, once the
+            # account/network deadline has expired. Other peers stay pending.
+            self._heartbeat("ready")
 
     def _set_state(self, state):
         if state != self._state:
@@ -734,11 +764,14 @@ class Owner:
                 self._sweep_at = now + SWEEP_INTERVAL
                 progress = self._sweep()
             if self.clock.monotonic() >= self._retry_at:
-                if self._state == "degraded":
+                caught_up = False
+                if self._state == "degraded" or self._background_due():
                     self._step_recovering = True
-                    if (self._overflow_pending
-                            and self.clock.monotonic() < self._overflow_catchup_at):
-                        return await self._step_send(allow_rpc=False) or progress
+                    # A short FloodWait during a background attempt does not
+                    # release Δ. Independent local/network recovery bypasses Δ.
+                    if (not self._recovery_required
+                            and self.clock.monotonic() < self._background_catchup_at):
+                        return await self._step_send(allow_rpc=False, allow_refresh=True) or progress
                     if self._reconnect_needed:
                         if self.clock.monotonic() < self._reconnect_at:
                             return await self._step_send(allow_rpc=False) or progress
@@ -754,20 +787,26 @@ class Owner:
                             logging.getLogger(__name__).warning("OWNER_RECONNECT_DISCONNECT_FAILED")
                         await self._rpc("connect")
                         self._reconnect_needed = False
-                    if self._overflow_pending:
-                        self._overflow_catchup_at = self.clock.monotonic() + 5
+                    if self._state != "degraded":
+                        self._degraded("overflow" if self._overflow_pending else "orphan")
+                    # Account-wide interval from attempt start, including failure.
+                    # Startup deliberately does not advance this deadline.
+                    self._background_catchup_at = self.clock.monotonic() + MIRROR_CATCHUP_INTERVAL
                     await self._catch_up()
-                    self._overflow_pending = False
+                    self._recovery_required = False
                     self._heartbeat("ready")
+                    caught_up = True
                     progress = True
                 events = await self._rpc("events")
                 if events:
                     self._pending_events.extend(deepcopy(events))
                     progress = True
-                needs_catchup = self._apply_events()
-                if (needs_catchup or self._overflow_pending
-                        and self.clock.monotonic() >= self._overflow_catchup_at):
-                    self._degraded("overflow" if self._overflow_pending else "local")
+                self._apply_events()
+                if self._background_due() and not caught_up:
+                    # Defer the first orphan scan to the next step while ready
+                    # (У-3). Preserve the existing due-overflow transition.
+                    if self._overflow_pending:
+                        self._degraded("overflow")
                 else:
                     progress = await self._step_send() or progress
                 self._heartbeat(self._state)
@@ -1102,7 +1141,7 @@ class Owner:
             gate["next_allowed_at"] = max(gate.get("next_allowed_at", 0), old.get("next_allowed_at", 0))
         self._save_pace()
 
-    async def _step_send(self, *, allow_rpc=True):
+    async def _step_send(self, *, allow_rpc=True, allow_refresh=False):
         import telegram_owner_client as client
 
         selected = self._next_package()
@@ -1141,7 +1180,7 @@ class Owner:
                     raise client._Error("INVALID_REQUEST")
                 if request.get("account") != self.account:
                     raise client._Error("ACCOUNT_NOT_MANAGED")
-                if not allow_rpc:
+                if not allow_rpc and not (allow_refresh and request.get("operation") == "refresh"):
                     if client._number(request.get("expires_at")) and self.clock.utc() >= request["expires_at"]:
                         raise client._Error("REQUEST_EXPIRED")
                     return False
@@ -1271,6 +1310,8 @@ class Owner:
         raise SendUncertain(result["message_ids"])
 
     def _degraded(self, reason="local", *, subtype=None):
+        if reason in ("local", "network"):
+            self._recovery_required = True
         self._degraded_reason = (reason, subtype)
         try:
             self._heartbeat("degraded")

@@ -176,7 +176,8 @@ class MirrorLocal(Base):
         o = self.start()
         o.fake.tg.event_batches = [[ev("topic", {"id": 77, "title": "Renamed"})]]
         run(o.step())
-        self.assertEqual(self.heartbeat(), "degraded")
+        # Спека пакета 4, У-3: между фоновыми сверками heartbeat ready.
+        self.assertEqual(self.heartbeat(), "ready")
         self.assertEqual(load(self.path)["topics"], [])
         o.fake.tg.recent_data = [{"kind": "topic", "record": topic_rec(77), "revision": [NOW - 1, 0]}]
         o.fake.tg.raises["recent"] = Disconnected()
