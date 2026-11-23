@@ -29,6 +29,7 @@ universal:
   - rules/task-cost.md                 # проверяемый учет расхода токенов по отдельной задаче, receipts, unknown и один владелец ledger
   - rules/task-status.md               # файловый статус v1, назначения, доказательства и передача одного владельца
   - scripts/task-overview.py           # ограниченный read-only снимок Markdown-задач по явным корням
+  - scripts/plan-dates.py              # пересчет держателей, очистка готового за сутки и проверка формы плана
   - scripts/ai-bootstrap.py            # bootstrap нового .AI-проекта, сборка контекста, проверка и восстановление
   - rules/typography-ru.md              # русская типографика: кавычки "...", тире-дефис, "е" вместо "ё"; запрет нейроштампов ("честно скажу", пустой контраст "не X, а Y")
   - rules/subagents-usage.md            # когда и как делегировать субагентам, экономия токенов
@@ -69,6 +70,7 @@ universal:
   - skills/md-docx/SKILL.md             # сборка .docx из markdown (когда документ пойдет на правки)
   - skills/harvest-canon/SKILL.md       # оформить переиспользуемый прием проекта в upstream-кандидат канона
   - skills/backlog-task/SKILL.md        # побочную находку - в файл-таску бэклога, а не в текущий диф
+  - skills/work-plan/SKILL.md           # план работ проекта: события, сверка, прогноз и проверенная копия для владельца
   - skills/memory-compact/SKILL.md      # свертка разросшейся автопамяти: слить записи об одном сюжете, снять отработавшее, пересобрать индекс
   - skills/session-cost/SKILL.md        # внутренний учет токенов задачи и подсчет локальной Claude Code сессии
   - skills/session-cost/task-accounting.md # schema ledger, явные snapshots и операционная процедура учета задачи
