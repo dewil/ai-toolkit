@@ -328,7 +328,8 @@ class SendInFlight(StopCase):
             original(path, data)
 
         with patch.object(store, "atomic_write", side_effect=write):
-            self.serve(owner, stop, after(entered, stop), limit=10.0)
+            code, _ = self.serve(owner, stop, after(entered, stop), limit=10.0)
+        self.assertNotEqual(code, 0, "У-6: сбой фиксации начатой отправки - ненулевой код")
         self.assertEqual(self.status(req)["state"], "sending")
         rep = self.restart()
         st = self.status(req)
@@ -377,7 +378,7 @@ class Scheduled(StopCase):
 
 
 class CleanupAndExit(StopCase):
-    def test_p5_13_failing_disconnect_is_nonzero_and_locks_released(self):
+    def test_p5_13_failing_disconnect_is_best_effort_exit_zero(self):
         owner = self.owner()
         stop = asyncio.Event()
         ready = asyncio.Event()
@@ -387,12 +388,11 @@ class CleanupAndExit(StopCase):
             await asyncio.wait_for(ready.wait(), 5)
             owner.fake.tg.raises["disconnect"] = OSError("disconnect")
             stop.set()
-        with self.assertLogs("telegram_session_owner", level="ERROR"):
-            code, _ = self.serve(owner, stop, trigger)
-        self.assertNotEqual(code, 0, "невыполненный cleanup выдан за чистый выход")
+        code, _ = self.serve(owner, stop, trigger)  # У-6: _serve не бросает
+        self.assertEqual(code, 0)
         self.assert_locks_free()
 
-    def test_p5_13_hung_disconnect_is_bounded_nonzero_and_locks_released(self):
+    def test_p5_13_hung_disconnect_is_bounded_exit_zero_and_locks_released(self):
         owner = self.owner()
         stop, ready, entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
         owner.fake.tg.hooks["events"] = lambda: ready.set()
@@ -403,7 +403,7 @@ class CleanupAndExit(StopCase):
             stop.set()
         code, elapsed = self.serve(owner, stop, trigger, limit=10.0)
         self.assertLess(elapsed, 8.0)
-        self.assertNotEqual(code, 0)
+        self.assertEqual(code, 0)
         self.assert_locks_free()
 
     def test_p5_13_heartbeat_failure_on_stopping_is_not_cleanup_failure(self):
