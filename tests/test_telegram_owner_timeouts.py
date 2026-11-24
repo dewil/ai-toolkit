@@ -190,7 +190,8 @@ class Timeouts(Base):
                 await asyncio.Future()
 
         async def timed_wait(awaitable, timeout):
-            if timeout > 1:  # Only the restart pause; RPC budgets are 0.01.
+            # Only the restart pause (waits on Stop); RPC budgets are 0.01.
+            if getattr(awaitable, "cr_code", None) is Stop.wait.__code__:
                 awaitable.close()
                 delays.append(timeout)
                 clock.advance(timeout)
@@ -201,9 +202,14 @@ class Timeouts(Base):
             for _ in range(8):
                 starts.append(clock.monotonic())
                 owner.fake.tg.raises["connect"] = self.mod.Disconnected()
+                before = len(delays)
                 self.assertEqual(run(self.mod._serve(owner, Stop(), Mock())), 7)
+                # Spec U-5: the 60 s floor is a sum of short interruptible waits
+                # (each <= 10 s), not one 60 s wait.
+                steps = delays[before:]
+                self.assertGreaterEqual(sum(steps), 60)
+                self.assertLessEqual(max(steps), 10)
                 clock.advance(15)  # Unit's RestartSec.
-        self.assertEqual(delays, [60] * 8)
         for start in starts:
             self.assertLessEqual(sum(start <= s < start + 300 for s in starts), 5)
 

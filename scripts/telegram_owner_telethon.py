@@ -34,11 +34,12 @@ def _snapshot():
 
 
 class Telegram:
-    def __init__(self, config):
+    def __init__(self, config, *, clock=None):
         from telethon import TelegramClient, events, errors, utils
         from telethon.tl import types, functions
 
         self.config, self.account = config, config["account"]
+        self.clock = clock
         self.types, self.functions = types, functions
         self.errors, self.utils = errors, utils
         # Legacy auth validation may include a malformed proxy in its error.
@@ -65,6 +66,10 @@ class Telegram:
         self._media_errors = {}
         self.client.add_event_handler(self._enqueue, events.Raw())
 
+    def _flood_wait(self, error):
+        clock = getattr(self, "clock", None)
+        return FloodWait(error.seconds, received_at=clock.monotonic() if clock else None)
+
     async def _call(self, awaitable, *, sending=False, timeout=None, operation=None):
         try:
             if timeout is not None:
@@ -77,7 +82,7 @@ class Telegram:
                 raise SendUncertain() from None
             raise Disconnected() from None
         except self.errors.FloodWaitError as exc:
-            raise FloodWait(exc.seconds) from None
+            raise self._flood_wait(exc) from None
         except Exception:
             if sending:
                 raise SendUncertain() from None
@@ -114,7 +119,7 @@ class Telegram:
             async for dialog in self.client.iter_dialogs():
                 self._dialogs[dialog.entity.id] = dialog.entity
         except self.errors.FloodWaitError as exc:
-            raise FloodWait(exc.seconds) from None
+            raise self._flood_wait(exc) from None
         except Exception:
             raise Disconnected() from None
         finally:
@@ -229,7 +234,7 @@ class Telegram:
                 return HistoryPage(records, next_id=next_id, complete=scanned < kwargs["limit"])
             return records
         except self.errors.FloodWaitError as exc:
-            raise FloodWait(exc.seconds) from None
+            raise self._flood_wait(exc) from None
         except Exception:
             raise Disconnected() from None
 
