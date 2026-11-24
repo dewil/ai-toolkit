@@ -59,6 +59,8 @@ class Telegram:
                                      raise_last_call_error=True)
         self._entities, self._dialogs, self._aliases = {}, {}, {}
         self._updates, self._uploads = deque(), {}
+        self._update_sequences = deque()
+        self._event_batch = None
         self._overflow = False
         self._seq = 0
         self._media_cleanup = {}
@@ -83,12 +85,25 @@ class Telegram:
                 raise SendUncertain() from None
             raise Disconnected() from None
 
+    def _arrival_sequences(self):
+        sequences = getattr(self, "_update_sequences", None)
+        if sequences is None or len(sequences) != len(self._updates):
+            # Offline callers may supply a raw queue without using _enqueue.
+            first = getattr(self, "_seq", 0) + 1
+            self._seq = first - 1 + len(self._updates)
+            self._update_sequences = sequences = deque(range(first, self._seq + 1))
+        return sequences
+
     async def _enqueue(self, update):
         # Raw includes forum service messages, unlike NewMessage's filter.
+        sequences = self._arrival_sequences()
         if len(self._updates) >= 1000:
             self._updates.clear()
+            sequences.clear()
             self._overflow = True
+        self._seq = getattr(self, "_seq", 0) + 1
         self._updates.append(update)
+        sequences.append(self._seq)
 
     async def connect(self):
         sender = getattr(self.client, "_sender", None)
@@ -251,55 +266,90 @@ class Telegram:
         return None
 
     async def events(self):
+        # The owner calls this port serially. Pending work belongs to this
+        # adapter until the synchronous handoff at the end of a successful call.
         if not self.client.is_connected():
             raise Disconnected()
-        result = []
-        if self._overflow:
-            result.append({"kind": "overflow"})
+        pending = getattr(self, "_event_batch", None)
+        if pending is None:
+            result = [{"kind": "overflow"}] if self._overflow else []
             self._overflow = False
-        batch = [self._updates.popleft() for _ in range(min(100, len(self._updates)))]
-        for update in batch:
-            self._seq += 1
-            sequence = getattr(update, "pts", None) or self._seq
-            if isinstance(update, self.types.UpdateDeleteChannelMessages):
-                result.append({"kind": "delete", "peer": {"account": self.account, "kind": "Channel",
-                               "id": update.channel_id, "username": None}, "ids": update.messages,
-                               "revision": [time.time(), sequence]})
-            elif isinstance(update, self.types.UpdateDeleteMessages):
-                # Telegram gives no peer: never guess one from a message id.
-                continue
-            elif isinstance(update, (self.types.UpdateNewMessage, self.types.UpdateNewChannelMessage,
-                                     self.types.UpdateEditMessage, self.types.UpdateEditChannelMessage)):
-                msg = update.message
-                # Raw messages need the normal Telethon client/entity context.
-                if hasattr(msg, "_finish_init"):
-                    msg._finish_init(self.client, {}, None)
-                peer = self._update_peer(msg.peer_id)
-                if peer is None or (peer["kind"], peer["id"]) not in self._entities:
-                    continue
+            sequences = self._arrival_sequences()
+            batch = deque()
+            for _ in range(min(100, len(self._updates))):
+                update, sequence = self._updates.popleft(), sequences.popleft()
+                # Freeze Telegram's pts (or the arrival fallback) before any
+                # await; retries must retain the same revision sequence.
+                sequence = getattr(update, "pts", None) or sequence
+                batch.append([update, sequence, None])
+            self._event_batch = pending = (batch, result)
+        batch, result = pending
+        while batch:
+            item = batch[0]
+            update, sequence, revision = item
+            if revision is None:
                 try:
-                    record = await self._record(msg, sequence)
-                    if record is None:
-                        continue
-                    if record.get("kind") == "topic":
-                        result.append({**record, "peer": peer})
+                    if isinstance(update, (self.types.UpdateNewMessage, self.types.UpdateNewChannelMessage,
+                                           self.types.UpdateEditMessage, self.types.UpdateEditChannelMessage)):
+                        msg = update.message
+                        stamp = (msg.edit_date or msg.date).timestamp()
                     else:
-                        edited = isinstance(update, (self.types.UpdateEditMessage, self.types.UpdateEditChannelMessage))
-                        result.append({"kind": "edit" if edited else "new", "peer": peer, "record": record,
-                                       "revision": [(msg.edit_date or msg.date).timestamp(), sequence]})
-                    await self._media(peer, msg)
+                        stamp = time.time()
+                    item[2] = revision = [stamp, sequence]
                 except Exception:
-                    # A conversion failure loses no durable cursor: force catch-up.
+                    # A malformed message retains the conversion-failure policy.
                     result.append({"kind": "overflow"})
-            elif isinstance(update, (self.types.UpdatesTooLong, self.types.UpdateChannelTooLong)):
+                    batch.popleft()
+                    continue
+            # Cancellation leaves the current item, its revision, the completed
+            # prefix and the tail intact. No await is needed for recovery.
+            events = await self._event(update, sequence, revision)
+            result.extend(events)
+            batch.popleft()
+        self._event_batch = None
+        return result
+
+    async def _event(self, update, sequence, revision):
+        result = []
+        if isinstance(update, self.types.UpdateDeleteChannelMessages):
+            result.append({"kind": "delete", "peer": {"account": self.account, "kind": "Channel",
+                           "id": update.channel_id, "username": None}, "ids": update.messages,
+                           "revision": revision})
+        elif isinstance(update, self.types.UpdateDeleteMessages):
+            # Telegram gives no peer: never guess one from a message id.
+            return result
+        elif isinstance(update, (self.types.UpdateNewMessage, self.types.UpdateNewChannelMessage,
+                                 self.types.UpdateEditMessage, self.types.UpdateEditChannelMessage)):
+            msg = update.message
+            # Raw messages need the normal Telethon client/entity context.
+            if hasattr(msg, "_finish_init"):
+                msg._finish_init(self.client, {}, None)
+            peer = self._update_peer(msg.peer_id)
+            if peer is None or (peer["kind"], peer["id"]) not in self._entities:
+                return result
+            try:
+                record = await self._record(msg, sequence)
+                if record is None:
+                    return result
+                if record.get("kind") == "topic":
+                    result.append({**record, "peer": peer, "revision": revision})
+                else:
+                    edited = isinstance(update, (self.types.UpdateEditMessage, self.types.UpdateEditChannelMessage))
+                    result.append({"kind": "edit" if edited else "new", "peer": peer, "record": record,
+                                   "revision": revision})
+                await self._media(peer, msg)
+            except Exception:
+                # A conversion failure loses no durable cursor: force catch-up.
                 result.append({"kind": "overflow"})
-            elif isinstance(update, (self.types.UpdateShortMessage, self.types.UpdateShortChatMessage)):
-                # Short updates lack the full message context. Catch up only
-                # mirrored destinations, using their resolved kind/id (including
-                # basic Chat groups configured with a positive numeric peer).
-                peer = self._update_peer(update)
-                if peer is not None and any(self._media_configs(peer)):
-                    result.append({"kind": "overflow"})
+        elif isinstance(update, (self.types.UpdatesTooLong, self.types.UpdateChannelTooLong)):
+            result.append({"kind": "overflow"})
+        elif isinstance(update, (self.types.UpdateShortMessage, self.types.UpdateShortChatMessage)):
+            # Short updates lack the full message context. Catch up only
+            # mirrored destinations, using their resolved kind/id (including
+            # basic Chat groups configured with a positive numeric peer).
+            peer = self._update_peer(update)
+            if peer is not None and any(self._media_configs(peer)):
+                result.append({"kind": "overflow"})
         return result
 
     async def upload(self, path):
