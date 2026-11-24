@@ -96,6 +96,14 @@ class Disconnected(Exception):
     pass
 
 
+class PreparationRejected(Exception):
+    """A definite request-local refusal, valid only before send."""
+
+    def __init__(self, operation):
+        self.code = {"resolve": "PEER_UNRESOLVABLE", "upload": "UPLOAD_REJECTED"}[operation]
+        super().__init__(self.code)
+
+
 class HistoryPage(list):
     """Export rows plus progress through raw Telegram service-message ids."""
 
@@ -1237,6 +1245,8 @@ class Owner:
                     self._save_pace()
                 if isinstance(error, client._Error):
                     code, exit_code = error.code, error.exit_code
+                elif isinstance(error, PreparationRejected):
+                    code, exit_code = error.code, 2
                 else:
                     code, exit_code = "INVALID_REQUEST", 2
                 self._write_status(request, st, "rejected", code, exit_code)
