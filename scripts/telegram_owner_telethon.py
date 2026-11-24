@@ -137,10 +137,41 @@ class Telegram:
             self.client._request_retries = retries
 
     async def disconnect(self):
+        # Telethon's public disconnect creates a shielded task immediately.
+        # Own that task as well as the transport loops so cancellation cannot
+        # leave them running after the owner releases its session flock.
+        owned = set()
+        client = self.client
+        senders = [getattr(client, "_sender", None)]
+        senders.extend(sender for _, sender in getattr(client, "_borrowed_senders", {}).values())
+        objects = [client, *senders,
+                   *(getattr(sender, "_connection", None) for sender in senders)]
+        for obj in objects:
+            for name in ("_updates_handle", "_keepalive_handle", "_send_loop_handle",
+                         "_recv_loop_handle", "_send_task", "_recv_task"):
+                task = getattr(obj, name, None)
+                if isinstance(task, asyncio.Future):
+                    owned.add(task)
+        owned.update(getattr(client, "_event_handler_tasks", set()))
         try:
-            await self.client.disconnect()
+            before = asyncio.all_tasks()
+            disconnecting = client.disconnect()
+            # No await between snapshots: only the disconnect call can have
+            # spawned tasks on this loop in the interval.
+            owned.update(asyncio.all_tasks() - before)
+            await disconnecting
         finally:
-            self._uploads.clear()
+            try:
+                owned.discard(asyncio.current_task())
+                for task in owned:
+                    if not task.done():
+                        task.cancel()
+                if owned:
+                    # The owner's shared cancellation deadline bounds this
+                    # join, including adapters whose children refuse to stop.
+                    await asyncio.gather(*owned, return_exceptions=True)
+            finally:
+                self._uploads.clear()
 
     def _peer(self, entity):
         kind = ("Channel" if isinstance(entity, self.types.Channel) else
