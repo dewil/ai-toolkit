@@ -18,6 +18,7 @@
     }
   },
   "open_waits": [
+    {"id": "owner-questions", "holder": "owner", "since": "2026-11-23T11:30+03:00", "where": "Вопросы Q1"},
     {"id": "catalog-review", "holder": "reviewer", "since": "2026-11-23T12:00+03:00", "where": "Ревью учебного каталога"}
   ]
 }
