@@ -238,6 +238,45 @@ def safe_id(value):
     return ''.join(ch if ch.isprintable() else '?' for ch in value)
 
 
+def lint_owner_questions(plan_sections, visible, blocker_rows, stats, report):
+    title = 'Вопросы к владельцу'
+    sections_found = [(name, start, end) for name, start, end in plan_sections
+                      if name == title or name.startswith(title + ' -')]
+    if not sections_found:
+        return
+    if len(sections_found) != 1:
+        report('ERROR', f'{title}: нужен один раздел.')
+        return
+    name, start, end = sections_found[0]
+    count = re.fullmatch(title + r' - ([1-9][0-9]*)', name)
+    ids = []
+    for index, line in visible:
+        if start <= index < end and line.startswith('### '):
+            question = re.fullmatch(r'### (Q[1-9][0-9]*)\.\s+\S.*', line)
+            if question:
+                ids.append(question[1])
+            else:
+                report('ERROR', f'{title}: неверный заголовок в строке {index + 1}.')
+    if not count or str(len(ids)) != count[1] or len(set(ids)) != len(ids):
+        report('ERROR', f'{title}: счетчик должен совпадать с числом уникальных открытых вопросов; пустой раздел скрой.')
+    blocker_start = next((begin for heading, begin, _ in plan_sections
+                          if heading.startswith('Блокировки - кого ждем - ')), None)
+    if blocker_start is None or start >= blocker_start:
+        report('ERROR', f'{title}: раздел должен стоять перед блокировками.')
+
+    owner_names = {'Владелец плана'}
+    if stats:
+        owner_key = 'owner' if 'owner' in stats else next(iter(stats))
+        owner_names.update((owner_key, stats[owner_key][0]))
+    summaries = [row for row in blocker_rows
+                 if re.match(r'^Вопросы\s+Q[0-9]', row.get('Что', ''))]
+    if len(summaries) == 1 and summaries[0].get('Ждем') in owner_names:
+        listed = [value.strip() for value in summaries[0]['Что'].split(maxsplit=1)[1].split(',')]
+        if sorted(listed) == sorted(ids):
+            return
+    report('ERROR', f'{title}: нужна одна строка владельца в блокировках со всеми открытыми номерами.')
+
+
 def lint(lines, stats, waits, now):
     findings = []
 
@@ -273,7 +312,9 @@ def lint(lines, stats, waits, now):
                 report('ERROR', f'Строка {index + 1}: дубль строки внутри таблицы.')
             seen.add(key)
 
-    for name, section_start, section_end in sections(lines):
+    plan_sections = list(sections(lines))
+    blocker_rows = []
+    for name, section_start, section_end in plan_sections:
         counted = re.fullmatch(r'(Блокировки - кого ждем|В работе сейчас|Риски) - ([0-9]+)', name)
         if counted is None:
             continue
@@ -286,6 +327,8 @@ def lint(lines, stats, waits, now):
                 row = dict(zip(head, cells(lines[index])))
                 if kind == 'Блокировки - кого ждем' and 'ничего не ждем' in row.get('Что', '').lower():
                     continue
+                if kind == 'Блокировки - кого ждем':
+                    blocker_rows.append(row)
                 count += 1
                 required = {'Блокировки - кого ждем': ('Снимется', 'Где'),
                             'В работе сейчас': ('Готово',), 'Риски': ()}[kind]
@@ -297,6 +340,7 @@ def lint(lines, stats, waits, now):
         if kind == 'Риски' and count > 7:
             report('WARN', 'В таблице рисков больше 7 строк.')
 
+    lint_owner_questions(plan_sections, visible, blocker_rows, stats, report)
     for index, stamp in done_items(lines, now):
         if stamp is None:
             report('ERROR', f'Строка {index + 1}: элемент "Готово за сутки" без читаемого времени.')
