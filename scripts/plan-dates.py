@@ -242,7 +242,11 @@ def lint_owner_questions(plan_sections, visible, blocker_rows, stats, report):
     title = 'Вопросы к владельцу'
     sections_found = [(name, start, end) for name, start, end in plan_sections
                       if name == title or name.startswith(title + ' -')]
+    summaries = [row for row in blocker_rows
+                 if re.match(r'^Вопросы\s+Q[0-9]', row.get('Что', ''))]
     if not sections_found:
+        if summaries:
+            report('ERROR', f'{title}: строка со ссылками на вопросы осталась без раздела.')
         return
     if len(sections_found) != 1:
         report('ERROR', f'{title}: нужен один раздел.')
@@ -268,8 +272,6 @@ def lint_owner_questions(plan_sections, visible, blocker_rows, stats, report):
     if stats:
         owner_key = 'owner' if 'owner' in stats else next(iter(stats))
         owner_names.update((owner_key, stats[owner_key][0]))
-    summaries = [row for row in blocker_rows
-                 if re.match(r'^Вопросы\s+Q[0-9]', row.get('Что', ''))]
     if len(summaries) == 1 and summaries[0].get('Ждем') in owner_names:
         listed = [value.strip() for value in summaries[0]['Что'].split(maxsplit=1)[1].split(',')]
         if sorted(listed) == sorted(ids):
