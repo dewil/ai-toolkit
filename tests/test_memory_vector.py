@@ -23,7 +23,9 @@ class MemoryVector(unittest.TestCase):
         key.chmod(0o600)
         self.config = self.home / ".config/ai-toolkit/memory-vector.json"
         self.config.parent.mkdir(parents=True)
-        self.values = dict(client_roots=[str(self.home)], native_projects=str(self.home),
+        native = self.home / "native"
+        native.mkdir()
+        self.values = dict(client_roots=[str(self.home)], native_projects=str(native),
                            qdrant_url="http://127.0.0.1:6333", collection="test_v2",
                            ollama_url="http://127.0.0.1:11434/api/embed", model="test-model",
                            dimension=3, key_file=str(key), query_log=str(self.home / "queries.log"))
