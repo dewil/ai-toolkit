@@ -4,6 +4,7 @@ from pathlib import Path
 import runpy
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -68,6 +69,41 @@ class MemoryVector(unittest.TestCase):
         (memory/'fact.md').unlink()
         self.assertFalse(b['stable_sources'](h,b['source_health']([])))
 
+
+    def test_existing_collection_must_match_before_write(self):
+        backend = self.load()
+        params = {"vectors":{"dense":{"size":3,"distance":"Cosine"}},
+                  "sparse_vectors":{"bm25":{"modifier":"idf"}}}
+        indexes = {key:{"data_type":"keyword"} for key in
+                   ("project","type","project_id","identity_schema")}
+        info = {"config":{"params":params},"payload_schema":indexes}
+        backend["validate_collection"](info)
+        with patch.dict(params["vectors"]["dense"], distance="Dot"):
+            with self.assertRaises(RuntimeError):
+                backend["validate_collection"](info)
+        with patch.dict(indexes, clear=True):
+            with self.assertRaises(RuntimeError):
+                backend["validate_collection"](info)
+
+    def test_source_link_outside_allowed_roots(self):
+        backend = self.load()
+        with tempfile.TemporaryDirectory() as external:
+            client = self.home / "client"
+            client.mkdir()
+            (client / ".AI").symlink_to(external)
+            with self.assertRaisesRegex(RuntimeError, "scope_unavailable"):
+                backend["_stable_sources"]()
+
+    def test_non_v2_catalog_fails_before_mutation(self):
+        backend = self.load()
+        index = backend["cmd_index"]
+        def reject_write(path, method="GET", **kwargs):
+            self.assertEqual(method, "GET")
+            return {"result":{}}
+        with patch.dict(index.__globals__, qdrant=reject_write, validate_collection=lambda info: None,
+                        scroll_all=lambda fields: [{"id": "legacy", "payload": {}}]):
+            with self.assertRaisesRegex(RuntimeError, "migration_required"):
+                index(SimpleNamespace(force=False))
 
 if __name__ == '__main__':
     unittest.main()

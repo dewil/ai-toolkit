@@ -200,10 +200,6 @@ def bm25_query(text):
 
 # ------------------------------------------------------------------- коллекция
 
-def collection_exists():
-    return qdrant(f"/collections/{COLLECTION}", quiet=True) is not None
-
-
 def create_collection():
     qdrant(f"/collections/{COLLECTION}", "PUT", {
         "vectors": {"dense": {"size": DIM, "distance": "Cosine"}},
@@ -250,6 +246,14 @@ def _project_id(path):
 def _stable_sources():
     """Metadata-only discovery; return .AI roots without reading memory facts."""
     sources, legacy = {}, []
+    allowed = tuple(root.resolve(strict=True) for root in CLIENT_ROOTS)
+
+    def trusted_source(path):
+        real = path.resolve(strict=True)
+        if not any(real.is_relative_to(root) for root in allowed):
+            raise RuntimeError("scope_unavailable")
+        return real
+
     for container in CLIENT_ROOTS:
         try:
             clients = sorted(container.iterdir())
@@ -263,7 +267,9 @@ def _stable_sources():
             ai = client / ".AI"
             try:
                 if ai.is_dir():
-                    real_ai = ai.resolve(strict=True)
+                    real_ai = trusted_source(ai)
+                    if (real_ai / "memory").is_symlink():
+                        trusted_source(real_ai / "memory")
                     ident = _project_id(real_ai.parent)
                     memory = real_ai / "memory"
                     key = (ident, real_ai)
@@ -289,6 +295,7 @@ def _stable_sources():
                 if mem.is_dir():
                     real = mem.resolve(strict=True)
                     if real.parent.name == ".AI":
+                        trusted_source(real)
                         client_root = real.parent.parent
                         ident = _project_id(client_root)
                         key = (ident, real.parent)
@@ -448,13 +455,26 @@ def _validate_v2_catalog(points):
         seen.add(expected)
 
 
+def validate_collection(info):
+    params = info["config"]["params"]
+    dense = params.get("vectors", {}).get("dense", {})
+    sparse = params.get("sparse_vectors", {}).get("bm25", {})
+    if (dense.get("size") != DIM or dense.get("distance") != "Cosine"
+            or sparse.get("modifier") != "idf"):
+        raise RuntimeError("Incompatible vector schema")
+    indexes = info.get("payload_schema", {})
+    for field in ("project", "type", "project_id", "identity_schema"):
+        if indexes.get(field, {}).get("data_type") != "keyword":
+            raise RuntimeError("Incompatible payload schema")
+
+
 def cmd_index(args):
     if not _v2_enabled():
         raise RuntimeError("scope_unavailable")
     info = qdrant(f"/collections/{COLLECTION}", quiet=True)
     exists = info is not None
-    if exists and info["result"]["config"]["params"]["vectors"]["dense"]["size"] != DIM:
-        raise RuntimeError("collection dimension mismatch")
+    if exists:
+        validate_collection(info["result"])
     points = scroll_all(["identity_schema", "project_id", "relative_path", "hash", "project", "path"]) if exists else []
     if exists:
         _validate_v2_catalog(points)
